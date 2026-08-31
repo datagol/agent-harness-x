@@ -1,0 +1,23 @@
+# Apps (local experiments, servers, UIs)
+apps/
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Agent runtime state
+.agent_memory/
+.agent_sessions/
+output/
+
+# OS / editor
+.DS_Store
+.claude/
