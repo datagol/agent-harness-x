@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agent_harness import Agent, AgentConfig, HookContext, HookEvent
+from datagol_agent_harness import Agent, AgentConfig, HookContext, HookEvent
 
 
 HERE = Path(__file__).parent

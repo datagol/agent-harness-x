@@ -25,7 +25,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from agent_harness import (
+from datagol_agent_harness import (
     Agent,
     AgentConfig,
     HookContext,

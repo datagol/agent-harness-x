@@ -52,7 +52,7 @@ class ConversationMemory:
         self._max_result_chars = max_result_chars
         self._preview_lines = preview_lines
         self._eviction_dir = eviction_dir or os.path.join(
-            tempfile.gettempdir(), "agent_harness_tool_results"
+            tempfile.gettempdir(), "datagol_agent_harness_tool_results"
         )
         os.makedirs(self._eviction_dir, exist_ok=True)
 

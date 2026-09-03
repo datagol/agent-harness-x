@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from agent_harness.tools import ToolRegistry
-from agent_harness.types import PermissionLevel
+from datagol_agent_harness.tools import ToolRegistry
+from datagol_agent_harness.types import PermissionLevel
 
 
 def register_bash_tools(registry: ToolRegistry, sandbox=None) -> None:

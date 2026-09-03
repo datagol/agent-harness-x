@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from agent_harness.tools import ToolRegistry
-from agent_harness.types import PermissionLevel
+from datagol_agent_harness.tools import ToolRegistry
+from datagol_agent_harness.types import PermissionLevel
 
 
 def register_filesystem_tools(registry: ToolRegistry) -> None:
@@ -22,7 +22,7 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             content: The file content to write.
             display_name: Human-readable name for the download link.
         """
-        from agent_harness.builtin.file_output import make_downloadable
+        from datagol_agent_harness.builtin.file_output import make_downloadable
 
         full_path = os.path.abspath(path)
         os.makedirs(os.path.dirname(full_path) if os.path.dirname(full_path) else ".", exist_ok=True)

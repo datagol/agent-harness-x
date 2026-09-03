@@ -56,7 +56,7 @@ until the model stops with `end_turn`.
 
 ```python
 import asyncio
-from agent_harness import Agent, AgentConfig
+from datagol_agent_harness import Agent, AgentConfig
 
 agent = Agent(
     config=AgentConfig(
@@ -87,7 +87,7 @@ print(asyncio.run(agent.run("What is 17 + 25?")))
 You can also inject your own pieces — everything is a constructor parameter:
 
 ```python
-from agent_harness import (
+from datagol_agent_harness import (
     Agent, AgentConfig, ConversationMemory, HookManager,
     MiddlewarePipeline, PermissionManager, ToolRegistry,
 )
@@ -127,7 +127,7 @@ back to the function.
 ### Decorator registration
 
 ```python
-from agent_harness import PermissionLevel
+from datagol_agent_harness import PermissionLevel
 
 @agent.tools.register(permission=PermissionLevel.ALLOW)
 def add(a: int, b: int) -> int:
@@ -192,10 +192,10 @@ agent.tools.register_with_schema(
 
 ### Built-in tools
 
-`agent_harness.builtin` ships ready-made tool sets:
+`datagol_agent_harness.builtin` ships ready-made tool sets:
 
 ```python
-from agent_harness.builtin import register_all_tools
+from datagol_agent_harness.builtin import register_all_tools
 
 register_all_tools(agent.tools)
 # read_file, write_file, list_directory, run_bash, fetch_url, memory tools...
@@ -221,7 +221,7 @@ returning one final string. It mirrors `Agent`'s constructor.
 
 ```python
 import asyncio
-from agent_harness import AgentConfig, StreamingAgent, StreamEventType
+from datagol_agent_harness import AgentConfig, StreamingAgent, StreamEventType
 
 agent = StreamingAgent(config=AgentConfig(system_prompt="You are helpful."))
 
@@ -261,8 +261,8 @@ runs the specialist to completion and returns its text as the tool result.
 
 ```python
 import asyncio
-from agent_harness import Agent, AgentConfig, PermissionLevel
-from agent_harness.builtin.web import register_web_tools
+from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
+from datagol_agent_harness.builtin.web import register_web_tools
 
 
 async def run_research_agent(query: str) -> str:
@@ -344,7 +344,7 @@ A path can be a folder containing `SKILL.md`, or a markdown file directly.
 ### Loading skills into an agent
 
 ```python
-from agent_harness import Agent, AgentConfig
+from datagol_agent_harness import Agent, AgentConfig
 
 agent = Agent(
     config=AgentConfig(
@@ -361,7 +361,7 @@ agent = Agent(
 The `skills=` argument accepts a list of paths or a `SkillManager`:
 
 ```python
-from agent_harness import SkillManager
+from datagol_agent_harness import SkillManager
 
 manager = SkillManager.from_paths(["./skills/commit-message"])
 agent = Agent(config=AgentConfig(system_prompt="..."), skills=manager)
@@ -375,7 +375,7 @@ for s in agent.skills.list():
 A `SKILL_INVOKED` hook fires when the model loads a skill:
 
 ```python
-from agent_harness import HookContext, HookEvent
+from datagol_agent_harness import HookContext, HookEvent
 
 async def on_skill(ctx: HookContext):
     if ctx.data.get("found"):
@@ -410,7 +410,7 @@ agent.memory.set_messages(saved)   # restore
 to the model through tools you write:
 
 ```python
-from agent_harness import AgentMemory, PermissionLevel
+from datagol_agent_harness import AgentMemory, PermissionLevel
 
 memory = AgentMemory(storage_dir=".agent_memory/agent")
 
@@ -439,7 +439,7 @@ async def search_memory(query: str = "") -> str:
 `LongTermMemory` stores categorized facts with ids:
 
 ```python
-from agent_harness import LongTermMemory
+from datagol_agent_harness import LongTermMemory
 
 long_term = LongTermMemory(storage_dir=".agent_memory/long_term")
 fact_id = long_term.save("User prefers dark mode", category="preference")
@@ -461,7 +461,7 @@ Every tool has a level: `ALLOW` (run silently), `ASK` (prompt the user
 y/n/always), or `DENY` (never run). The default at registration is `ASK`.
 
 ```python
-from agent_harness import PermissionLevel
+from datagol_agent_harness import PermissionLevel
 
 # At registration
 @agent.tools.register(permission=PermissionLevel.ALLOW)
@@ -479,7 +479,7 @@ your transport).
 ### Guardrails
 
 ```python
-from agent_harness import GuardrailsEngine, MaxIterationsError, CostLimitError
+from datagol_agent_harness import GuardrailsEngine, MaxIterationsError, CostLimitError
 
 agent.guardrails.max_cost_dollars = 0.50   # raises CostLimitError past this
 agent.guardrails.usage_summary             # tokens + estimated cost so far
@@ -495,7 +495,7 @@ agent.guardrails.reset()                   # reset counters
 ### Hooks — observe the lifecycle
 
 ```python
-from agent_harness import HookContext, HookEvent
+from datagol_agent_harness import HookContext, HookEvent
 
 @agent.hooks.before_tool
 async def log_call(ctx: HookContext):
@@ -520,7 +520,7 @@ Events: `AGENT_START`, `AGENT_END`, `LOOP_ITERATION_START`,
 Subclass `Middleware` to mutate messages, tool calls, or results as they flow:
 
 ```python
-from agent_harness import Middleware
+from datagol_agent_harness import Middleware
 
 class RedactSecrets(Middleware):
     async def before_tool_execution(self, tool_call):
@@ -544,7 +544,7 @@ remote SSE) and registers their tools into your agent's registry, so MCP
 tools look exactly like native tools to the model.
 
 ```python
-from agent_harness import Agent, AgentConfig, MCPManager
+from datagol_agent_harness import Agent, AgentConfig, MCPManager
 
 mcp = MCPManager()
 await mcp.connect(
@@ -574,13 +574,13 @@ Save and restore an agent's conversation:
 session_id = await agent.save_session()            # -> writes .agent_sessions/
 
 # later, or in another process:
-from agent_harness import Agent
+from datagol_agent_harness import Agent
 restored = await Agent.load_session(session_id, config=AgentConfig(system_prompt="..."))
 await restored.run("Where were we?")
 ```
 
 For managed multi-session services (checkpointing, pause/resume, expiry),
-see `AgentRuntime` in `agent_harness/runtime.py`.
+see `AgentRuntime` in `datagol_agent_harness/runtime.py`.
 
 ---
 
@@ -595,7 +595,7 @@ The harness is transport-agnostic. The pattern used by
 
 ```python
 from fastapi import FastAPI, WebSocket
-from agent_harness import AgentConfig, StreamingAgent, StreamEventType
+from datagol_agent_harness import AgentConfig, StreamingAgent, StreamEventType
 
 app = FastAPI()
 agents: dict[str, StreamingAgent] = {}
@@ -638,23 +638,23 @@ Run the full example:
 
 | Class / function | Module | Purpose |
 |---|---|---|
-| `Agent` | `agent_harness` | Core agentic loop (`await agent.run(msg)`) |
-| `StreamingAgent` | `agent_harness` | Event-streaming variant (`run_stream`) |
-| `AgentConfig` | `agent_harness` | Model, provider, limits, prompt |
-| `ToolRegistry` | `agent_harness` | `register`, `register_with_schema`, `execute` |
-| `PermissionLevel` | `agent_harness` | `ALLOW` / `ASK` / `DENY` |
-| `PermissionManager` | `agent_harness` | Per-tool overrides, session grants |
-| `GuardrailsEngine` | `agent_harness` | Iteration/cost limits, usage stats |
-| `ConversationMemory` | `agent_harness` | Message list with auto-trimming |
-| `AgentMemory` / `LongTermMemory` | `agent_harness` | Disk-backed notes / facts |
-| `PersistentMemory` | `agent_harness` | Session save/load |
-| `HookManager` / `HookEvent` | `agent_harness` | Lifecycle hooks |
-| `Middleware` / `MiddlewarePipeline` | `agent_harness` | Request/result transforms |
-| `SkillManager` | `agent_harness` | Lazy skill loading |
-| `MCPManager` | `agent_harness` | MCP server connections |
-| `Sandbox` | `agent_harness` | Sandboxed code execution |
-| `AgentRuntime` | `agent_harness` | Managed sessions, checkpoints |
-| `register_all_tools` | `agent_harness.builtin` | Filesystem, bash, web, memory tools |
+| `Agent` | `datagol_agent_harness` | Core agentic loop (`await agent.run(msg)`) |
+| `StreamingAgent` | `datagol_agent_harness` | Event-streaming variant (`run_stream`) |
+| `AgentConfig` | `datagol_agent_harness` | Model, provider, limits, prompt |
+| `ToolRegistry` | `datagol_agent_harness` | `register`, `register_with_schema`, `execute` |
+| `PermissionLevel` | `datagol_agent_harness` | `ALLOW` / `ASK` / `DENY` |
+| `PermissionManager` | `datagol_agent_harness` | Per-tool overrides, session grants |
+| `GuardrailsEngine` | `datagol_agent_harness` | Iteration/cost limits, usage stats |
+| `ConversationMemory` | `datagol_agent_harness` | Message list with auto-trimming |
+| `AgentMemory` / `LongTermMemory` | `datagol_agent_harness` | Disk-backed notes / facts |
+| `PersistentMemory` | `datagol_agent_harness` | Session save/load |
+| `HookManager` / `HookEvent` | `datagol_agent_harness` | Lifecycle hooks |
+| `Middleware` / `MiddlewarePipeline` | `datagol_agent_harness` | Request/result transforms |
+| `SkillManager` | `datagol_agent_harness` | Lazy skill loading |
+| `MCPManager` | `datagol_agent_harness` | MCP server connections |
+| `Sandbox` | `datagol_agent_harness` | Sandboxed code execution |
+| `AgentRuntime` | `datagol_agent_harness` | Managed sessions, checkpoints |
+| `register_all_tools` | `datagol_agent_harness.builtin` | Filesystem, bash, web, memory tools |
 
 ## Runnable examples
 

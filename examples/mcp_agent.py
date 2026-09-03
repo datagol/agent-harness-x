@@ -4,7 +4,7 @@ Demonstrates connecting to MCP servers and using their tools transparently
 alongside native tools. The agent sees all tools (native + MCP) the same way.
 
 Prerequisites:
-    pip install 'agent-harness[mcp]'
+    pip install 'datagol-agent-harness[mcp]'
 
 Example MCP servers to try:
     # Filesystem server (npx)
@@ -23,7 +23,7 @@ import argparse
 import asyncio
 import sys
 
-from agent_harness import (
+from datagol_agent_harness import (
     Agent,
     AgentConfig,
     MCPManager,
@@ -38,7 +38,7 @@ from examples._console import (
     print_response,
     print_status,
 )
-from agent_harness.builtin.filesystem import register_filesystem_tools
+from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
 
 
 async def main():

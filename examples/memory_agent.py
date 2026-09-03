@@ -10,7 +10,7 @@ Run: python -m examples.memory_agent
 import asyncio
 import json
 
-from agent_harness import AgentConfig, AgentMemory, LongTermMemory, PermissionLevel, StreamingAgent
+from datagol_agent_harness import AgentConfig, AgentMemory, LongTermMemory, PermissionLevel, StreamingAgent
 from examples._console import (
     console,
     get_user_input,
@@ -19,7 +19,7 @@ from examples._console import (
     print_error,
     print_status,
 )
-from agent_harness.builtin import register_all_tools
+from datagol_agent_harness.builtin import register_all_tools
 
 MEMORY_DIR = ".agent_memory/agent"
 LONG_TERM_DIR = ".agent_memory/long_term"

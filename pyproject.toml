@@ -1,5 +1,5 @@
 [project]
-name = "agent-harness"
+name = "datagol-agent-harness"
 version = "0.2.0"
 description = "A DIY agent harness with provider-agnostic LLM support (Anthropic, OpenAI), MCP, skills, and sandboxed tools."
 requires-python = ">=3.11"
@@ -33,8 +33,8 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["agent_harness*"]
+include = ["datagol_agent_harness*"]
 exclude = ["apps*", "examples*", "tests*"]
 
 [tool.setuptools.package-data]
-agent_harness = ["py.typed"]
+datagol_agent_harness = ["py.typed"]

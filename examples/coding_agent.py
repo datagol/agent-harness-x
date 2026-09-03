@@ -9,7 +9,7 @@ Run: python -m examples.coding_agent
 import asyncio
 import logging
 
-from agent_harness import (
+from datagol_agent_harness import (
     AgentConfig,
     Middleware,
     MiddlewarePipeline,
@@ -17,8 +17,8 @@ from agent_harness import (
     StreamingAgent,
 )
 from examples._console import console, get_user_input, handle_stream_event, print_banner, print_error, print_status
-from agent_harness.builtin.bash import register_bash_tools
-from agent_harness.builtin.filesystem import register_filesystem_tools
+from datagol_agent_harness.builtin.bash import register_bash_tools
+from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger("coding_agent")

@@ -6,8 +6,8 @@ subscribe to hooks, install middleware, mutate the system prompt, and
 publish per-session cleanup via teardown().
 
 Usage:
-    from agent_harness import Agent, AgentConfig
-    from agent_harness.extensions import ResultSpillExtension
+    from datagol_agent_harness import Agent, AgentConfig
+    from datagol_agent_harness.extensions import ResultSpillExtension
 
     agent = Agent(
         config=AgentConfig(...),

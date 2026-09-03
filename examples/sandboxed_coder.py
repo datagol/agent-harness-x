@@ -8,7 +8,7 @@ Run: python -m examples.sandboxed_coder
 
 import asyncio
 
-from agent_harness import (
+from datagol_agent_harness import (
     AgentConfig,
     AgentRuntime,
     PermissionLevel,
@@ -25,7 +25,7 @@ from examples._console import (
     print_response,
     print_status,
 )
-from agent_harness.builtin.filesystem import register_filesystem_tools
+from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
 
 
 async def main():

@@ -25,7 +25,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "OpenAIProvider requires the openai package. "
-        "Install with: pip install 'agent-harness[openai]'"
+        "Install with: pip install 'datagol-agent-harness[openai]'"
     ) from e
 
 from .base import LLMProvider, ProviderResponse

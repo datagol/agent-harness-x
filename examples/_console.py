@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from agent_harness import HookContext, HookManager, StreamEvent, StreamEventType
+from datagol_agent_harness import HookContext, HookManager, StreamEvent, StreamEventType
 
 theme = Theme(
     {

@@ -9,7 +9,7 @@ Run: python -m examples.multi_agent
 
 import asyncio
 
-from agent_harness import Agent, AgentConfig, PermissionLevel
+from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
 from examples._console import (
     get_user_input,
     print_banner,
@@ -18,9 +18,9 @@ from examples._console import (
     print_response,
     print_status,
 )
-from agent_harness.builtin.bash import register_bash_tools
-from agent_harness.builtin.filesystem import register_filesystem_tools
-from agent_harness.builtin.web import register_web_tools
+from datagol_agent_harness.builtin.bash import register_bash_tools
+from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
+from datagol_agent_harness.builtin.web import register_web_tools
 
 
 async def run_code_review_agent(code: str, instructions: str) -> str:
