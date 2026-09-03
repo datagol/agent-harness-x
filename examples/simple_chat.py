@@ -8,7 +8,7 @@ Run: python -m examples.simple_chat
 
 import asyncio
 
-from agent_harness import AgentConfig, PermissionLevel, StreamingAgent
+from datagol_agent_harness import AgentConfig, PermissionLevel, StreamingAgent
 
 from examples._console import console, get_user_input, handle_stream_event, print_banner, print_error, print_status
 from examples.grocery_prompt import SYSTEM_PROMPT
@@ -91,8 +91,8 @@ def _handle_client_action(tool_call) -> None:
 
 
 def _register_grocery_tools(agent: StreamingAgent, state: dict) -> None:
-    """Same six functions as the web app; kept in one place."""
-    from agent_harness.grocery.tools import register_grocery_tools
+    """Register the six GroceryBuddy functions (see examples/grocery_tools.py)."""
+    from examples.grocery_tools import register_grocery_tools
 
     register_grocery_tools(agent, state)
 
