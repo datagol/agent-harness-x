@@ -35,11 +35,6 @@ jobs:
     needs:
       - build
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/datagol-agent-harness
-    permissions:
-      id-token: write  # Mandatory for Trusted Publishing (OIDC)
 
     steps:
       - name: Download distribution packages
@@ -48,15 +43,8 @@ jobs:
           name: python-package-distributions
           path: dist/
 
-      - name: Publish to PyPI (Token fallback)
-        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+      - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
-          skip-existing: true
-
-      - name: Publish to PyPI (Trusted Publishing OIDC)
-        if: ${{ secrets.PYPI_API_TOKEN == '' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
           skip-existing: true
