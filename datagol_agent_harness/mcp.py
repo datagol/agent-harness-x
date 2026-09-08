@@ -108,12 +108,23 @@ class MCPConnection:
             # Try streamable HTTP first (modern transport), fall back to SSE
             connected = False
             try:
-                from mcp.client.streamable_http import streamablehttp_client
+                try:
+                    from mcp.client.streamable_http import streamable_http_client
+                except ImportError:
+                    from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
+
+                client_kwargs: dict[str, Any] = {}
+                if self.config.headers:
+                    try:
+                        from mcp.client.streamable_http import httpx2
+                        client_kwargs["http_client"] = httpx2.AsyncClient(headers=self.config.headers)
+                    except Exception:
+                        import httpx
+                        client_kwargs["http_client"] = httpx.AsyncClient(headers=self.config.headers)
 
                 result = await self._exit_stack.enter_async_context(
-                    streamablehttp_client(self.config.url, headers=self.config.headers)
+                    streamable_http_client(self.config.url, **client_kwargs)
                 )
-                # streamablehttp_client returns (read, write, get_session_id)
                 read, write = result[0], result[1]
                 connected = True
                 logger.info(f"MCP '{self.config.name}': connected via streamable HTTP")
@@ -147,11 +158,23 @@ class MCPConnection:
         tools_result = await self.session.list_tools()
         self._tools = []
         for tool in tools_result.tools:
+            raw_schema = (
+                getattr(tool, "input_schema", None)
+                or getattr(tool, "inputSchema", None)
+                or {}
+            )
+            if not isinstance(raw_schema, dict):
+                raw_schema = dict(raw_schema) if hasattr(raw_schema, "__dict__") else {}
+            if not raw_schema.get("type"):
+                raw_schema = {**raw_schema, "type": "object"}
+            if "properties" not in raw_schema:
+                raw_schema = {**raw_schema, "properties": {}}
+
             self._tools.append(MCPToolInfo(
                 server_name=self.config.name,
                 tool_name=tool.name,
                 description=tool.description or tool.name,
-                input_schema=tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                input_schema=raw_schema,
             ))
 
         logger.info(

@@ -216,14 +216,21 @@ class ToolRegistry:
 
     def get_tool_params(self) -> list[dict[str, Any]]:
         """Convert all registered tools to canonical ToolParam format."""
-        return [
-            {
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            }
-            for t in self._tools.values()
-        ]
+        params: list[dict[str, Any]] = []
+        for t in self._tools.values():
+            schema = t.input_schema if isinstance(t.input_schema, dict) else {}
+            if not schema.get("type"):
+                schema = {**schema, "type": "object"}
+            if "properties" not in schema:
+                schema = {**schema, "properties": {}}
+            params.append(
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": schema,
+                }
+            )
+        return params
 
     def get_tools(self) -> list[ToolDefinition]:
         """Return all registered ToolDefinition objects."""
