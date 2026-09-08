@@ -79,8 +79,8 @@ from datagol_agent_harness import Agent, AgentConfig
 
 agent = Agent(
     config=AgentConfig(
-        model="claude-sonnet-4-6",      # or "gpt-5"
-        provider="anthropic",            # or "openai"
+        model="claude-sonnet-4-6",      # or "gpt-4o", "anthropic/claude-3.7-sonnet"
+        provider="anthropic",            # "anthropic", "openai", "gemini", or "openrouter"
         system_prompt="You are a helpful assistant.",
         max_tokens=8192,
         max_iterations=50,               # loop guardrail
@@ -96,7 +96,7 @@ print(asyncio.run(agent.run("What is 17 + 25?")))
 | Field | Default | Purpose |
 |---|---|---|
 | `model` | `"claude-sonnet-4-6"` | Model id passed to the provider |
-| `provider` | `"anthropic"` | `"anthropic"` or `"openai"` |
+| `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, or `"openrouter"` |
 | `max_tokens` | `8192` | Per-response token cap |
 | `max_iterations` | `50` | Max loop iterations before `MaxIterationsError` |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |

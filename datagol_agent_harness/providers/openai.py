@@ -79,6 +79,7 @@ class OpenAIProvider(LLMProvider):
             "messages": openai_messages,
             "max_completion_tokens": max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
@@ -86,24 +87,41 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = openai_tools
 
         collected_text = ""
+        collected_reasoning = ""
+        collected_usage = TokenUsage()
         finish_reason = None
         tool_call_chunks: dict[int, dict[str, Any]] = {}
 
         try:
             stream_resp = await self.client.chat.completions.create(**kwargs)
         except Exception as exc:
-            if "temperature" in str(exc) and "temperature" in kwargs:
+            retry = False
+            exc_str = str(exc).lower()
+            if "temperature" in exc_str and "temperature" in kwargs:
                 kwargs.pop("temperature", None)
+                retry = True
+            if "stream_options" in exc_str and "stream_options" in kwargs:
+                kwargs.pop("stream_options", None)
+                retry = True
+            if retry:
                 stream_resp = await self.client.chat.completions.create(**kwargs)
             else:
                 raise
         async for chunk in stream_resp:
+            if getattr(chunk, "usage", None):
+                collected_usage = _extract_token_usage(chunk.usage)
+
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
             delta = choice.delta
             if choice.finish_reason:
                 finish_reason = choice.finish_reason
+
+            reasoning = _extract_reasoning(delta)
+            if reasoning:
+                collected_reasoning += reasoning
+                yield StreamChunk(kind="thinking_delta", data=reasoning)
 
             if getattr(delta, "content", None):
                 text = delta.content
@@ -155,8 +173,9 @@ class OpenAIProvider(LLMProvider):
         final_response = ProviderResponse(
             text=collected_text,
             tool_calls=tool_calls,
+            thinking=collected_reasoning or None,
             stop_reason=stop_reason,
-            usage=TokenUsage(),
+            usage=collected_usage,
         )
         yield StreamChunk(kind="response", data=final_response)
 
@@ -266,12 +285,59 @@ def _to_openai_messages(
     return out
 
 
+def _extract_reasoning(obj: Any) -> str | None:
+    """Extract thinking/reasoning text from a delta or message object."""
+    if obj is None:
+        return None
+    val = getattr(obj, "reasoning", None) or getattr(obj, "reasoning_content", None)
+    if val:
+        return str(val)
+    model_extra = getattr(obj, "model_extra", None)
+    if isinstance(model_extra, dict):
+        val = model_extra.get("reasoning") or model_extra.get("reasoning_content")
+        if val:
+            return str(val)
+    if isinstance(obj, dict):
+        val = obj.get("reasoning") or obj.get("reasoning_content")
+        if val:
+            return str(val)
+    return None
+
+
+def _extract_token_usage(raw_usage: Any) -> TokenUsage:
+    """Normalize raw usage object or dict into canonical TokenUsage."""
+    if not raw_usage:
+        return TokenUsage()
+    if isinstance(raw_usage, dict):
+        p_details = raw_usage.get("prompt_tokens_details") or {}
+        cached = (
+            p_details.get("cached_tokens", 0)
+            if isinstance(p_details, dict)
+            else getattr(p_details, "cached_tokens", 0) or 0
+        )
+        return TokenUsage(
+            input_tokens=raw_usage.get("prompt_tokens", 0) or 0,
+            output_tokens=raw_usage.get("completion_tokens", 0) or 0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=cached,
+        )
+    return TokenUsage(
+        input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
+        output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=getattr(
+            getattr(raw_usage, "prompt_tokens_details", None), "cached_tokens", 0
+        ) or 0,
+    )
+
+
 def _from_openai_response(resp: Any) -> ProviderResponse:
     """Wrap an OpenAI ChatCompletion in canonical ProviderResponse."""
     choice = resp.choices[0]
     msg = choice.message
 
     text = msg.content or ""
+    reasoning = _extract_reasoning(msg)
     tool_calls: list[ToolCall] = []
     for tc in (msg.tool_calls or []):
         try:
@@ -296,18 +362,12 @@ def _from_openai_response(resp: Any) -> ProviderResponse:
         choice.finish_reason, StopReason.OTHER if choice.finish_reason else StopReason.END_TURN
     )
 
-    usage = TokenUsage(
-        input_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
-        output_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
-        cache_creation_input_tokens=0,
-        cache_read_input_tokens=getattr(
-            getattr(resp.usage, "prompt_tokens_details", None), "cached_tokens", 0
-        ) or 0,
-    )
+    usage = _extract_token_usage(getattr(resp, "usage", None))
 
     return ProviderResponse(
         text=text,
         tool_calls=tool_calls,
+        thinking=reasoning or None,
         stop_reason=stop_reason,
         usage=usage,
         raw=resp,

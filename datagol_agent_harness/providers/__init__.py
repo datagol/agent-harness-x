@@ -19,3 +19,10 @@ try:
     __all__.append("GeminiProvider")
 except ImportError:
     pass
+
+# OpenRouterProvider is gated on the openai SDK being installed.
+try:
+    from .openrouter import OpenRouterProvider  # noqa: F401
+    __all__.append("OpenRouterProvider")
+except ImportError:
+    pass
