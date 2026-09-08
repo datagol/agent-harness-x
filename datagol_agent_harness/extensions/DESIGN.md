@@ -50,7 +50,7 @@ Core principles:
   - `HookManager` + `HookEvent` — observe-only lifecycle events; exceptions swallowed.
   - `Middleware`/`MiddlewarePipeline` — transform messages, responses, tool calls, tool results.
   - `Extension` ABC (`extensions/base.py`) — `name` + `install(agent)` + `teardown()`; constructor-injected list; duplicate-name validation; reverse-order teardown. Extensions compose the primitives above (tools, hooks, middleware, system-prompt mutation). Reference implementation: `ResultSpillExtension` (spills oversized tool results to disk, registers a `read_result` tool).
-- **Ecosystem:** `SkillManager` (lazy SKILL.md catalog), `MCPManager` (stdio/SSE/HTTP MCP servers → tool registry), 4-layer memory (conversation/persistent/long-term/agent + vector store), `AgentRuntime` (sessions, checkpoints), FastAPI apps (`apps/server`, `apps/grocery_buddy`, `apps/dca`).
+- **Ecosystem:** `SkillManager` (lazy SKILL.md catalog), `MCPManager` (stdio/SSE/HTTP MCP servers → tool registry), 4-layer memory (conversation/persistent/long-term/agent + vector store), `AgentRuntime` (sessions, checkpoints), FastAPI web apps (`examples/web_app`, `apps/dca`).
 
 ---
 

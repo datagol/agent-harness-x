@@ -588,50 +588,41 @@ see `AgentRuntime` in `datagol_agent_harness/runtime.py`.
 
 ## 11. Shipping a web app
 
-The harness is transport-agnostic. The pattern used by
-`apps/grocery_buddy` (a complete reference implementation):
+The harness is transport-agnostic. The reference implementation in
+`examples/web_app` demonstrates:
 
-1. **One `StreamingAgent` per browser session**, held in a registry keyed by
-   a session id (cookie, localStorage value, etc.).
-2. **Translate `StreamEvent`s into your wire format** over a WebSocket:
+1. **Streaming agent execution** translated to Server-Sent Events (SSE) or WebSockets:
 
 ```python
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from datagol_agent_harness import AgentConfig, StreamingAgent, StreamEventType
+import json
 
 app = FastAPI()
-agents: dict[str, StreamingAgent] = {}
+agent = StreamingAgent(config=AgentConfig(system_prompt="You are helpful."))
 
-@app.websocket("/ws")
-async def chat(ws: WebSocket):
-    await ws.accept()
-    sid = ws.query_params.get("session") or "default"
-    agent = agents.setdefault(sid, StreamingAgent(config=AgentConfig(system_prompt="...")))
-
-    while True:
-        text = (await ws.receive_json())["text"]
-        async for event in agent.run_stream(text):
+@app.post("/api/stream")
+async def stream(req: dict):
+    async def event_generator():
+        async for event in agent.run_stream(req["message"]):
             if event.type == StreamEventType.TEXT_DELTA:
-                await ws.send_json({"type": "delta", "text": event.data})
+                yield f"data: {json.dumps({'type': 'text_delta', 'content': event.data})}\n\n"
             elif event.type == StreamEventType.TOOL_CALL_START:
-                await ws.send_json({"type": "tool", "name": event.data.name,
-                                    "input": event.data.input})
-        await ws.send_json({"type": "done"})
+                yield f"data: {json.dumps({'type': 'tool_call', 'name': event.data.name})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 ```
 
-3. **Register tools as `PermissionLevel.ALLOW`** — there is no stdin to ask
-   on in a server.
-4. **Use tool calls as structured UI actions.** In GroceryBuddy the model's
-   `propose_items` / `present_choice` / `respond_text` calls become proposal
-   cards and choice chips in the browser; `client_action` arguments drive
-   client-side behavior (open a screen, focus input). Tools that only fetch
-   (`get_staples`) stay silent.
+2. **Register tools as `PermissionLevel.ALLOW`** — in a server context, tools should be pre-approved or gated via an authorization middleware rather than interactive stdin prompts.
+3. **Built-in UI and MCP integrations** — the web app serves a complete browser UI that displays tool calls, token usage, MCP servers, and dynamic skills.
 
-Run the full example:
+Run the full example from the repo root:
 
 ```bash
-.venv/bin/uvicorn apps.grocery_buddy.server.main:app --port 4100
-# open http://localhost:4100
+uvicorn examples.web_app.server:app --port 8000 --reload
+# open http://localhost:8000
 ```
 
 ---
@@ -736,7 +727,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 
 | Example | Shows |
 |---|---|
-| `python -m examples.simple_chat` | Streaming chat + GroceryBuddy prompt/tools |
+| `python -m examples.simple_chat` | Streaming interactive chat + basic tools |
 | `python -m examples.multi_agent` | Orchestrator + specialist agents |
 | `python -m examples.langsmith_tracing` | LangSmith lifecycle tracing + multi-agent nesting |
 | `python -m examples.run_evals` | Agent evaluation suite with LangSmith |
@@ -745,4 +736,4 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `python -m examples.mcp_agent` | MCP tool integration |
 | `python -m examples.coding_agent` | Full coding assistant |
 | `python -m examples.sandboxed_coder` | Sandboxed execution |
-| `uvicorn apps.grocery_buddy.server.main:app --port 4100` | Web app over WebSocket |
+| `uvicorn examples.web_app.server:app --port 8000` | Web app with streaming UI, MCP, and skills |

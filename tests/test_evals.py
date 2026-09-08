@@ -27,12 +27,15 @@ from datagol_agent_harness.evals import (
     evaluate_agent,
     exact_match_evaluator,
     get_dataset,
+    get_evaluator,
     iteration_budget_evaluator,
     json_valid_evaluator,
     list_datasets,
+    list_evaluator_names,
     no_agent_errors_evaluator,
     no_tool_errors_evaluator,
     regex_evaluator,
+    resolve_evaluators,
     skill_invoked_evaluator,
     step_sequence_evaluator,
     subagent_delegated_evaluator,
@@ -344,6 +347,63 @@ class TestEvalFramework(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.scores.get("text_contains"), 1.0)
         self.assertEqual(summary.scores.get("no_tool_errors"), 1.0)
         self.assertEqual(len(summary.results), 1)
+
+    def test_evaluator_resolution_and_names(self):
+        """Test resolving individual evaluators by name, aliases, and comma-separated lists."""
+        names = list_evaluator_names()
+        self.assertIn("tool_selection", names)
+        self.assertIn("contains", names)
+        self.assertIn("llm_judge", names)
+
+        # Direct and alias lookups
+        ev1 = get_evaluator("tool_selection")
+        ev1_alias = get_evaluator("tools")
+        self.assertEqual(ev1, ev1_alias)
+
+        ev2 = get_evaluator("contains")
+        self.assertEqual(ev2, contains_evaluator)
+
+        # Comma-separated and multi-list resolution
+        resolved = resolve_evaluators(["tool_selection,contains", "iteration_budget"])
+        self.assertEqual(len(resolved), 3)
+        self.assertIn(tool_selection_evaluator, resolved)
+        self.assertIn(contains_evaluator, resolved)
+        self.assertIn(iteration_budget_evaluator, resolved)
+
+        # Invalid name raises ValueError
+        with self.assertRaises(ValueError):
+            get_evaluator("non_existent_evaluator_xyz")
+
+    def test_cli_evaluator_flag_parsing(self):
+        """Test that the CLI parser accepts --evaluator flags."""
+        from datagol_agent_harness.evals.cli import main
+        import argparse
+
+        # Build parser directly to test argument resolution
+        from unittest.mock import patch
+        test_argv = [
+            "cli.py",
+            "--suite",
+            "tool_calling",
+            "--evaluator",
+            "tool_selection",
+            "-e",
+            "contains,exact_match",
+            "--offline",
+        ]
+        with patch("sys.argv", test_argv):
+            with patch("datagol_agent_harness.evals.cli.evaluate_agent") as mock_evaluate:
+                mock_summary = MagicMock(pass_rate=1.0)
+                mock_evaluate.return_value = mock_summary
+                main()
+
+                mock_evaluate.assert_called_once()
+                call_kwargs = mock_evaluate.call_args[1]
+                evals_passed = call_kwargs["evaluators"]
+                self.assertEqual(len(evals_passed), 3)
+                self.assertIn(tool_selection_evaluator, evals_passed)
+                self.assertIn(contains_evaluator, evals_passed)
+                self.assertIn(exact_match_evaluator, evals_passed)
 
 
 if __name__ == "__main__":

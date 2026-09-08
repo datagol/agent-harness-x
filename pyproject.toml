@@ -40,3 +40,6 @@ exclude = ["apps*", "examples*", "tests*"]
 
 [tool.setuptools.package-data]
 datagol_agent_harness = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

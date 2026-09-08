@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence, Union
 from langsmith import evaluate
 from langsmith.schemas import Example, Run
 
+from .datasets.loader import sync_dataset_to_langsmith
 from .datasets.registry import get_dataset, list_datasets
 from .evaluators import default_evaluators
 from .target import AgentFactory, AgentOrFactory, AgentTarget
@@ -84,6 +85,20 @@ def evaluate_agent(
             data_to_evaluate = dataset
     else:
         data_to_evaluate = dataset
+
+    # If uploading results, LangSmith requires the dataset to exist in the cloud
+    if should_upload:
+        try:
+            if isinstance(dataset, str) and not isinstance(data_to_evaluate, str):
+                cloud_ds_name = f"datagol-{dataset.replace('_', '-')}"
+                sync_dataset_to_langsmith(cloud_ds_name, data_to_evaluate, client=client)
+                data_to_evaluate = cloud_ds_name
+            elif isinstance(data_to_evaluate, (list, tuple)) and data_to_evaluate and hasattr(data_to_evaluate[0], "inputs"):
+                cloud_ds_name = f"{experiment_prefix}-dataset"
+                sync_dataset_to_langsmith(cloud_ds_name, list(data_to_evaluate), client=client)
+                data_to_evaluate = cloud_ds_name
+        except Exception as e:
+            logger.warning("Failed to synchronize dataset to LangSmith: %s", e)
 
     eval_suite = list(evaluators) if evaluators is not None else default_evaluators()
 

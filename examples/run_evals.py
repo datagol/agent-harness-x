@@ -73,7 +73,8 @@ def main() -> None:
     parser.add_argument("--suite", default="tool_calling", help="Benchmark dataset name or 'custom'")
     args = parser.parse_args()
 
-    offline = args.offline or not os.getenv("LANGSMITH_API_KEY")
+    has_key = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
+    offline = args.offline or not has_key
 
     print("=" * 65)
     print("DataGOL Agent Harness — LangSmith Evaluation Demo")

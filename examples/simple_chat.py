@@ -1,7 +1,7 @@
-"""Minimal streaming agent: chat + filesystem tools.
+"""Minimal streaming agent: interactive chat with streaming events.
 
 Demonstrates the streaming agentic loop — text appears token-by-token,
-tool calls are shown as they happen.
+and tool calls are shown as they happen.
 
 Run: python -m examples.simple_chat
 """
@@ -9,25 +9,44 @@ Run: python -m examples.simple_chat
 import asyncio
 
 from datagol_agent_harness import AgentConfig, PermissionLevel, StreamingAgent
+from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
 
 from examples._console import console, get_user_input, handle_stream_event, print_banner, print_error, print_status
-from examples.grocery_prompt import SYSTEM_PROMPT
-from examples.grocery_state import grocery_state
 
 
 async def main():
     agent = StreamingAgent(
         config=AgentConfig(
-            system_prompt=SYSTEM_PROMPT,
-            temperature=1.0,
+            system_prompt=(
+                "You are a helpful AI assistant with access to tools. "
+                "Be concise and direct. Use tools when helpful."
+            ),
+            temperature=0.0,
         ),
     )
-    _register_grocery_tools(agent, grocery_state)
+
+    # Register basic tools
+    @agent.tools.register(permission=PermissionLevel.ALLOW)
+    def calculate(expression: str) -> str:
+        """Evaluate a mathematical expression.
+
+        Args:
+            expression: Arithmetic expression (e.g., '144 / 12' or '(25 * 4) + 50').
+        """
+        try:
+            return str(eval(expression, {"__builtins__": None}, {}))
+        except Exception as e:
+            return f"Error evaluating expression: {e}"
+
+    # Also register safe filesystem inspection tools
+    register_filesystem_tools(agent.tools)
+    agent.permissions.set_permission("list_directory", PermissionLevel.ALLOW)
+    agent.permissions.set_permission("read_file", PermissionLevel.ALLOW)
 
     print_banner(
         "DataGOL Agent Harness — Simple Chat",
         subtitle="Streaming mode",
-        commands={"quit": "Exit", "usage": "Token stats", "state": "Grocery list + memory"},
+        commands={"quit": "Exit", "usage": "Token stats"},
     )
 
     while True:
@@ -39,63 +58,17 @@ async def main():
         if user_input.lower() == "usage":
             print_status({"Usage": agent.guardrails.usage_summary})
             continue
-        if user_input.lower() == "state":
-            print_status({"Grocery state": _describe_state()})
-            continue
 
         try:
             console.print()
             async for event in agent.run_stream(user_input):
                 handle_stream_event(event)
-                if event.type.value == "tool_call_complete":
-                    _handle_client_action(event.data)
         except Exception as e:
             print_error(e)
 
     print("\nGoodbye!")
 
 
-def _describe_state() -> str:
-    parts = []
-    lst = grocery_state.get("list")
-    parts.append(f"list: {lst if lst else '(empty)'}")
-    mem = grocery_state.get("memory")
-    if mem and any(mem.values()):
-        parts.append(f"memory: { {k: v for k, v in sorted(mem.items()) if v} }")
-    else:
-        parts.append("memory: (empty)")
-    return " | ".join(parts)
-
-
-def _handle_client_action(tool_call) -> None:
-    """Act on the client_action argument of respond_text / present_choice."""
-    if tool_call.name not in ("respond_text", "present_choice"):
-        return
-    action = tool_call.input.get("client_action")
-    if not action:
-        return
-    if action == "show_recently_added":
-        status = grocery_state.get("staples_status")
-        staples = grocery_state.get("staples")
-        if status == "none":
-            console.print("  [dim cyan]→ client: no usuals saved yet[/dim cyan]")
-        else:
-            items = ", ".join(staples) if staples else "(none saved yet)"
-            console.print(f"  [dim cyan]→ client: usuals screen opened — {items}[/dim cyan]")
-    elif action == "focus_text_input":
-        console.print("  [dim cyan]→ client: focus text input[/dim cyan]")
-    elif action == "open_photo_picker":
-        console.print("  [dim cyan]→ client: photo picker opened[/dim cyan]")
-    else:
-        console.print(f"  [dim cyan]→ client action: {action}[/dim cyan]")
-
-
-def _register_grocery_tools(agent: StreamingAgent, state: dict) -> None:
-    """Register the six GroceryBuddy functions (see examples/grocery_tools.py)."""
-    from examples.grocery_tools import register_grocery_tools
-
-    register_grocery_tools(agent, state)
-
-
 if __name__ == "__main__":
     asyncio.run(main())
+

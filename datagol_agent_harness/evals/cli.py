@@ -19,12 +19,18 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+if not os.getenv("LANGSMITH_API_KEY") and os.getenv("LANGCHAIN_API_KEY"):
+    os.environ["LANGSMITH_API_KEY"] = os.environ["LANGCHAIN_API_KEY"]
+
 from ..core import Agent
 from ..permissions import PermissionLevel
 from ..skills import SkillManager
 from ..types import AgentConfig
 from .datasets.registry import list_datasets
-from .evaluators import default_evaluators
+from .evaluators import default_evaluators, list_evaluator_names, resolve_evaluators
 from .runner import evaluate_agent
 
 
@@ -167,6 +173,16 @@ def main() -> None:
         help="Upload evaluation results to LangSmith",
     )
     parser.add_argument(
+        "--evaluator",
+        "-e",
+        action="append",
+        dest="evaluators",
+        help=(
+            f"Specific evaluator(s) to run (can be used multiple times or comma-separated). "
+            f"Options: {', '.join(list_evaluator_names())}. Defaults to all standard evaluators."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         "-c",
         type=int,
@@ -188,9 +204,10 @@ def main() -> None:
 
     # Determine upload mode
     offline_mode = True
+    has_key = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
     if args.upload:
         offline_mode = False
-    elif not args.offline and os.getenv("LANGSMITH_API_KEY"):
+    elif not args.offline and has_key:
         offline_mode = False
 
     prefix = args.prefix or f"eval-{args.suite}-{args.model}"
@@ -201,10 +218,16 @@ def main() -> None:
         suite=args.suite,
     )
 
-    eval_suite = default_evaluators(
-        include_llm_judge=args.judge,
-        judge_model=args.model,
-    )
+    if args.evaluators:
+        eval_suite = resolve_evaluators(
+            args.evaluators,
+            judge_model=args.model,
+        )
+    else:
+        eval_suite = default_evaluators(
+            include_llm_judge=args.judge,
+            judge_model=args.model,
+        )
 
     try:
         summary = evaluate_agent(
