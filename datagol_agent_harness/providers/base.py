@@ -84,4 +84,7 @@ def make_provider(name: str, **kwargs: Any) -> LLMProvider:
     if name == "openai":
         from .openai import OpenAIProvider
         return OpenAIProvider(**kwargs)
-    raise ValueError(f"Unknown provider: {name!r} (expected 'anthropic' or 'openai')")
+    if name == "gemini":
+        from .gemini import GeminiProvider
+        return GeminiProvider(**kwargs)
+    raise ValueError(f"Unknown provider: {name!r} (expected 'anthropic', 'openai', or 'gemini')")

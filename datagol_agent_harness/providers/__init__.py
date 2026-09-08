@@ -12,3 +12,10 @@ try:
     __all__.append("OpenAIProvider")
 except ImportError:
     pass
+
+# GeminiProvider is gated on the google-genai SDK being installed.
+try:
+    from .gemini import GeminiProvider  # noqa: F401
+    __all__.append("GeminiProvider")
+except ImportError:
+    pass
