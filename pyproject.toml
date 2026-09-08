@@ -1,10 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "datagol-agent-harness"
 version = "0.2.0"
 description = "A DIY agent harness with provider-agnostic LLM support (Anthropic, OpenAI), MCP, skills, and sandboxed tools."
-requires-python = ">=3.11"
 readme = "README.md"
-license = { text = "MIT" }
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Jyotish Bora", email = "jyotish.bora@datagol.ai" },
+]
+keywords = ["agent", "llm", "anthropic", "openai", "mcp", "skills", "evals", "langsmith"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "anthropic>=0.83.0",
     "rich>=13.0.0",
@@ -30,9 +47,11 @@ all = [
     "python-dotenv>=1.0.0",
 ]
 
-[build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
+[project.urls]
+Homepage = "https://github.com/inncretech/datagol-agent-harness"
+Repository = "https://github.com/inncretech/datagol-agent-harness"
+Issues = "https://github.com/inncretech/datagol-agent-harness/issues"
+Documentation = "https://github.com/inncretech/datagol-agent-harness#readme"
 
 [tool.setuptools.packages.find]
 include = ["datagol_agent_harness*"]
