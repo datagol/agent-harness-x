@@ -36,7 +36,7 @@ class OpenAIProvider(LLMProvider):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> ProviderResponse:
         openai_messages = _to_openai_messages(messages, system)
         openai_tools = _to_openai_tools(tools)
@@ -45,8 +45,9 @@ class OpenAIProvider(LLMProvider):
             "model": model,
             "messages": openai_messages,
             "max_completion_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
 
@@ -68,7 +69,7 @@ class OpenAIProvider(LLMProvider):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamChunk]:
         openai_messages = _to_openai_messages(messages, system)
         openai_tools = _to_openai_tools(tools)
@@ -77,9 +78,10 @@ class OpenAIProvider(LLMProvider):
             "model": model,
             "messages": openai_messages,
             "max_completion_tokens": max_tokens,
-            "temperature": temperature,
             "stream": True,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
 

@@ -138,7 +138,7 @@ class AgentConfig:
     max_tokens: int = 8192
     max_iterations: int = 50
     system_prompt: str = "You are a helpful assistant."
-    temperature: float = 0.0
+    temperature: float | None = None
     max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
 
 

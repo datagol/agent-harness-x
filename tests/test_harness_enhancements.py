@@ -432,6 +432,23 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertIn("temperature", mock_messages.stream_calls[0])
         self.assertNotIn("temperature", mock_messages.stream_calls[1])
 
+        # 3. Test default temperature=None -> should omit temperature on first call
+        mock_messages.create_calls.clear()
+        await provider.create(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            system=None,
+            tools=[],
+            max_tokens=100,
+            temperature=None,
+        )
+        self.assertEqual(len(mock_messages.create_calls), 1)
+        self.assertNotIn("temperature", mock_messages.create_calls[0])
+
+    def test_agent_config_default_temperature_is_none(self):
+        config = AgentConfig()
+        self.assertIsNone(config.temperature)
+
 
 if __name__ == "__main__":
     unittest.main()

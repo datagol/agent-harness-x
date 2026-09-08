@@ -39,7 +39,7 @@ class AnthropicProvider(LLMProvider):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> ProviderResponse:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -72,7 +72,7 @@ class AnthropicProvider(LLMProvider):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamChunk]:
         kwargs: dict[str, Any] = {
             "model": model,

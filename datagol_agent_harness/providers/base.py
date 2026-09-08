@@ -27,7 +27,7 @@ class LLMProvider(ABC):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> ProviderResponse:
         """Single non-streaming completion. Returns canonical-shape response."""
 
@@ -39,7 +39,7 @@ class LLMProvider(ABC):
         system: str | None,
         tools: list[dict[str, Any]],
         max_tokens: int,
-        temperature: float,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream response from the provider.
         

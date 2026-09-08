@@ -48,7 +48,7 @@ class LLMJudgeEvaluator:
         model: str = "claude-sonnet-4-6",
         provider: str = "anthropic",
         prompt_template: str = DEFAULT_JUDGE_PROMPT,
-        temperature: float = 0.0,
+        temperature: float | None = None,
     ) -> None:
         self.model = model
         self.provider_name = provider

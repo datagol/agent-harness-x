@@ -84,7 +84,7 @@ agent = Agent(
         system_prompt="You are a helpful assistant.",
         max_tokens=8192,
         max_iterations=50,               # loop guardrail
-        temperature=0.0,
+        temperature=None,                # omitted by default for safety
     )
 )
 
@@ -100,7 +100,7 @@ print(asyncio.run(agent.run("What is 17 + 25?")))
 | `max_tokens` | `8192` | Per-response token cap |
 | `max_iterations` | `50` | Max loop iterations before `MaxIterationsError` |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
-| `temperature` | `0.0` | Sampling temperature |
+| `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `max_result_chars` | `12000` | Tool-result eviction threshold in memory |
 
 You can also inject your own pieces — everything is a constructor parameter:

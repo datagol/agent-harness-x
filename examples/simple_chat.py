@@ -21,7 +21,6 @@ async def main():
                 "You are a helpful AI assistant with access to tools. "
                 "Be concise and direct. Use tools when helpful."
             ),
-            temperature=0.0,
         ),
     )
 
