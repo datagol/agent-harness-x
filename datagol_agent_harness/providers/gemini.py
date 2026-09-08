@@ -26,6 +26,18 @@ Gemini 3.x specifics handled here:
   by model (e.g. gemini-3.8-flash rejects "minimal" while 3.6 accepts it).
   When unset, no thinking_config is sent and the model uses its default.
 
+* Explicit prompt caching is opt-in (constructor kwarg ``prompt_cache_ttl``
+  or env ``GEMINI_PROMPT_CACHE_TTL``, seconds; None/0 = disabled). When
+  enabled, the static prefix (system_instruction + tools) is uploaded once
+  via ``caches.create`` and referenced per call as ``cached_content``; Gemini
+  requires exclusivity, so the per-call config then omits system/tools.
+  Caching is an optimization, never a correctness dependency: any
+  ``caches.create`` failure logs a warning and the call runs uncached, and a
+  call failing on a stale/evicted cache name drops the registry entry and
+  retries once uncached. Note Gemini enforces a minimum cacheable size
+  (4,096 tokens on 3.x flash models); smaller prefixes fail ``caches.create``
+  and simply run uncached via the same fail-open path.
+
 Authentication: the genai client reads ``GEMINI_API_KEY`` (or
 ``GOOGLE_API_KEY``) from the environment; an explicit ``api_key`` kwarg wins.
 """
@@ -33,7 +45,11 @@ Authentication: the genai client reads ``GEMINI_API_KEY`` (or
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
+import logging
 import os
+import time
 import uuid
 from typing import Any, AsyncIterator
 
@@ -50,6 +66,17 @@ from .base import LLMProvider
 
 THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
 
+logger = logging.getLogger(__name__)
+
+_CACHE_TTL_MARGIN_S = 60  # recreate slightly before Gemini expires it
+
+
+def _is_stale_cache_error(exc: Exception) -> bool:
+    """True for a generate call that failed because its cached_content is
+    gone (evicted/expired server-side) — the 'drop and retry uncached' case."""
+    msg = str(exc).lower()
+    return "cachedcontent" in msg.replace("_", "") or "not found" in msg
+
 
 class GeminiProvider(LLMProvider):
     """Talks to Google's Gemini API (google-genai SDK) and normalizes
@@ -62,6 +89,7 @@ class GeminiProvider(LLMProvider):
         client: Any | None = None,
         api_key: str | None = None,
         thinking_level: str | None = None,
+        prompt_cache_ttl: int | None = None,
     ) -> None:
         if client is not None:
             self.client = client
@@ -73,6 +101,11 @@ class GeminiProvider(LLMProvider):
         self.thinking_level = thinking_level or os.environ.get(
             "GEMINI_THINKING_LEVEL"
         ) or None
+        if prompt_cache_ttl is None:
+            prompt_cache_ttl = int(os.environ.get("GEMINI_PROMPT_CACHE_TTL") or 0)
+        self.prompt_cache_ttl = prompt_cache_ttl or None  # None/0 = disabled
+        # key -> (cache_name, expires_at monotonic)
+        self._prompt_caches: dict[str, tuple[str, float]] = {}
 
     # ── request building ────────────────────────────────────────────────
 
@@ -97,6 +130,68 @@ class GeminiProvider(LLMProvider):
             config["thinking_config"] = {"thinking_level": self.thinking_level}
         return config
 
+    # ── explicit prompt caching (opt-in) ────────────────────────────────
+
+    def _cache_key(
+        self, model: str, system: str | None, tools: list[dict[str, Any]]
+    ) -> str:
+        payload = json.dumps(
+            {"m": model, "p": system or "", "t": _to_gemini_tools(tools)},
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    async def _cached_config(
+        self,
+        model: str,
+        system: str | None,
+        tools: list[dict[str, Any]],
+        base: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the generation config to send, using an explicit prompt
+        cache when enabled.
+
+        The cache holds system_instruction + tools (created once per
+        (model, system, tools) and reused until TTL); the per-call config
+        references it via ``cached_content`` and must then omit system/tools
+        (Gemini requires exclusivity). Fails open to ``base`` on any create
+        error — including prefixes below Gemini's minimum cacheable size
+        (4,096 tokens on 3.x flash models)."""
+        if not self.prompt_cache_ttl or not (system or tools):
+            return base
+        key = self._cache_key(model, system, tools)
+        now = time.monotonic()
+        cached = self._prompt_caches.get(key)
+        if cached is None or cached[1] <= now:
+            cache_config: dict[str, Any] = {"ttl": f"{self.prompt_cache_ttl}s"}
+            if system:
+                cache_config["system_instruction"] = system
+            if tools:
+                cache_config["tools"] = base["tools"]
+            try:
+                created = await self.client.aio.caches.create(
+                    model=model, config=cache_config
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Gemini prompt cache create failed; running uncached: %s", exc
+                )
+                return base
+            self._prompt_caches[key] = (
+                created.name,
+                now + max(60, self.prompt_cache_ttl - _CACHE_TTL_MARGIN_S),
+            )
+        config = {
+            k: v
+            for k, v in base.items()
+            if k not in ("system_instruction", "tools")
+        }
+        config["cached_content"] = self._prompt_caches[key][0]
+        return config
+
+    def _drop_cache(self, model: str, system: str | None, tools: list[dict[str, Any]]) -> None:
+        self._prompt_caches.pop(self._cache_key(model, system, tools), None)
+
     async def create(
         self,
         *,
@@ -107,11 +202,21 @@ class GeminiProvider(LLMProvider):
         max_tokens: int,
         temperature: float | None = None,
     ) -> ProviderResponse:
-        resp = await self.client.aio.models.generate_content(
-            model=model,
-            contents=_to_gemini_contents(messages),
-            config=self._build_config(system, tools, max_tokens, temperature),
-        )
+        base = self._build_config(system, tools, max_tokens, temperature)
+        config = await self._cached_config(model, system, tools, base)
+        contents = _to_gemini_contents(messages)
+        try:
+            resp = await self.client.aio.models.generate_content(
+                model=model, contents=contents, config=config
+            )
+        except Exception as exc:
+            if "cached_content" not in config or not _is_stale_cache_error(exc):
+                raise
+            # Stale/evicted cache name: drop it and retry this call uncached.
+            self._drop_cache(model, system, tools)
+            resp = await self.client.aio.models.generate_content(
+                model=model, contents=contents, config=base
+            )
         candidates = getattr(resp, "candidates", None) or []
         parts: list[Any] = []
         finish_reason = None
@@ -133,11 +238,21 @@ class GeminiProvider(LLMProvider):
         max_tokens: int,
         temperature: float | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        stream = await self.client.aio.models.generate_content_stream(
-            model=model,
-            contents=_to_gemini_contents(messages),
-            config=self._build_config(system, tools, max_tokens, temperature),
-        )
+        base = self._build_config(system, tools, max_tokens, temperature)
+        config = await self._cached_config(model, system, tools, base)
+        contents = _to_gemini_contents(messages)
+        try:
+            stream = await self.client.aio.models.generate_content_stream(
+                model=model, contents=contents, config=config
+            )
+        except Exception as exc:
+            if "cached_content" not in config or not _is_stale_cache_error(exc):
+                raise
+            # Stale/evicted cache name: drop it and retry this call uncached.
+            self._drop_cache(model, system, tools)
+            stream = await self.client.aio.models.generate_content_stream(
+                model=model, contents=contents, config=base
+            )
 
         all_parts: list[Any] = []
         finish_reason = None
