@@ -347,6 +347,91 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tool_results[0].is_error)
         self.assertIn("not found", tool_results[0].content)
 
+    async def test_anthropic_provider_temperature_fallback(self):
+        """Verify AnthropicProvider handles SDK versions or models rejecting temperature."""
+        from datagol_agent_harness.providers.anthropic import AnthropicProvider
+
+        class MockMessages:
+            def __init__(self):
+                self.create_calls = []
+                self.stream_calls = []
+
+            async def create(self, **kwargs):
+                self.create_calls.append(kwargs)
+                if "temperature" in kwargs:
+                    raise TypeError("AsyncMessages.create() got an unexpected keyword argument 'temperature'")
+                # Return dummy response
+                mock_resp = MagicMock()
+                mock_resp.content = [MagicMock(type="text", text="ok")]
+                mock_resp.stop_reason = "end_turn"
+                mock_resp.usage = MagicMock(input_tokens=10, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+                return mock_resp
+
+            def stream(self, **kwargs):
+                self.stream_calls.append(kwargs)
+                if "temperature" in kwargs:
+                    raise TypeError("AsyncMessages.stream() got an unexpected keyword argument 'temperature'")
+
+                class MockStreamContext:
+                    async def __aenter__(self):
+                        class StreamObj:
+                            @property
+                            def text_stream(self):
+                                async def _gen():
+                                    yield "streamed text"
+                                return _gen()
+
+                            async def get_final_message(self):
+                                mock_resp = MagicMock()
+                                mock_resp.content = [MagicMock(type="text", text="streamed text")]
+                                mock_resp.stop_reason = "end_turn"
+                                mock_resp.usage = MagicMock(input_tokens=10, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+                                return mock_resp
+                        return StreamObj()
+
+                    async def __aexit__(self, *args):
+                        pass
+
+                return MockStreamContext()
+
+        mock_client = MagicMock()
+        mock_messages = MockMessages()
+        mock_client.messages = mock_messages
+
+        provider = AnthropicProvider(client=mock_client)
+
+        # 1. Test create() with temperature -> should catch TypeError and retry without temperature
+        resp = await provider.create(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            system=None,
+            tools=[],
+            max_tokens=100,
+            temperature=0.7,
+        )
+        self.assertEqual(resp.text, "ok")
+        # First call had temperature, retry did not
+        self.assertEqual(len(mock_messages.create_calls), 2)
+        self.assertIn("temperature", mock_messages.create_calls[0])
+        self.assertNotIn("temperature", mock_messages.create_calls[1])
+
+        # 2. Test stream() with temperature -> should catch TypeError and retry without temperature
+        chunks = []
+        async for chunk in provider.stream(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            system=None,
+            tools=[],
+            max_tokens=100,
+            temperature=0.7,
+        ):
+            chunks.append(chunk)
+
+        self.assertGreaterEqual(len(chunks), 1)
+        self.assertEqual(len(mock_messages.stream_calls), 2)
+        self.assertIn("temperature", mock_messages.stream_calls[0])
+        self.assertNotIn("temperature", mock_messages.stream_calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

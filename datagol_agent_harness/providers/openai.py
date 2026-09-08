@@ -50,7 +50,14 @@ class OpenAIProvider(LLMProvider):
         if openai_tools:
             kwargs["tools"] = openai_tools
 
-        resp = await self.client.chat.completions.create(**kwargs)
+        try:
+            resp = await self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if "temperature" in str(exc) and "temperature" in kwargs:
+                kwargs.pop("temperature", None)
+                resp = await self.client.chat.completions.create(**kwargs)
+            else:
+                raise
         return _from_openai_response(resp)
 
     async def stream(
@@ -80,7 +87,14 @@ class OpenAIProvider(LLMProvider):
         finish_reason = None
         tool_call_chunks: dict[int, dict[str, Any]] = {}
 
-        stream_resp = await self.client.chat.completions.create(**kwargs)
+        try:
+            stream_resp = await self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if "temperature" in str(exc) and "temperature" in kwargs:
+                kwargs.pop("temperature", None)
+                stream_resp = await self.client.chat.completions.create(**kwargs)
+            else:
+                raise
         async for chunk in stream_resp:
             if not chunk.choices:
                 continue

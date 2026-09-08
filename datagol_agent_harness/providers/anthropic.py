@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from .base import LLMProvider
+
+
+def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Filter kwargs based on the callable's signature if it doesn't accept arbitrary **kwargs."""
+    try:
+        sig = inspect.signature(fn)
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(kwargs)
+        return {k: v for k, v in kwargs.items() if k in params}
+    except Exception:
+        return dict(kwargs)
 
 
 class AnthropicProvider(LLMProvider):
@@ -32,13 +45,23 @@ class AnthropicProvider(LLMProvider):
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "temperature": temperature,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if system:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
-        resp = await self.client.messages.create(**kwargs)
+
+        filtered_kwargs = _filter_kwargs(self.client.messages.create, kwargs)
+        try:
+            resp = await self.client.messages.create(**filtered_kwargs)
+        except TypeError as exc:
+            if "temperature" in str(exc) and "temperature" in filtered_kwargs:
+                filtered_kwargs.pop("temperature", None)
+                resp = await self.client.messages.create(**filtered_kwargs)
+            else:
+                raise
         return _from_anthropic_response(resp)
 
     async def stream(
@@ -55,14 +78,25 @@ class AnthropicProvider(LLMProvider):
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "temperature": temperature,
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if system:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
 
-        async with self.client.messages.stream(**kwargs) as stream:
+        filtered_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
+        try:
+            stream_ctx = self.client.messages.stream(**filtered_kwargs)
+        except TypeError as exc:
+            if "temperature" in str(exc) and "temperature" in filtered_kwargs:
+                filtered_kwargs.pop("temperature", None)
+                stream_ctx = self.client.messages.stream(**filtered_kwargs)
+            else:
+                raise
+
+        async with stream_ctx as stream:
             async for text in stream.text_stream:
                 yield StreamChunk(kind="text_delta", data=text)
             final_resp = await stream.get_final_message()
