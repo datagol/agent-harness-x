@@ -6,6 +6,7 @@ tool registry, memory, permissions, hooks, middleware, and optionally sandbox.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -18,7 +19,7 @@ from .providers import LLMProvider, make_provider
 from .sandbox import Sandbox
 from .skills import SkillManager
 from .tools import ToolRegistry
-from .types import AgentConfig, SessionState, TokenUsage, ToolCall, ToolResult
+from .types import AgentConfig, SessionState, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult
 
 
 class Agent:
@@ -70,6 +71,8 @@ class Agent:
         self.mcp = mcp
         self.guardrails = GuardrailsEngine(max_iterations=self.config.max_iterations)
         self._session_id = str(uuid.uuid4())
+        self.prompt_providers: list[Any] = []
+        self.session_metadata: dict[str, Any] = {}
 
         if skills is not None:
             self.skills = (
@@ -93,10 +96,12 @@ class Agent:
         """Run the full agentic loop until the LLM produces a final text response.
 
         This is the main entry point. It:
-        1. Adds the user message to memory
-        2. Enters the agentic loop
-        3. Returns the final text output
+        1. Resets turn-level loop guardrails
+        2. Adds the user message to memory
+        3. Enters the agentic loop
+        4. Returns the final text output
         """
+        self.guardrails.reset_turn()
         self.memory.add_user_message(user_message)
 
         await self.hooks.emit(
@@ -138,10 +143,11 @@ class Agent:
 
             # Trim memory if approaching context limit
             tool_params = self.tools.get_tool_params()
+            effective_system = self._build_system_prompt()
             await self.memory.trim_if_needed(
                 self.provider,
                 self.config.model,
-                self.config.system_prompt or "",
+                effective_system,
                 tool_params,
             )
 
@@ -161,7 +167,7 @@ class Agent:
             response = await self.provider.create(
                 model=self.config.model,
                 messages=messages,
-                system=self.config.system_prompt or None,
+                system=effective_system or None,
                 tools=tool_params,
                 max_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
@@ -185,17 +191,23 @@ class Agent:
             self.memory.add_assistant_message(response.content)
 
             # Check stop reason
-            if response.stop_reason == "end_turn":
+            if response.stop_reason in ("end_turn", StopReason.END_TURN):
                 return self._extract_text(response)
 
-            if response.stop_reason == "tool_use":
+            elif response.stop_reason in ("tool_use", StopReason.TOOL_USE, StopReason.TOOL_CALLS):
                 tool_results = await self._handle_tool_calls(response)
+                if not tool_results:
+                    return self._extract_text(response) or "[Model completed turn without tool calls]"
                 self.memory.add_tool_results(tool_results)
                 # Loop continues...
 
-            elif response.stop_reason == "max_tokens":
+            elif response.stop_reason in ("max_tokens", StopReason.MAX_TOKENS):
                 text = self._extract_text(response)
                 return text + "\n[truncated: max_tokens reached]"
+
+            else:
+                text = self._extract_text(response)
+                return text or f"[Completed with stop reason: {response.stop_reason}]"
 
             await self.hooks.emit(
                 HookEvent.LOOP_ITERATION_END,
@@ -208,70 +220,111 @@ class Agent:
 
         return ""  # Unreachable, but makes type checker happy
 
+    def _build_system_prompt(self) -> str:
+        """Compose static system prompt with dynamic prompt providers."""
+        prompt = self.config.system_prompt or ""
+        for provider_fn in self.prompt_providers:
+            try:
+                extra = provider_fn()
+                if extra:
+                    prompt = f"{prompt}\n\n{extra}" if prompt else extra
+            except Exception:
+                pass
+        return prompt
+
     async def _handle_tool_calls(self, response: Any) -> list[ToolResult]:
-        """Process all tool calls in an LLM response."""
+        """Process all tool calls in an LLM response with concurrent execution when supported."""
+        raw_tool_calls: list[ToolCall] = []
+
+        if getattr(response, "tool_calls", None):
+            raw_tool_calls = list(response.tool_calls)
+        elif getattr(response, "content", None):
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    raw_tool_calls.append(
+                        ToolCall(
+                            id=getattr(block, "id", ""),
+                            name=getattr(block, "name", ""),
+                            input=getattr(block, "input", {}) or {},
+                        )
+                    )
+
+        if not raw_tool_calls:
+            return []
+
         tool_results: list[ToolResult] = []
+        approved_calls: list[tuple[ToolCall, ToolDefinition]] = []
 
-        for block in response.content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-
-            tool_call = ToolCall(id=block.id, name=block.name, input=block.input)
-
-            # Permission check
+        for tool_call in raw_tool_calls:
             try:
                 tool_def = self.tools.get_tool(tool_call.name)
             except Exception as e:
-                tool_results.append(ToolResult(
-                    tool_use_id=tool_call.id,
-                    content=str(e),
-                    is_error=True,
-                ))
+                tool_results.append(
+                    ToolResult(
+                        tool_call_id=tool_call.id,
+                        content=str(e),
+                        is_error=True,
+                    )
+                )
                 continue
 
             allowed = await self.permissions.check_permission(tool_call, tool_def)
-
             if not allowed:
-                tool_results.append(ToolResult(
-                    tool_use_id=tool_call.id,
-                    content="Permission denied: tool execution was blocked by the user.",
-                    is_error=True,
-                ))
+                tool_results.append(
+                    ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="Permission denied: tool execution was blocked by the user.",
+                        is_error=True,
+                    )
+                )
                 continue
 
-            # Execute with hooks and middleware
+            approved_calls.append((tool_call, tool_def))
+
+        if not approved_calls:
+            return tool_results
+
+        async def _execute_single(tc: ToolCall) -> ToolResult:
             await self.hooks.emit(
                 HookEvent.TOOL_CALL_START,
                 HookContext(
                     event=HookEvent.TOOL_CALL_START,
                     agent=self,
-                    data={"tool_call": tool_call},
+                    data={"tool_call": tc},
                 ),
             )
-
-            tool_call = await self.middleware.process_tool_call(tool_call)
-            result = await self.tools.execute(tool_call)
-            result = await self.middleware.process_tool_result(result)
-
+            transformed_call = await self.middleware.process_tool_call(tc)
+            res = await self.tools.execute(transformed_call)
+            transformed_res = await self.middleware.process_tool_result(res)
             await self.hooks.emit(
                 HookEvent.TOOL_CALL_END,
                 HookContext(
                     event=HookEvent.TOOL_CALL_END,
                     agent=self,
-                    data={"tool_call": tool_call, "result": result},
+                    data={"tool_call": transformed_call, "result": transformed_res},
                 ),
             )
+            return transformed_res
 
-            tool_results.append(result)
+        all_concurrent = all(getattr(tdef, "concurrent", True) for _, tdef in approved_calls)
+        if all_concurrent and len(approved_calls) > 1:
+            parallel_results = await asyncio.gather(*[_execute_single(tc) for tc, _ in approved_calls])
+            tool_results.extend(parallel_results)
+        else:
+            for tc, _ in approved_calls:
+                res = await _execute_single(tc)
+                tool_results.append(res)
 
         return tool_results
 
     def _extract_text(self, response: Any) -> str:
-        """Extract concatenated text from all TextBlock content blocks."""
+        """Extract concatenated text from all TextBlock content blocks or response.text."""
+        if getattr(response, "text", ""):
+            return response.text
         parts: list[str] = []
-        for block in response.content:
+        for block in getattr(response, "content", []):
             if getattr(block, "type", None) == "text":
-                parts.append(block.text)
+                parts.append(getattr(block, "text", ""))
         return "\n".join(parts)
 
     # ── Session persistence ──────────────────────────────────────────────
@@ -279,10 +332,26 @@ class Agent:
     async def save_session(self, storage_dir: str = ".agent_sessions") -> str:
         """Save current session state to disk. Returns session_id."""
         storage = PersistentMemory(storage_dir)
+
+        # Allow extensions to contribute state
+        from .extensions.base import ExtensionContext
+        ctx = ExtensionContext(self)
+        ext_state: dict[str, Any] = {}
+        for ext in getattr(self, "extensions", []):
+            try:
+                s = await ext.on_save_session(ctx)
+                if s:
+                    ext_state[ext.name] = s
+            except Exception as e:
+                print(f"[extension {ext.name}] on_save_session failed: {e}")
+        if ext_state:
+            self.session_metadata.setdefault("extensions", {}).update(ext_state)
+
         state = SessionState(
             session_id=self._session_id,
             messages=self.memory.get_messages(),
             total_usage=self.guardrails.total_usage,
+            metadata=dict(self.session_metadata),
         )
         storage.save_session(state)
         return self._session_id
@@ -302,6 +371,20 @@ class Agent:
         agent._session_id = state.session_id
         agent.memory.set_messages(state.messages)
         agent.guardrails._total_usage = state.total_usage
+        agent.session_metadata = dict(state.metadata) if state.metadata else {}
+
+        # Restore extension state
+        if state.metadata and "extensions" in state.metadata:
+            from .extensions.base import ExtensionContext
+            ctx = ExtensionContext(agent)
+            ext_data = state.metadata["extensions"]
+            for ext in getattr(agent, "extensions", []):
+                if ext.name in ext_data:
+                    try:
+                        await ext.on_load_session(ctx, ext_data[ext.name])
+                    except Exception as e:
+                        print(f"[extension {ext.name}] on_load_session failed: {e}")
+
         return agent
 
     @property

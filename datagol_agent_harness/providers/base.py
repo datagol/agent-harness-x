@@ -1,29 +1,22 @@
 """Provider interface + factory.
 
-The internal "canonical" response shape mirrors Anthropic's: an object with
-.content (list of blocks with .type/.text or .type/.id/.name/.input),
-.stop_reason ('end_turn' | 'tool_use' | 'max_tokens'), and .usage.
-
-Providers for other vendors translate their native shapes into this form.
+Defines the vendor-agnostic LLMProvider abstraction and factory.
+Providers translate between provider-specific wire protocols and the
+harness's canonical ProviderResponse and StreamEvent models.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Protocol
+from typing import Any, AsyncIterator
 
-
-class ProviderResponse(Protocol):
-    """Duck-typed canonical response. Anthropic's response already satisfies
-    this; OpenAI's is wrapped to match (see providers/openai.py)."""
-
-    content: list[Any]
-    stop_reason: str
-    usage: Any
+from ..types import ProviderResponse, StopReason, StreamChunk, ToolCall, TokenUsage
 
 
 class LLMProvider(ABC):
     """Backend that knows how to talk to one LLM vendor."""
+
+    name: str = ""
 
     @abstractmethod
     async def create(
@@ -37,6 +30,38 @@ class LLMProvider(ABC):
         temperature: float,
     ) -> ProviderResponse:
         """Single non-streaming completion. Returns canonical-shape response."""
+
+    async def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        system: str | None,
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream response from the provider.
+        
+        Yields StreamChunk(kind="text_delta", data="..."), StreamChunk(kind="thinking_delta", ...),
+        and concludes with StreamChunk(kind="response", data=ProviderResponse(...)).
+        Default implementation falls back to create().
+        """
+        resp = await self.create(
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        if resp.text:
+            yield StreamChunk(kind="text_delta", data=resp.text)
+        yield StreamChunk(kind="response", data=resp)
+
+    def format_tools(self, tools: list[dict[str, Any]]) -> Any:
+        """Convert tools into vendor-specific format. Default passes through."""
+        return tools
 
     @abstractmethod
     async def count_tokens(

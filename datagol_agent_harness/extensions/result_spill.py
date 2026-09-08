@@ -82,6 +82,36 @@ class ResultSpillExtension(Extension):
             permission=PermissionLevel.ALLOW,
         )
 
+    async def on_save_session(self, ctx: Any) -> dict[str, Any]:
+        """Contribute spilled result metadata to the session checkpoint."""
+        return {
+            "results": {
+                rid: {
+                    "result_id": m.result_id,
+                    "path": m.path,
+                    "fmt": m.fmt,
+                    "row_count": m.row_count,
+                    "columns": m.columns,
+                    "parent_keys": m.parent_keys,
+                    "size_bytes": m.size_bytes,
+                }
+                for rid, m in self._results.items()
+            }
+        }
+
+    async def on_load_session(self, ctx: Any, state: dict[str, Any]) -> None:
+        """Restore spilled result metadata when loading a session."""
+        for rid, m_dict in state.get("results", {}).items():
+            self._results[rid] = _SpillMeta(
+                result_id=m_dict["result_id"],
+                path=m_dict["path"],
+                fmt=m_dict["fmt"],
+                row_count=m_dict.get("row_count"),
+                columns=m_dict.get("columns"),
+                parent_keys=m_dict.get("parent_keys"),
+                size_bytes=m_dict.get("size_bytes", 0),
+            )
+
     async def teardown(self) -> None:
         self._results.clear()
         if self._dir_ready and os.path.isdir(self._spill_dir):

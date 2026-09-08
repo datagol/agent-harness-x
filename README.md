@@ -18,6 +18,7 @@ web app.
 - [9. MCP servers](#9-mcp-servers)
 - [10. Session persistence](#10-session-persistence)
 - [11. Shipping a web app](#11-shipping-a-web-app)
+- [12. Evaluations with LangSmith](#12-evaluations-with-langsmith)
 - [API reference (quick)](#api-reference-quick)
 
 ---
@@ -28,7 +29,8 @@ web app.
 # Core (Anthropic)
 pip install -e .
 
-# With OpenAI support / everything
+# With optional integrations (LangSmith, OpenAI, or everything)
+pip install -e ".[langsmith]"
 pip install -e ".[openai]"
 pip install -e ".[all]"
 ```
@@ -634,6 +636,76 @@ Run the full example:
 
 ---
 
+## 12. Evaluations with LangSmith
+
+The harness includes first-class evaluation capabilities powered by the
+**LangSmith evaluation framework** (`evaluate` / `aevaluate`). You can benchmark
+tool selection, skill routing, multi-agent delegation, and guardrails either
+locally (offline, zero-cost) or in the LangSmith Web UI.
+
+### Running an evaluation
+
+```python
+from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
+from datagol_agent_harness.evals import (
+    build_example,
+    default_evaluators,
+    evaluate_agent,
+    tool_selection_evaluator,
+    contains_evaluator,
+)
+
+# 1. Define your agent factory or instance
+def make_agent(inputs):
+    agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"))
+    @agent.tools.register(permission=PermissionLevel.ALLOW)
+    def calculate(expression: str) -> str:
+        return str(eval(expression, {"__builtins__": None}, {}))
+    return agent
+
+# 2. Define test cases or use built-in suites ("tool_calling", "skills", "all")
+dataset = [
+    build_example(
+        inputs={"prompt": "What is 144 / 12?"},
+        outputs={
+            "expected_tools": ["calculate"],
+            "contains_all": ["12"],
+            "max_allowed_iterations": 3,
+        },
+    )
+]
+
+# 3. Evaluate (offline for fast CI/CD tests, or live to sync to LangSmith)
+summary = evaluate_agent(
+    agent=make_agent,
+    dataset=dataset,
+    evaluators=[tool_selection_evaluator, contains_evaluator],
+    experiment_prefix="math-agent-benchmark",
+    offline=True,   # set False or omit when LANGSMITH_API_KEY is present
+)
+
+print(f"Pass rate: {summary.pass_rate * 100:.1f}%")
+```
+
+### Running evals from the CLI
+
+```bash
+# Run tool calling benchmarks offline (no API keys required)
+python -m datagol_agent_harness.evals.cli --suite tool_calling --offline
+
+# Run against Anthropic and upload results + traces to LangSmith
+export LANGSMITH_API_KEY="lsv2_pt_..."
+python -m datagol_agent_harness.evals.cli --suite skills --model claude-sonnet-4-6 --upload
+
+# Run all benchmark suites with concurrency
+python -m datagol_agent_harness.evals.cli --suite all --concurrency 2
+```
+
+When uploaded, the CLI prints a clickable LangSmith URL to inspect row-level scores,
+side-by-side prompt diffs, and the complete nested execution tree for every turn.
+
+---
+
 ## API reference (quick)
 
 | Class / function | Module | Purpose |
@@ -654,6 +726,10 @@ Run the full example:
 | `MCPManager` | `datagol_agent_harness` | MCP server connections |
 | `Sandbox` | `datagol_agent_harness` | Sandboxed code execution |
 | `AgentRuntime` | `datagol_agent_harness` | Managed sessions, checkpoints |
+| `Extension` / `LangSmithExtension` | `datagol_agent_harness` | Pluggable runtime extensions / LangSmith tracing |
+| `evaluate_agent` | `datagol_agent_harness.evals` | LangSmith evaluation runner |
+| `AgentTarget` | `datagol_agent_harness.evals` | Target adapter with telemetry & trace linking |
+| `default_evaluators` | `datagol_agent_harness.evals` | Standard suite of evaluators |
 | `register_all_tools` | `datagol_agent_harness.builtin` | Filesystem, bash, web, memory tools |
 
 ## Runnable examples
@@ -662,6 +738,8 @@ Run the full example:
 |---|---|
 | `python -m examples.simple_chat` | Streaming chat + GroceryBuddy prompt/tools |
 | `python -m examples.multi_agent` | Orchestrator + specialist agents |
+| `python -m examples.langsmith_tracing` | LangSmith lifecycle tracing + multi-agent nesting |
+| `python -m examples.run_evals` | Agent evaluation suite with LangSmith |
 | `python -m examples.skills_agent` | Lazy skill loading |
 | `python -m examples.memory_agent` | Two-layer persistent memory |
 | `python -m examples.mcp_agent` | MCP tool integration |

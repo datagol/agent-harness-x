@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from types import SimpleNamespace
 from typing import Any, Callable
 
 
@@ -11,6 +12,23 @@ class PermissionLevel(Enum):
     ALLOW = "allow"
     ASK = "ask"
     DENY = "deny"
+
+
+class Role(Enum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+class StopReason(str, Enum):
+    END_TURN = "end_turn"
+    TOOL_USE = "tool_use"
+    TOOL_CALLS = "tool_use"  # alias
+    MAX_TOKENS = "max_tokens"
+    STOP_SEQUENCE = "stop_sequence"
+    SAFETY = "safety"
+    OTHER = "other"
 
 
 @dataclass
@@ -22,6 +40,7 @@ class ToolDefinition:
     input_schema: dict[str, Any]
     handler: Callable[..., Any]
     permission_level: PermissionLevel = PermissionLevel.ASK
+    concurrent: bool = True
 
 
 @dataclass
@@ -37,9 +56,16 @@ class ToolCall:
 class ToolResult:
     """What happened when we ran it."""
 
-    tool_use_id: str
-    content: str
+    tool_call_id: str = ""
+    content: str = ""
     is_error: bool = False
+    tool_use_id: str = ""  # back-compat alias
+
+    def __post_init__(self) -> None:
+        if not self.tool_call_id and self.tool_use_id:
+            self.tool_call_id = self.tool_use_id
+        elif self.tool_call_id and not self.tool_use_id:
+            self.tool_use_id = self.tool_call_id
 
 
 @dataclass
@@ -50,6 +76,57 @@ class TokenUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+
+
+@dataclass
+class ProviderResponse:
+    """Normalized, vendor-agnostic LLM response."""
+
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    thinking: str | None = None
+    stop_reason: StopReason | str = StopReason.END_TURN
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    raw: Any = None
+    content: list[Any] = field(default_factory=list)  # back-compat content block representation
+
+    def __post_init__(self) -> None:
+        if not self.content:
+            blocks: list[Any] = []
+            if self.thinking:
+                blocks.append(SimpleNamespace(type="thinking", thinking=self.thinking))
+            if self.text:
+                blocks.append(SimpleNamespace(type="text", text=self.text))
+            for tc in self.tool_calls:
+                blocks.append(SimpleNamespace(type="tool_use", id=tc.id, name=tc.name, input=tc.input))
+            self.content = blocks
+        elif not self.text and not self.tool_calls:
+            text_parts: list[str] = []
+            calls: list[ToolCall] = []
+            for b in self.content:
+                b_type = getattr(b, "type", None) if not isinstance(b, dict) else b.get("type")
+                if b_type == "text":
+                    t = getattr(b, "text", "") if not isinstance(b, dict) else b.get("text", "")
+                    text_parts.append(t)
+                elif b_type == "tool_use":
+                    tc_id = getattr(b, "id", "") if not isinstance(b, dict) else b.get("id", "")
+                    tc_name = getattr(b, "name", "") if not isinstance(b, dict) else b.get("name", "")
+                    tc_input = getattr(b, "input", {}) if not isinstance(b, dict) else b.get("input", {})
+                    calls.append(ToolCall(id=tc_id, name=tc_name, input=tc_input))
+                elif b_type == "thinking":
+                    self.thinking = getattr(b, "thinking", "") if not isinstance(b, dict) else b.get("thinking", "")
+            if text_parts:
+                self.text = "\n".join(text_parts)
+            if calls:
+                self.tool_calls = calls
+
+
+@dataclass
+class StreamChunk:
+    """A streaming chunk emitted by an LLMProvider."""
+
+    kind: str  # "text_delta", "thinking_delta", "response"
+    data: Any = None
 
 
 @dataclass

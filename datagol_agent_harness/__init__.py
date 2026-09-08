@@ -1,7 +1,7 @@
 """DIY Agent Harness — demonstrating the 9 pillars of LLM agent infrastructure."""
 
 from .core import Agent
-from .extensions import Extension
+from .extensions import Extension, ExtensionContext, LangSmithExtension, ResultSpillExtension
 from .mcp import MCPManager, MCPServerConfig, MCPToolInfo
 from .hooks import HookContext, HookEvent, HookManager, Middleware, MiddlewarePipeline
 from .memory import (
@@ -23,12 +23,16 @@ from .types import (
     AgentConfig,
     CheckpointData,
     PermissionLevel,
+    ProviderResponse,
+    Role,
     RuntimeConfig,
     RuntimeState,
     RuntimeStatus,
     SandboxConfig,
     SandboxResult,
     SessionState,
+    StopReason,
+    StreamChunk,
     TokenUsage,
     ToolCall,
     ToolDefinition,
@@ -39,6 +43,10 @@ __all__ = [
     # Core
     "Agent",
     "AgentConfig",
+    "Role",
+    "StopReason",
+    "ProviderResponse",
+    "StreamChunk",
     # Tools
     "ToolRegistry",
     "ToolDefinition",
@@ -93,4 +101,14 @@ __all__ = [
     "make_provider",
     # Extensions
     "Extension",
+    "ExtensionContext",
+    "LangSmithExtension",
+    "ResultSpillExtension",
+    # Evals
+    "evaluate_agent",
 ]
+
+try:
+    from .evals import evaluate_agent
+except ImportError:
+    pass

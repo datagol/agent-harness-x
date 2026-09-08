@@ -1,24 +1,12 @@
 """OpenAI provider — translates between OpenAI's chat-completions format
-and the harness's canonical (Anthropic-shape) format.
-
-Mapping (Anthropic ↔ OpenAI):
-    user/assistant message with text          ↔ {role, content: <string>}
-    assistant message with tool_use blocks    ↔ {role: assistant, tool_calls: [...]}
-    user message with tool_result block       ↔ {role: tool, tool_call_id, content}
-    tool schema {name, description,           ↔ {type: function, function:
-                  input_schema}                   {name, description, parameters}}
-    stop_reason 'end_turn' / 'tool_use' /     ↔ finish_reason 'stop' / 'tool_calls' /
-                'max_tokens'                      'length'
-
-Streaming is NOT supported by this provider (the StreamingAgent class is
-Anthropic-specific). Non-streaming Agent works.
+and the harness's canonical format. Supports both create and stream.
 """
 
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 try:
     from openai import AsyncOpenAI
@@ -28,10 +16,15 @@ except ImportError as e:
         "Install with: pip install 'datagol-agent-harness[openai]'"
     ) from e
 
-from .base import LLMProvider, ProviderResponse
+from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from .base import LLMProvider
 
 
 class OpenAIProvider(LLMProvider):
+    """Talks to OpenAI's Chat Completions API and normalizes responses to ProviderResponse."""
+
+    name = "openai"
+
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         self.client = client or AsyncOpenAI()
 
@@ -60,6 +53,97 @@ class OpenAIProvider(LLMProvider):
         resp = await self.client.chat.completions.create(**kwargs)
         return _from_openai_response(resp)
 
+    async def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        system: str | None,
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+    ) -> AsyncIterator[StreamChunk]:
+        openai_messages = _to_openai_messages(messages, system)
+        openai_tools = _to_openai_tools(tools)
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": openai_messages,
+            "max_completion_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+
+        collected_text = ""
+        finish_reason = None
+        tool_call_chunks: dict[int, dict[str, Any]] = {}
+
+        stream_resp = await self.client.chat.completions.create(**kwargs)
+        async for chunk in stream_resp:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+            if getattr(delta, "content", None):
+                text = delta.content
+                collected_text += text
+                yield StreamChunk(kind="text_delta", data=text)
+
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_call_chunks:
+                        tool_call_chunks[idx] = {
+                            "id": tc.id or "",
+                            "name": tc.function.name if tc.function and tc.function.name else "",
+                            "arguments": tc.function.arguments if tc.function and tc.function.arguments else "",
+                        }
+                    else:
+                        if tc.id:
+                            tool_call_chunks[idx]["id"] += tc.id
+                        if tc.function and tc.function.name:
+                            tool_call_chunks[idx]["name"] += tc.function.name
+                        if tc.function and tc.function.arguments:
+                            tool_call_chunks[idx]["arguments"] += tc.function.arguments
+
+        tool_calls: list[ToolCall] = []
+        for idx in sorted(tool_call_chunks.keys()):
+            tc_data = tool_call_chunks[idx]
+            try:
+                args = json.loads(tc_data["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": tc_data["arguments"]}
+            tool_calls.append(
+                ToolCall(
+                    id=tc_data["id"],
+                    name=tc_data["name"],
+                    input=args,
+                )
+            )
+
+        finish_map = {
+            "stop": StopReason.END_TURN,
+            "tool_calls": StopReason.TOOL_USE,
+            "length": StopReason.MAX_TOKENS,
+            "content_filter": StopReason.SAFETY,
+        }
+        stop_reason = finish_map.get(
+            finish_reason, StopReason.OTHER if finish_reason else StopReason.END_TURN
+        )
+
+        final_response = ProviderResponse(
+            text=collected_text,
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            usage=TokenUsage(),
+        )
+        yield StreamChunk(kind="response", data=final_response)
+
     async def count_tokens(
         self,
         *,
@@ -68,8 +152,6 @@ class OpenAIProvider(LLMProvider):
         system: str,
         tools: list[dict[str, Any]],
     ) -> int:
-        # OpenAI has no count_tokens endpoint. Rough estimate: ~3 chars / token.
-        # Use tiktoken if installed for a tighter number.
         try:
             import tiktoken
             enc = tiktoken.encoding_for_model(model)
@@ -104,12 +186,7 @@ def _to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _to_openai_messages(
     messages: list[dict[str, Any]], system: str | None
 ) -> list[dict[str, Any]]:
-    """Translate canonical (Anthropic-shape) messages into OpenAI's format.
-
-    Anthropic represents tool calls as content blocks inside assistant messages,
-    and tool results as content blocks inside user messages. OpenAI lifts both
-    into separate top-level messages.
-    """
+    """Translate canonical messages into OpenAI's format."""
     out: list[dict[str, Any]] = []
     if system:
         out.append({"role": "system", "content": system})
@@ -118,12 +195,10 @@ def _to_openai_messages(
         role = m["role"]
         content = m.get("content")
 
-        # Simple string content: pass through.
         if isinstance(content, str):
             out.append({"role": role, "content": content})
             continue
 
-        # Block-list content.
         if role == "assistant":
             text_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
@@ -140,7 +215,6 @@ def _to_openai_messages(
                             "arguments": json.dumps(_block_attr(block, "input") or {}),
                         },
                     })
-                # 'thinking' blocks are intentionally dropped for OpenAI.
 
             msg: dict[str, Any] = {"role": "assistant"}
             if text_parts:
@@ -152,12 +226,11 @@ def _to_openai_messages(
             out.append(msg)
             continue
 
-        # role == "user" — tool_result blocks become separate "tool" messages.
         text_parts = []
         for block in content or []:
             btype = _block_type(block)
             if btype == "tool_result":
-                tc_id = _block_attr(block, "tool_use_id")
+                tc_id = _block_attr(block, "tool_use_id") or _block_attr(block, "tool_call_id")
                 tr_content = _block_attr(block, "content")
                 if isinstance(tr_content, list):
                     tr_content = "\n".join(
@@ -178,41 +251,51 @@ def _to_openai_messages(
 
 
 def _from_openai_response(resp: Any) -> ProviderResponse:
-    """Wrap an OpenAI ChatCompletion in canonical (Anthropic-shape) form."""
+    """Wrap an OpenAI ChatCompletion in canonical ProviderResponse."""
     choice = resp.choices[0]
     msg = choice.message
 
-    content: list[Any] = []
-    if msg.content:
-        content.append(SimpleNamespace(type="text", text=msg.content))
+    text = msg.content or ""
+    tool_calls: list[ToolCall] = []
     for tc in (msg.tool_calls or []):
         try:
             args = json.loads(tc.function.arguments or "{}")
         except json.JSONDecodeError:
             args = {"_raw": tc.function.arguments}
-        content.append(SimpleNamespace(
-            type="tool_use",
-            id=tc.id,
-            name=tc.function.name,
-            input=args,
-        ))
+        tool_calls.append(
+            ToolCall(
+                id=tc.id,
+                name=tc.function.name,
+                input=args,
+            )
+        )
 
-    stop_reason = {
-        "stop": "end_turn",
-        "tool_calls": "tool_use",
-        "length": "max_tokens",
-    }.get(choice.finish_reason, "end_turn")
+    finish_map = {
+        "stop": StopReason.END_TURN,
+        "tool_calls": StopReason.TOOL_USE,
+        "length": StopReason.MAX_TOKENS,
+        "content_filter": StopReason.SAFETY,
+    }
+    stop_reason = finish_map.get(
+        choice.finish_reason, StopReason.OTHER if choice.finish_reason else StopReason.END_TURN
+    )
 
-    usage = SimpleNamespace(
-        input_tokens=getattr(resp.usage, "prompt_tokens", 0),
-        output_tokens=getattr(resp.usage, "completion_tokens", 0),
+    usage = TokenUsage(
+        input_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
+        output_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=getattr(
             getattr(resp.usage, "prompt_tokens_details", None), "cached_tokens", 0
         ) or 0,
     )
 
-    return SimpleNamespace(content=content, stop_reason=stop_reason, usage=usage)
+    return ProviderResponse(
+        text=text,
+        tool_calls=tool_calls,
+        stop_reason=stop_reason,
+        usage=usage,
+        raw=resp,
+    )
 
 
 def _block_type(block: Any) -> str | None:

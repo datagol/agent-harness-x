@@ -19,12 +19,19 @@ Usage:
         await agent.aclose()  # fires teardown() on each extension
 """
 
-from .base import Extension
+from .base import Extension, ExtensionContext
 
-__all__ = ["Extension"]
+__all__ = ["Extension", "ExtensionContext"]
 
 try:
     from .result_spill import ResultSpillExtension  # noqa: F401
     __all__.append("ResultSpillExtension")
 except ImportError:
     pass
+
+try:
+    from .langsmith import LangSmithExtension  # noqa: F401
+    __all__.append("LangSmithExtension")
+except ImportError:
+    pass
+

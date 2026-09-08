@@ -170,6 +170,7 @@ class ToolRegistry:
         name: str | None = None,
         description: str | None = None,
         permission: PermissionLevel = PermissionLevel.ASK,
+        concurrent: bool = True,
     ) -> Callable:
         """Decorator to register a function as a tool.
 
@@ -188,6 +189,7 @@ class ToolRegistry:
                 input_schema=input_schema,
                 handler=func,
                 permission_level=permission,
+                concurrent=concurrent,
             )
             return func
 
@@ -200,6 +202,7 @@ class ToolRegistry:
         input_schema: dict[str, Any],
         handler: Callable,
         permission: PermissionLevel = PermissionLevel.ASK,
+        concurrent: bool = True,
     ) -> None:
         """Imperative registration with explicit schema."""
         self._tools[name] = ToolDefinition(
@@ -208,10 +211,11 @@ class ToolRegistry:
             input_schema=input_schema,
             handler=handler,
             permission_level=permission,
+            concurrent=concurrent,
         )
 
     def get_tool_params(self) -> list[dict[str, Any]]:
-        """Convert all registered tools to Anthropic ToolParam format."""
+        """Convert all registered tools to canonical ToolParam format."""
         return [
             {
                 "name": t.name,
@@ -220,6 +224,18 @@ class ToolRegistry:
             }
             for t in self._tools.values()
         ]
+
+    def get_tools(self) -> list[ToolDefinition]:
+        """Return all registered ToolDefinition objects."""
+        return list(self._tools.values())
+
+    def has_tool(self, name: str) -> bool:
+        """Check if a tool is registered."""
+        return name in self._tools
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry. Returns True if removed."""
+        return self._tools.pop(name, None) is not None
 
     def get_tool(self, name: str) -> ToolDefinition:
         """Lookup a tool by name."""
@@ -239,26 +255,27 @@ class ToolRegistry:
             tool_def = self.get_tool(tool_call.name)
         except ToolNotFoundError as e:
             return ToolResult(
-                tool_use_id=tool_call.id,
+                tool_call_id=tool_call.id,
                 content=str(e),
                 is_error=True,
             )
 
         try:
             handler = tool_def.handler
-            if asyncio.iscoroutinefunction(handler):
-                result = await handler(**tool_call.input)
+            args = tool_call.input if isinstance(tool_call.input, dict) else {}
+            if inspect.iscoroutinefunction(handler):
+                result = await handler(**args)
             else:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: handler(**tool_call.input))
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, lambda: handler(**args))
 
             return ToolResult(
-                tool_use_id=tool_call.id,
+                tool_call_id=tool_call.id,
                 content=str(result),
             )
         except Exception:
             return ToolResult(
-                tool_use_id=tool_call.id,
+                tool_call_id=tool_call.id,
                 content=f"Tool execution error:\n{traceback.format_exc()}",
                 is_error=True,
             )

@@ -17,12 +17,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from anthropic import AsyncAnthropic
-
 from .core import Agent
 from .hooks import HookContext, HookEvent, HookManager, MiddlewarePipeline
 from .memory import ConversationMemory, PersistentMemory
 from .permissions import PermissionManager
+from .providers import LLMProvider
 from .sandbox import Sandbox
 from .tools import ToolRegistry
 from .types import (
@@ -65,6 +64,8 @@ class AgentRuntime:
         hooks: HookManager | None = None,
         middleware: MiddlewarePipeline | None = None,
         permissions: PermissionManager | None = None,
+        provider: LLMProvider | None = None,
+        extensions: list[Any] | None = None,
     ) -> None:
         self.agent_config = agent_config or AgentConfig()
         self.runtime_config = runtime_config or RuntimeConfig()
@@ -73,6 +74,8 @@ class AgentRuntime:
         self.hooks = hooks or HookManager()
         self.middleware = middleware
         self.permissions = permissions
+        self.provider = provider
+        self.extensions = extensions
 
         self._agent: Agent | None = None
         self._session_id: str = ""
@@ -100,13 +103,14 @@ class AgentRuntime:
         # Create the Agent with all dependencies
         self._agent = Agent(
             config=self.agent_config,
-            client=AsyncAnthropic(),
+            provider=self.provider,
             tools=ToolRegistry(),
             memory=ConversationMemory(max_result_chars=self.agent_config.max_result_chars),
             permissions=self.permissions or PermissionManager(),
             hooks=self.hooks,
             middleware=self.middleware or MiddlewarePipeline(),
             sandbox=self.sandbox,
+            extensions=self.extensions,
         )
         self._agent._session_id = self._session_id
 
@@ -308,13 +312,14 @@ class AgentRuntime:
 
         self._agent = Agent(
             config=self.agent_config,
-            client=AsyncAnthropic(),
+            provider=self.provider,
             tools=ToolRegistry(),
             memory=ConversationMemory(max_result_chars=self.agent_config.max_result_chars),
             permissions=self.permissions or PermissionManager(),
             hooks=self.hooks,
             middleware=self.middleware or MiddlewarePipeline(),
             sandbox=self.sandbox,
+            extensions=self.extensions,
         )
         self._agent._session_id = session_id
 

@@ -56,7 +56,7 @@ class PermissionManager:
             f"  Allow? [y]es / [n]o / [a]lways: "
         )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: input(prompt_text).strip().lower())
 
         if response in ("y", "yes"):
@@ -77,7 +77,7 @@ class PermissionManager:
 class GuardrailsEngine:
     """Enforces safety limits on the agentic loop."""
 
-    # Approximate pricing per million tokens (Sonnet)
+    # Approximate default pricing per million tokens
     INPUT_COST_PER_M = 3.0
     OUTPUT_COST_PER_M = 15.0
 
@@ -85,32 +85,42 @@ class GuardrailsEngine:
         self,
         max_iterations: int = 50,
         max_cost_dollars: float | None = None,
+        input_cost_per_m: float | None = None,
+        output_cost_per_m: float | None = None,
     ) -> None:
         self.max_iterations = max_iterations
         self.max_cost_dollars = max_cost_dollars
+        self.input_cost_per_m = input_cost_per_m if input_cost_per_m is not None else self.INPUT_COST_PER_M
+        self.output_cost_per_m = output_cost_per_m if output_cost_per_m is not None else self.OUTPUT_COST_PER_M
         self._iteration_count = 0
+        self._lifetime_iterations = 0
         self._total_usage = TokenUsage()
+
+    def reset_turn(self) -> None:
+        """Reset turn iteration counter at the start of a user turn."""
+        self._iteration_count = 0
 
     def record_iteration(self) -> None:
         self._iteration_count += 1
+        self._lifetime_iterations += 1
 
     def check_iteration_limit(self) -> None:
         if self.max_iterations and self._iteration_count >= self.max_iterations:
             raise MaxIterationsError(
-                f"Agent reached maximum iterations ({self.max_iterations}). "
+                f"Agent reached maximum iterations ({self.max_iterations}) for this turn. "
                 f"Total usage: {self.usage_summary}"
             )
 
     def track_usage(self, usage: Any) -> None:
         """Accumulate token usage from an API response."""
-        self._total_usage.input_tokens += getattr(usage, "input_tokens", 0)
-        self._total_usage.output_tokens += getattr(usage, "output_tokens", 0)
+        self._total_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+        self._total_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
         self._total_usage.cache_creation_input_tokens += getattr(
             usage, "cache_creation_input_tokens", 0
-        )
+        ) or 0
         self._total_usage.cache_read_input_tokens += getattr(
             usage, "cache_read_input_tokens", 0
-        )
+        ) or 0
 
     def check_cost_limit(self) -> None:
         if self.max_cost_dollars is None:
@@ -125,11 +135,15 @@ class GuardrailsEngine:
     @property
     def estimated_cost(self) -> float:
         u = self._total_usage
-        return (u.input_tokens * self.INPUT_COST_PER_M + u.output_tokens * self.OUTPUT_COST_PER_M) / 1_000_000
+        return (u.input_tokens * self.input_cost_per_m + u.output_tokens * self.output_cost_per_m) / 1_000_000
 
     @property
     def iteration_count(self) -> int:
         return self._iteration_count
+
+    @property
+    def lifetime_iterations(self) -> int:
+        return self._lifetime_iterations
 
     @property
     def total_usage(self) -> TokenUsage:
@@ -139,6 +153,7 @@ class GuardrailsEngine:
     def usage_summary(self) -> dict[str, Any]:
         return {
             "iterations": self._iteration_count,
+            "lifetime_iterations": self._lifetime_iterations,
             "input_tokens": self._total_usage.input_tokens,
             "output_tokens": self._total_usage.output_tokens,
             "estimated_cost": f"${self.estimated_cost:.4f}",
@@ -146,6 +161,7 @@ class GuardrailsEngine:
 
     def reset(self) -> None:
         self._iteration_count = 0
+        self._lifetime_iterations = 0
         self._total_usage = TokenUsage()
 
 

@@ -90,19 +90,23 @@ class ConversationMemory:
         disk and the in-context content is replaced with a head/tail preview
         plus the file path so the agent can re-read it via read_file.
         """
+        if not results:
+            return
+
         from .types import ToolResult
 
         content: list[dict[str, Any]] = []
         for r in results:
             if isinstance(r, ToolResult):
                 result_content = r.content
+                call_id = getattr(r, "tool_call_id", "") or getattr(r, "tool_use_id", "")
                 if not r.is_error and len(result_content) > self._max_result_chars:
                     result_content = self._evict_large_result(
-                        r.tool_use_id, result_content
+                        call_id, result_content
                     )
                 block: dict[str, Any] = {
                     "type": "tool_result",
-                    "tool_use_id": r.tool_use_id,
+                    "tool_use_id": call_id,
                     "content": result_content,
                 }
                 if r.is_error:
@@ -111,7 +115,8 @@ class ConversationMemory:
             elif isinstance(r, dict):
                 content.append(r)
 
-        self._messages.append({"role": "user", "content": content})
+        if content:
+            self._messages.append({"role": "user", "content": content})
 
     def _evict_large_result(self, tool_use_id: str, content: str) -> str:
         """Save full result to disk, return a preview with file path reference."""
@@ -208,10 +213,13 @@ class ConversationMemory:
         if token_count < max_context_tokens * 0.8:
             return False
 
-        # Keep the last 4 messages intact, summarize everything before
-        keep_count = 4
-        to_summarize = self._messages[:-keep_count]
-        to_keep = self._messages[-keep_count:]
+        # Find a clean boundary that preserves alternating roles and tool call pairs
+        split_point = self._find_safe_trim_boundary(min_keep=4)
+        if split_point == 0:
+            return False
+
+        to_summarize = self._messages[:split_point]
+        to_keep = self._messages[split_point:]
 
         summary_text = self._create_summary(to_summarize)
 
@@ -221,6 +229,41 @@ class ConversationMemory:
             *to_keep,
         ]
         return True
+
+    def _find_safe_trim_boundary(self, min_keep: int = 4) -> int:
+        """Walk backwards to find a safe boundary where no tool call/result pairs are severed."""
+        total = len(self._messages)
+        if total <= min_keep:
+            return 0
+
+        split_idx = total - min_keep
+        while split_idx > 0:
+            msg = self._messages[split_idx]
+            prev_msg = self._messages[split_idx - 1]
+
+            # Check if msg is a user message containing tool results
+            is_tool_result = False
+            content = msg.get("content")
+            if isinstance(content, list):
+                is_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+                )
+
+            # Safe boundary: target message is a user message that does NOT contain tool results,
+            # and the previous message was an assistant message without tool use.
+            if msg.get("role") == "user" and not is_tool_result:
+                if prev_msg.get("role") == "assistant":
+                    prev_content = prev_msg.get("content")
+                    prev_has_tool_use = False
+                    if isinstance(prev_content, list):
+                        prev_has_tool_use = any(
+                            isinstance(b, dict) and b.get("type") == "tool_use" for b in prev_content
+                        )
+                    if not prev_has_tool_use:
+                        return split_idx
+            split_idx -= 1
+
+        return 0
 
     def _create_summary(self, messages: list[dict[str, Any]]) -> str:
         """Create a simple text summary of messages."""
