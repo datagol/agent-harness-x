@@ -12,6 +12,8 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+dist/
+build/
 
 # Agent runtime state
 .agent_memory/

@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+try:
+    import langsmith
+except ImportError:
+    raise ImportError(
+        "The 'langsmith' package is required to use evaluations. "
+        "Install it with: pip install 'datagol-agent-harness[langsmith]' or pip install langsmith"
+    ) from None
+
 from .datasets import (
     build_example,
     get_dataset,

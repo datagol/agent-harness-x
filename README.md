@@ -1,10 +1,24 @@
-# DataGOL Agent Harness — Developer Guide
+# DataGOL Agent Harness
 
-A provider-agnostic toolkit for building LLM agents in Python. This guide
-covers the core building blocks with working code examples: creating agents,
-registering tools, streaming, multi-agent orchestration, skills, memory,
-permissions, hooks, middleware, sandboxing, MCP, and shipping an agent as a
-web app.
+[![PyPI version](https://img.shields.io/pypi/v/datagol-agent-harness.svg)](https://pypi.org/project/datagol-agent-harness/)
+[![Python versions](https://img.shields.io/pypi/pyversions/datagol-agent-harness.svg)](https://pypi.org/project/datagol-agent-harness/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+**A provider-agnostic, library-first Python toolkit for building production-grade LLM agents.**
+
+Rather than locking developers into rigid state-machine graphs or opaque persona prompts, `datagol-agent-harness` gives you a composable set of building blocks: real-time streaming, typed tool registration with schema inference, lazy-loaded skills, multi-agent delegation, 4-tier memory, sandboxed code execution, Model Context Protocol (MCP) tool bridges, native LangSmith tracing, and evaluation suites.
+
+### Why DataGOL Agent Harness?
+
+- **No Graph Boilerplate:** Write simple async Python functions instead of complex state graphs.
+- **Provider-Agnostic:** First-class support for Anthropic (Claude 3.5/3.7/Sonnet/Opus) and OpenAI (GPT-4o/GPT-5).
+- **Streaming-First:** First-class typed event stream (`run_stream`) for WebSocket and SSE frontends.
+- **Lazy Instruction Packs (Skills):** Load specialized guidelines only when needed via YAML-frontmatter `SKILL.md` packs.
+- **Enterprise Guardrails & Sandboxing:** Execute untrusted code safely via Process, Docker, or macOS Seatbelt isolation with granular budget and iteration caps.
+- **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote SSE) in 3 lines of code.
+- **Full Observability & Evals:** Zero-overhead lifecycle hooks, middleware transforms, native LangSmith tracing, and benchmark evaluations.
+
+---
 
 - [Setup](#setup)
 - [1. Creating an agent](#1-creating-an-agent)
@@ -26,12 +40,15 @@ web app.
 ## Setup
 
 ```bash
-# Core (Anthropic)
-pip install -e .
+# From PyPI
+pip install datagol-agent-harness
 
-# With optional integrations (LangSmith, OpenAI, or everything)
-pip install -e ".[langsmith]"
-pip install -e ".[openai]"
+# With optional extras (LangSmith, OpenAI, MCP, Docker, or everything)
+pip install "datagol-agent-harness[langsmith]"
+pip install "datagol-agent-harness[openai]"
+pip install "datagol-agent-harness[all]"
+
+# For local development (editable)
 pip install -e ".[all]"
 ```
 
