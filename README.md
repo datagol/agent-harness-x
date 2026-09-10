@@ -43,9 +43,10 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 # From PyPI
 pip install datagol-agent-harness
 
-# With optional extras (LangSmith, OpenAI, MCP, Docker, or everything)
+# With optional extras (LangSmith, OpenAI, Azure OpenAI, MCP, Docker, or everything)
 pip install "datagol-agent-harness[langsmith]"
 pip install "datagol-agent-harness[openai]"
+pip install "datagol-agent-harness[azure]"
 pip install "datagol-agent-harness[all]"
 
 # For local development (editable)
@@ -80,7 +81,7 @@ from datagol_agent_harness import Agent, AgentConfig
 agent = Agent(
     config=AgentConfig(
         model="claude-sonnet-4-6",      # or "gpt-4o", "anthropic/claude-3.7-sonnet"
-        provider="anthropic",            # "anthropic", "openai", "gemini", or "openrouter"
+        provider="anthropic",            # "anthropic", "openai", "gemini", "openrouter", or "azure"
         system_prompt="You are a helpful assistant.",
         max_tokens=8192,
         max_iterations=50,               # loop guardrail
@@ -96,12 +97,56 @@ print(asyncio.run(agent.run("What is 17 + 25?")))
 | Field | Default | Purpose |
 |---|---|---|
 | `model` | `"claude-sonnet-4-6"` | Model id passed to the provider |
-| `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, or `"openrouter"` |
+| `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, `"openrouter"`, or `"azure"` |
 | `max_tokens` | `8192` | Per-response token cap |
 | `max_iterations` | `50` | Max loop iterations before `MaxIterationsError` |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `max_result_chars` | `12000` | Tool-result eviction threshold in memory |
+
+### Azure OpenAI
+
+Install the extra (`pip install "datagol-agent-harness[azure]"`; the `openai`
+package covers Azure). Azure reuses the OpenAI translation layer through the
+`AsyncAzureOpenAI` client, so completion **and streaming** both work. On Azure
+the `model` you pass is the **deployment name**, and both an endpoint and an
+API version are required for provider-created clients. There are two ways to
+supply credentials — the harness never loads a `.env` file itself, so your app
+is responsible for populating the environment or passing values in code.
+
+**1. Config-driven, credentials from the environment** (`AZURE_OPENAI_ENDPOINT`,
+`AZURE_OPENAI_API_KEY`, `OPENAI_API_VERSION`):
+
+```python
+from datagol_agent_harness import Agent, AgentConfig
+
+# env: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, OPENAI_API_VERSION
+agent = Agent(config=AgentConfig(provider="azure", model="<your-deployment>"))
+```
+
+**2. Explicit construction + injection** (pass keys/endpoint in code, or hand in
+a fully preconfigured client):
+
+```python
+from datagol_agent_harness import Agent, AgentConfig
+from datagol_agent_harness.providers.azure_openai import AzureOpenAIProvider
+
+provider = AzureOpenAIProvider(
+    azure_endpoint="https://<resource>.openai.azure.com",
+    api_key="<key>",
+    api_version="2024-10-21",        # use an API version your resource supports
+    azure_deployment="<deployment>", # optional; overrides AgentConfig.model per request
+)
+agent = Agent(
+    config=AgentConfig(provider="azure", model="<deployment>"),
+    provider=provider,
+)
+```
+
+Token-based auth is supported: omit `api_key` and pass `azure_ad_token` or
+`azure_ad_token_provider` — they are forwarded straight to `AsyncAzureOpenAI`.
+Token counting is approximate for Azure, because a deployment name does not
+identify the underlying tokenizer.
 
 You can also inject your own pieces — everything is a constructor parameter:
 

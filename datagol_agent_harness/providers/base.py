@@ -90,6 +90,10 @@ def make_provider(name: str, **kwargs: Any) -> LLMProvider:
     if name == "openrouter":
         from .openrouter import OpenRouterProvider
         return OpenRouterProvider(**kwargs)
+    if name in ("azure", "azure-openai"):
+        from .azure_openai import AzureOpenAIProvider
+        return AzureOpenAIProvider(**kwargs)
     raise ValueError(
-        f"Unknown provider: {name!r} (expected 'anthropic', 'openai', 'gemini', or 'openrouter')"
+        f"Unknown provider: {name!r} "
+        "(expected 'anthropic', 'openai', 'gemini', 'openrouter', or 'azure')"
     )

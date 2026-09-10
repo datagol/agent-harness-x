@@ -49,6 +49,7 @@ dependencies = [
 langsmith = ["langsmith>=0.1.0"]
 openai = ["openai>=1.50.0", "tiktoken>=0.7.0"]
 openrouter = ["openai>=1.50.0", "tiktoken>=0.7.0"]
+azure = ["openai>=1.50.0", "tiktoken>=0.7.0"]
 gemini = ["google-genai>=1.0.0"]
 mcp = ["mcp[cli]>=1.0.0"]
 docker = ["docker>=7.0.0"]

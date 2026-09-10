@@ -134,7 +134,7 @@ class AgentConfig:
     """All configuration for an Agent, with sensible defaults."""
 
     model: str = "claude-sonnet-4-6"
-    provider: str = "anthropic"  # 'anthropic', 'openai', 'gemini', or 'openrouter'
+    provider: str = "anthropic"  # 'anthropic', 'openai', 'gemini', 'openrouter', or 'azure'
     max_tokens: int = 8192
     max_iterations: int = 50
     system_prompt: str = "You are a helpful assistant."

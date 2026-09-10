@@ -26,3 +26,10 @@ try:
     __all__.append("OpenRouterProvider")
 except ImportError:
     pass
+
+# AzureOpenAIProvider is gated on the openai SDK being installed.
+try:
+    from .azure_openai import AzureOpenAIProvider  # noqa: F401
+    __all__.append("AzureOpenAIProvider")
+except ImportError:
+    pass
