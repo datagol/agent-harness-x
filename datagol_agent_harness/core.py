@@ -18,7 +18,7 @@ from .mcp import MCPManager
 from .providers import LLMProvider, make_provider
 from .sandbox import Sandbox
 from .skills import SkillManager
-from .tools import ToolRegistry
+from .tools import ToolRegistry, normalize_tool_registry
 from .types import AgentConfig, SessionState, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult
 
 
@@ -43,7 +43,7 @@ class Agent:
         config: AgentConfig | None = None,
         provider: LLMProvider | None = None,
         client: Any | None = None,  # back-compat shim, wrapped into AnthropicProvider
-        tools: ToolRegistry | None = None,
+        tools: ToolRegistry | list[Any] | None = None,
         memory: ConversationMemory | None = None,
         permissions: PermissionManager | None = None,
         hooks: HookManager | None = None,
@@ -62,7 +62,7 @@ class Agent:
             self.provider = AnthropicProvider(client=client)
         else:
             self.provider = make_provider(self.config.provider)
-        self.tools = tools or ToolRegistry()
+        self.tools = normalize_tool_registry(tools)
         self.memory = memory or ConversationMemory(max_result_chars=self.config.max_result_chars)
         self.permissions = permissions or PermissionManager()
         self.hooks = hooks or HookManager()

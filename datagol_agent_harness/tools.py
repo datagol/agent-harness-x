@@ -24,6 +24,19 @@ _TYPE_MAP: dict[type, str] = {
 }
 
 
+def _extract_docstring_description(docstring: str | None) -> str:
+    """Extract complete description from a docstring before Args:, Returns:, etc."""
+    if not docstring:
+        return ""
+    desc_lines: list[str] = []
+    for line in docstring.splitlines():
+        stripped = line.strip()
+        if re.match(r"^(args|parameters|returns|raises|yields|examples?|note|notes):", stripped, re.IGNORECASE):
+            break
+        desc_lines.append(line)
+    return "\n".join(desc_lines).strip()
+
+
 def _parse_docstring_args(docstring: str | None) -> dict[str, str]:
     """Extract parameter descriptions from an Args: section in a docstring."""
     if not docstring:
@@ -179,7 +192,7 @@ class ToolRegistry:
 
         def decorator(func: Callable) -> Callable:
             tool_name = name or func.__name__
-            tool_description = description or (func.__doc__ or "").split("\n")[0].strip() or tool_name
+            tool_description = description or _extract_docstring_description(func.__doc__) or tool_name
 
             input_schema, _ = _generate_input_schema(func)
 
@@ -194,6 +207,31 @@ class ToolRegistry:
             return func
 
         return decorator
+
+    def register_tool(
+        self,
+        tool: Callable | ToolDefinition,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        permission: PermissionLevel | None = None,
+        concurrent: bool = True,
+    ) -> ToolDefinition:
+        """Register a function or ToolDefinition directly (non-decorator style)."""
+        if isinstance(tool, ToolDefinition):
+            if permission is not None:
+                tool.permission_level = permission
+            self._tools[tool.name] = tool
+            return tool
+
+        decorator = self.register(
+            name=name,
+            description=description,
+            permission=permission if permission is not None else PermissionLevel.ASK,
+            concurrent=concurrent,
+        )
+        decorator(tool)
+        return self._tools[name or getattr(tool, "__name__", str(tool))]
 
     def register_with_schema(
         self,
@@ -212,6 +250,75 @@ class ToolRegistry:
             handler=handler,
             permission_level=permission,
             concurrent=concurrent,
+        )
+
+    def load_builtin(
+        self,
+        bundle_or_tool: str,
+        *,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        permission: PermissionLevel | None = None,
+        **options: Any,
+    ) -> list[str]:
+        """Load built-in tools into the registry by bundle name or tool name.
+
+        Args:
+            bundle_or_tool: 'filesystem', 'bash', 'web', 'memory', 'all', or a tool name like 'read_file'.
+            include: Specific tool names to include.
+            exclude: Tool names to skip.
+            permission: Override default permission level for loaded tools.
+            options: Additional bundle-specific options (e.g. sandbox, base_path).
+
+        Returns:
+            List of registered tool names.
+        """
+        from .builtin import (
+            fetch_url,
+            generate_file,
+            list_directory,
+            read_file,
+            recall_memories,
+            register_all_tools,
+            register_bash_tools,
+            register_filesystem_tools,
+            register_memory_tools,
+            register_web_tools,
+            run_bash,
+            save_memory,
+            write_file,
+        )
+
+        name = bundle_or_tool.lower()
+        if name in ("all", "builtin", "builtins"):
+            return register_all_tools(self, include=include, exclude=exclude, permission=permission, **options)
+        elif name in ("filesystem", "fs", "files"):
+            return register_filesystem_tools(self, include=include, exclude=exclude, permission=permission, **options)
+        elif name in ("bash", "shell", "terminal"):
+            return register_bash_tools(self, include=include, exclude=exclude, permission=permission, **options)
+        elif name in ("web", "http", "fetch"):
+            return register_web_tools(self, include=include, exclude=exclude, permission=permission, **options)
+        elif name in ("memory",):
+            return register_memory_tools(self, include=include, exclude=exclude, permission=permission, **options)
+
+        standalone_map = {
+            "read_file": (read_file, PermissionLevel.ALLOW),
+            "write_file": (write_file, PermissionLevel.ASK),
+            "list_directory": (list_directory, PermissionLevel.ALLOW),
+            "generate_file": (generate_file, PermissionLevel.ALLOW),
+            "run_bash": (run_bash, PermissionLevel.ASK),
+            "fetch_url": (fetch_url, PermissionLevel.ASK),
+            "save_memory": (save_memory, PermissionLevel.ALLOW),
+            "recall_memories": (recall_memories, PermissionLevel.ALLOW),
+        }
+        if name in standalone_map:
+            fn, default_perm = standalone_map[name]
+            self.register_tool(fn, permission=permission or default_perm)
+            return [name]
+
+        raise ValueError(
+            f"Unknown built-in tool or bundle: {bundle_or_tool!r}. "
+            f"Available bundles: 'filesystem', 'bash', 'web', 'memory', 'all'."
         )
 
     def get_tool_params(self) -> list[dict[str, Any]]:
@@ -286,3 +393,30 @@ class ToolRegistry:
                 content=f"Tool execution error:\n{traceback.format_exc()}",
                 is_error=True,
             )
+
+
+def normalize_tool_registry(tools: ToolRegistry | list[Any] | None) -> ToolRegistry:
+    """Normalize tools argument into a ToolRegistry.
+
+    Supports:
+    - None -> empty ToolRegistry
+    - ToolRegistry -> passed through
+    - list of strings (bundles or tool names), callables, or ToolDefinitions
+    """
+    if isinstance(tools, ToolRegistry):
+        return tools
+    registry = ToolRegistry()
+    if tools is None:
+        return registry
+    if isinstance(tools, (list, tuple, set)):
+        for item in tools:
+            if isinstance(item, str):
+                registry.load_builtin(item)
+            elif isinstance(item, ToolDefinition):
+                registry.register_tool(item)
+            elif callable(item):
+                registry.register_tool(item)
+            else:
+                raise ValueError(f"Unsupported tool item in list: {item!r}")
+        return registry
+    raise TypeError(f"Expected ToolRegistry or list of tools, got {type(tools).__name__}")

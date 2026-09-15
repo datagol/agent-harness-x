@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
+from typing import TYPE_CHECKING, Callable
 
 from datagol_agent_harness.memory import AgentMemory, LongTermMemory, VectorMemoryStore
-from datagol_agent_harness.tools import ToolRegistry
 from datagol_agent_harness.types import PermissionLevel
 
+if TYPE_CHECKING:
+    from datagol_agent_harness.tools import ToolRegistry
 
-def register_memory_tools(
-    registry: ToolRegistry,
+
+def make_memory_tools(
     long_term: LongTermMemory | None = None,
     agent_memory: AgentMemory | None = None,
     vector_store: VectorMemoryStore | None = None,
-) -> None:
-    """Register memory tools onto a registry."""
-
+) -> tuple[Callable, Callable]:
+    """Create a pair of bound (save_memory, recall_memories) tool handlers."""
     lt = long_term or LongTermMemory()
     am = agent_memory or AgentMemory()
 
-    @registry.register(permission=PermissionLevel.ALLOW)
     async def save_memory(
         content: str,
         layer: str = "long_term",
@@ -60,7 +58,6 @@ def register_memory_tools(
         else:
             return f"Error: unknown layer '{layer}'. Use 'long_term', 'agent', or 'preference'."
 
-    @registry.register(permission=PermissionLevel.ALLOW)
     async def recall_memories(
         query: str = "",
         layer: str = "all",
@@ -102,3 +99,63 @@ def register_memory_tools(
             return "No memories found."
 
         return "\n\n".join(results)
+
+    return save_memory, recall_memories
+
+
+# Default unbound memory tools (instantiates default stores on call)
+_default_save_memory, _default_recall_memories = make_memory_tools()
+save_memory = _default_save_memory
+recall_memories = _default_recall_memories
+
+
+def register_memory_tools(
+    registry: ToolRegistry,
+    long_term: LongTermMemory | None = None,
+    agent_memory: AgentMemory | None = None,
+    vector_store: VectorMemoryStore | None = None,
+    *,
+    permission: PermissionLevel | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> list[str]:
+    """Register memory tools onto a registry.
+
+    Args:
+        registry: Target tool registry.
+        long_term: Optional LongTermMemory instance.
+        agent_memory: Optional AgentMemory instance.
+        vector_store: Optional VectorMemoryStore instance.
+        permission: Override default permission level (default PermissionLevel.ALLOW).
+        include: Specific tool names to register ('save_memory', 'recall_memories').
+        exclude: Tool names to omit.
+
+    Returns:
+        List of registered tool names.
+    """
+    save_fn, recall_fn = make_memory_tools(
+        long_term=long_term,
+        agent_memory=agent_memory,
+        vector_store=vector_store,
+    )
+
+    tools_map = {
+        "save_memory": save_fn,
+        "recall_memories": recall_fn,
+    }
+
+    registered: list[str] = []
+    include_set = set(include) if include is not None else None
+    exclude_set = set(exclude) if exclude is not None else set()
+    perm = permission if permission is not None else PermissionLevel.ALLOW
+
+    for name, fn in tools_map.items():
+        if include_set is not None and name not in include_set:
+            continue
+        if name in exclude_set:
+            continue
+
+        registry.register_tool(fn, name=name, permission=perm)
+        registered.append(name)
+
+    return registered

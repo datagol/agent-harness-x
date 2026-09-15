@@ -67,10 +67,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/inncretech/datagol-agent-harness"
-Repository = "https://github.com/inncretech/datagol-agent-harness"
-Issues = "https://github.com/inncretech/datagol-agent-harness/issues"
-Documentation = "https://github.com/inncretech/datagol-agent-harness#readme"
+Homepage = "https://github.com/datagol/harness-x"
+Repository = "https://github.com/datagol/harness-x"
+Issues = "https://github.com/datagol/harness-x/issues"
+Documentation = "https://github.com/datagol/harness-x#readme"
 
 [tool.setuptools.packages.find]
 include = ["datagol_agent_harness*"]

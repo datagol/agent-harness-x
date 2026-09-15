@@ -18,7 +18,7 @@ from .runtime import AgentRuntime
 from .sandbox import Sandbox
 from .skills import Skill, SkillManager
 from .streaming import StreamEvent, StreamEventType, StreamingAgent
-from .tools import ToolNotFoundError, ToolRegistry
+from .tools import ToolNotFoundError, ToolRegistry, normalize_tool_registry
 from .types import (
     AgentConfig,
     CheckpointData,
@@ -54,6 +54,7 @@ __all__ = [
     "ToolResult",
     "ToolNotFoundError",
     "PermissionLevel",
+    "normalize_tool_registry",
     # Memory
     "ConversationMemory",
     "PersistentMemory",
