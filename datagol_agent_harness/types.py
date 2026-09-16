@@ -41,6 +41,11 @@ class ToolDefinition:
     handler: Callable[..., Any]
     permission_level: PermissionLevel = PermissionLevel.ASK
     concurrent: bool = True
+    # Seconds before this tool is abandoned. A tool that calls a remote API
+    # can hang indefinitely, and without a bound it takes the whole turn with
+    # it. None means no limit, which stays the default so existing consumers
+    # are unaffected.
+    timeout_seconds: float | None = None
 
 
 @dataclass
@@ -76,6 +81,12 @@ class TokenUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Reasoning/thinking tokens, where the provider reports them separately
+    # (Gemini's thoughts_token_count, OpenAI's reasoning_tokens). They are
+    # billed at the OUTPUT rate, so anything estimating cost from
+    # input+output alone under-reports by the most expensive component.
+    # 0 when the provider does not report them.
+    thinking_tokens: int = 0
 
 
 @dataclass
@@ -139,6 +150,11 @@ class AgentConfig:
     max_iterations: int = 50
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
+    # Retry transient provider failures (429, 5xx, timeouts). 1 disables it.
+    # A streaming call is only retried before its first chunk, since after
+    # that a retry would duplicate output the caller has already seen.
+    llm_max_attempts: int = 2
+    llm_retry_backoff_seconds: float = 0.5
     max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
 
 
