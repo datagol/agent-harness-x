@@ -76,6 +76,12 @@ class TokenUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Reasoning/thinking tokens, where the provider reports them separately
+    # (Gemini's thoughts_token_count, OpenAI's reasoning_tokens). They are
+    # billed at the OUTPUT rate, so anything estimating cost from
+    # input+output alone under-reports by the most expensive component.
+    # 0 when the provider does not report them.
+    thinking_tokens: int = 0
 
 
 @dataclass

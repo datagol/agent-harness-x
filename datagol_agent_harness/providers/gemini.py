@@ -454,6 +454,9 @@ def _from_gemini_parts(
         cache_read_input_tokens=int(
             getattr(usage_metadata, "cached_content_token_count", 0) or 0
         ),
+        thinking_tokens=int(
+            getattr(usage_metadata, "thoughts_token_count", 0) or 0
+        ),
     )
 
     return ProviderResponse(
