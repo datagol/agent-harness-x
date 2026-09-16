@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 import traceback
 from typing import Any, Callable, get_type_hints
@@ -174,8 +175,34 @@ class ToolNotFoundError(Exception):
 class ToolRegistry:
     """Registry for tools. Handles registration, schema generation, and execution."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        default_timeout_seconds: float | None = None,
+        dedupe_calls: bool = False,
+    ) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        # Applied to any tool that does not set its own timeout_seconds.
+        self._default_timeout_seconds = default_timeout_seconds
+        # When on, an identical repeated call (same name AND same arguments)
+        # returns the first result instead of running again. A model that
+        # re-emits a call would otherwise do the work twice - two identical
+        # side effects and double the cost. Off by default: a caller whose
+        # tools are meant to be called repeatedly with the same arguments
+        # must opt in, not be surprised.
+        self._dedupe_calls = dedupe_calls
+        self._call_results: dict[str, ToolResult] = {}
+
+    def reset_call_cache(self) -> None:
+        """Forget deduped results. Call between turns; results are per-turn."""
+        self._call_results.clear()
+
+    @staticmethod
+    def _call_key(tool_call: ToolCall) -> str | None:
+        try:
+            return f"{tool_call.name}:{json.dumps(tool_call.input, sort_keys=True, default=str)}"
+        except Exception:
+            return None  # unserialisable arguments: never dedupe
 
     def register(
         self,
@@ -241,6 +268,7 @@ class ToolRegistry:
         handler: Callable,
         permission: PermissionLevel = PermissionLevel.ASK,
         concurrent: bool = True,
+        timeout_seconds: float | None = None,
     ) -> None:
         """Imperative registration with explicit schema."""
         self._tools[name] = ToolDefinition(
@@ -250,6 +278,7 @@ class ToolRegistry:
             handler=handler,
             permission_level=permission,
             concurrent=concurrent,
+            timeout_seconds=timeout_seconds,
         )
 
     def load_builtin(
@@ -374,25 +403,55 @@ class ToolRegistry:
                 is_error=True,
             )
 
+        cache_key = self._call_key(tool_call) if self._dedupe_calls else None
+        if cache_key is not None and cache_key in self._call_results:
+            cached = self._call_results[cache_key]
+            # Same result, this call's own id.
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                content=cached.content,
+                is_error=cached.is_error,
+            )
+
+        timeout = tool_def.timeout_seconds
+        if timeout is None:
+            timeout = self._default_timeout_seconds
+
         try:
             handler = tool_def.handler
             args = tool_call.input if isinstance(tool_call.input, dict) else {}
             if inspect.iscoroutinefunction(handler):
-                result = await handler(**args)
+                call = handler(**args)
             else:
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(None, lambda: handler(**args))
+                call = loop.run_in_executor(None, lambda: handler(**args))
+            if timeout is not None:
+                result = await asyncio.wait_for(call, timeout)
+            else:
+                result = await call
 
-            return ToolResult(
+            outcome = ToolResult(
                 tool_call_id=tool_call.id,
                 content=str(result),
             )
+        except asyncio.TimeoutError:
+            # The model needs to know this tool is unavailable so it can move
+            # on; a turn that hangs on one slow tool helps nobody.
+            outcome = ToolResult(
+                tool_call_id=tool_call.id,
+                content=f"Tool '{tool_call.name}' timed out after {timeout}s.",
+                is_error=True,
+            )
         except Exception:
-            return ToolResult(
+            outcome = ToolResult(
                 tool_call_id=tool_call.id,
                 content=f"Tool execution error:\n{traceback.format_exc()}",
                 is_error=True,
             )
+
+        if cache_key is not None:
+            self._call_results[cache_key] = outcome
+        return outcome
 
 
 def normalize_tool_registry(tools: ToolRegistry | list[Any] | None) -> ToolRegistry:

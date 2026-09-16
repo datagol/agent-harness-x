@@ -41,6 +41,11 @@ class ToolDefinition:
     handler: Callable[..., Any]
     permission_level: PermissionLevel = PermissionLevel.ASK
     concurrent: bool = True
+    # Seconds before this tool is abandoned. A tool that calls a remote API
+    # can hang indefinitely, and without a bound it takes the whole turn with
+    # it. None means no limit, which stays the default so existing consumers
+    # are unaffected.
+    timeout_seconds: float | None = None
 
 
 @dataclass
