@@ -14,6 +14,7 @@ from .permissions import GuardrailsEngine, PermissionManager
 from .providers import LLMProvider, make_provider
 from .skills import SkillManager
 from .tools import ToolRegistry, normalize_tool_registry
+from .providers.retry import stream_with_retry
 from .types import AgentConfig, StopReason, StreamChunk, ToolCall, ToolResult
 
 
@@ -177,13 +178,21 @@ class StreamingAgent:
             collected_text = ""
             response: Any = None
 
-            async for chunk in self.provider.stream(
-                model=self.config.model,
-                messages=messages,
-                system=effective_system or None,
-                tools=tool_params,
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
+            def _open_provider_stream():
+                return self.provider.stream(
+                    model=self.config.model,
+                    messages=messages,
+                    system=effective_system or None,
+                    tools=tool_params,
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature,
+                )
+
+            async for chunk in stream_with_retry(
+                _open_provider_stream,
+                attempts=self.config.llm_max_attempts,
+                backoff_seconds=self.config.llm_retry_backoff_seconds,
+                description=f"{self.provider.name or 'provider'} stream",
             ):
                 kind = getattr(chunk, "kind", None)
                 if kind == "text_delta":

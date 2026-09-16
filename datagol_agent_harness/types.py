@@ -150,6 +150,11 @@ class AgentConfig:
     max_iterations: int = 50
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
+    # Retry transient provider failures (429, 5xx, timeouts). 1 disables it.
+    # A streaming call is only retried before its first chunk, since after
+    # that a retry would duplicate output the caller has already seen.
+    llm_max_attempts: int = 2
+    llm_retry_backoff_seconds: float = 0.5
     max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
 
 

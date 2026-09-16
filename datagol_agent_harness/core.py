@@ -19,6 +19,7 @@ from .providers import LLMProvider, make_provider
 from .sandbox import Sandbox
 from .skills import SkillManager
 from .tools import ToolRegistry, normalize_tool_registry
+from .providers.retry import call_with_retry
 from .types import AgentConfig, SessionState, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult
 
 
@@ -164,13 +165,18 @@ class Agent:
                 ),
             )
 
-            response = await self.provider.create(
-                model=self.config.model,
-                messages=messages,
-                system=effective_system or None,
-                tools=tool_params,
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
+            response = await call_with_retry(
+                lambda: self.provider.create(
+                    model=self.config.model,
+                    messages=messages,
+                    system=effective_system or None,
+                    tools=tool_params,
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature,
+                ),
+                attempts=self.config.llm_max_attempts,
+                backoff_seconds=self.config.llm_retry_backoff_seconds,
+                description=f"{self.provider.name or 'provider'} create",
             )
 
             response = await self.middleware.process_llm_response(response)
