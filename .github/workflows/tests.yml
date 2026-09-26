@@ -1,0 +1,138 @@
+name: Runtime checks
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_call:
+
+jobs:
+  harness-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: harness-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: harness-web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+  core-install:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extras: ['', '[jev]', '[all]', '[openai,gemini,langsmith,mcp]', '[jev,postgres,temporal,docker]']
+    env:
+      HARNESS_SMOKE_EXTRAS: ${{ matrix.extras }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install build
+      - run: python -m build --wheel
+      - run: |
+          wheels=(dist/*.whl)
+          python -m pip install "${wheels[0]}${HARNESS_SMOKE_EXTRAS}"
+      - name: Installed wheel imports outside the checkout
+        run: |
+          EXPECTED_VERSION="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          export EXPECTED_VERSION
+          cd "${RUNNER_TEMP}"
+          python - <<'PY'
+          import sys
+          import os
+          import importlib.metadata
+          from harnessx import *
+          import harnessx
+          from harnessx.decisions import BooleanQuestion, DecisionRequest, JevDecisionProvider
+          from pathlib import Path
+          assert Path(harnessx.__file__).is_relative_to(Path(sys.prefix))
+          assert importlib.metadata.version('harnessx') == os.environ['EXPECTED_VERSION']
+          assert harnessx.__version__ == os.environ['EXPECTED_VERSION']
+          assert 'temporalio' not in sys.modules
+          assert 'psycopg' not in sys.modules
+          assert 'redis' not in sys.modules
+          assert 'typesafe_sdk' not in sys.modules
+          request = DecisionRequest('smoke', 'v1', 'text', {'check': BooleanQuestion('Relevant?')})
+          assert DecisionRequest.from_dict(request.to_dict()) == request
+          extras = os.environ['HARNESS_SMOKE_EXTRAS']
+          if 'jev' in extras or extras == '[all]':
+              import asyncio
+              async def smoke_jev():
+                  async with JevDecisionProvider(api_key='offline-install-smoke'):
+                      pass
+              asyncio.run(smoke_jev())
+          else:
+              try:
+                  JevDecisionProvider(api_key='offline-install-smoke')
+              except ImportError as error:
+                  assert 'harnessx[jev]' in str(error)
+              else:
+                  raise AssertionError('Jev must remain an optional dependency')
+          if 'openai' in extras or extras == '[all]':
+              import openai, google.genai, langsmith, mcp
+          if 'postgres' in extras or extras == '[all]':
+              import psycopg, psycopg_pool, temporalio, redis, docker
+          PY
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    env:
+      LANGSMITH_TRACING: 'false'
+      LANGSMITH_TRACING_V2: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install '.[dev,all]'
+      - run: python -m mypy
+      - run: python -m pytest -q
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: harness_test
+          POSTGRES_DB: harness_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    env:
+      HARNESS_TEST_POSTGRES_DSN: postgresql://postgres:harness_test@localhost:5432/harness_test
+      HARNESS_TEST_TEMPORAL: localhost:7233
+      HARNESS_TEST_REDIS: redis://localhost:6379/0
+      LANGSMITH_TRACING: 'false'
+      LANGSMITH_TRACING_V2: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[dev,postgres,temporal]'
+      - uses: temporalio/setup-temporal@v0
+      - name: Start Temporal
+        run: |
+          temporal server start-dev --headless > /tmp/temporal.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if temporal operator cluster health; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/temporal.log
+          exit 1
+      - run: python -m pytest tests/test_postgres_runtime.py tests/test_temporal_runtime.py -q

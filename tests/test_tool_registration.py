@@ -6,15 +6,15 @@ import os
 import tempfile
 import unittest
 
-from datagol_agent_harness import (
+from harnessx import (
     Agent,
     AgentConfig,
     PermissionLevel,
-    StreamingAgent,
+    Agent,
     ToolRegistry,
     normalize_tool_registry,
 )
-from datagol_agent_harness.builtin import (
+from harnessx.builtin import (
     fetch_url,
     generate_file,
     list_directory,
@@ -29,7 +29,7 @@ from datagol_agent_harness.builtin import (
     save_memory,
     write_file,
 )
-from datagol_agent_harness.types import ToolCall
+from harnessx.types import ToolCall
 
 
 def sample_tool(text: str, count: int = 1) -> str:
@@ -141,8 +141,8 @@ class TestEnhancedToolRegistration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(agent.tools.has_tool("sample_tool"))
 
     def test_streaming_agent_declarative_tools(self):
-        """StreamingAgent constructor accepts list of bundle strings and tool callables."""
-        agent = StreamingAgent(
+        """Agent constructor accepts list of bundle strings and tool callables."""
+        agent = Agent(
             config=AgentConfig(provider="anthropic"),
             tools=["filesystem", sample_tool],
         )

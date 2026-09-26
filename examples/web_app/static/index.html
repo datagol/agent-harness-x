@@ -1122,7 +1122,16 @@ async function sendMessage() {
             break;
 
           case 'text_complete':
+            segText = ev.content || '';
+            if (!bubble && segText.trim()) bubble = addStreamingBubble();
+            if (bubble) bubble.innerHTML = renderMarkdown(segText);
             killBubble();
+            break;
+
+          case 'attempt_reset':
+            if (bubble) bubble.closest('.msg').remove();
+            bubble = null;
+            segText = '';
             break;
 
           case 'tool_call_start':
@@ -1134,7 +1143,7 @@ async function sendMessage() {
             break;
 
           case 'tool_result':
-            updateToolCard(ev.tool_use_id, ev.content, ev.is_error);
+            updateToolCard(ev.tool_call_id, ev.content, ev.is_error);
             addThinking();
             scrollToBottom();
             break;

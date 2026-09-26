@@ -11,14 +11,14 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from datagol_agent_harness.core import Agent
-from datagol_agent_harness.providers import make_provider
-from datagol_agent_harness.providers.openrouter import (
+from harnessx.core import Agent
+from harnessx.providers import make_provider
+from harnessx.providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterProvider,
 )
-from datagol_agent_harness.streaming import StreamingAgent
-from datagol_agent_harness.types import AgentConfig, StopReason, ToolCall
+from harnessx import Agent
+from harnessx.types import AgentConfig, StopReason, ToolCall
 
 
 def _run(coro):
@@ -394,7 +394,7 @@ class TestOpenRouterAgentIntegration(unittest.TestCase):
         config = AgentConfig(provider="openrouter", model="anthropic/claude-3.7-sonnet")
         agent = Agent(config=config, provider=provider)
 
-        result = _run(agent.run("Hi"))
+        result = _run(agent.run("Hi")).output
         self.assertEqual(result, "Integrated output!")
 
     def test_streaming_agent_with_openrouter(self):
@@ -421,7 +421,7 @@ class TestOpenRouterAgentIntegration(unittest.TestCase):
         provider = OpenRouterProvider(client=client)
 
         config = AgentConfig(provider="openrouter", model="google/gemini-2.5-pro")
-        agent = StreamingAgent(config=config, provider=provider)
+        agent = Agent(config=config, provider=provider)
 
         async def run_streaming():
             deltas = []
@@ -438,12 +438,12 @@ class TestOpenRouterAgentIntegration(unittest.TestCase):
         import importlib
         import sys
 
-        import datagol_agent_harness.providers.openrouter as openrouter_mod
+        import harnessx.providers.openrouter as openrouter_mod
 
         with patch.dict(sys.modules, {"openai": None}):
             with self.assertRaises(ImportError) as ctx:
                 importlib.reload(openrouter_mod)
-            self.assertIn("datagol-agent-harness[openrouter]", str(ctx.exception))
+            self.assertIn("harnessx[openrouter]", str(ctx.exception))
         importlib.reload(openrouter_mod)
 
 

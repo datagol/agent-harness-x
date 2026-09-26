@@ -3,7 +3,10 @@
 Exposes the agent as an HTTP API with streaming SSE support.
 
 Run from the project root:
-    uvicorn examples.web_app.server:app --reload --port 8000
+    pip install -e '.[server]'
+    uvicorn examples.web_app.server:app --host 127.0.0.1 --reload --port 8000
+
+Requires ANTHROPIC_API_KEY. This is a trusted local, single-conversation demo.
 """
 
 from __future__ import annotations
@@ -14,24 +17,25 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from dotenv import load_dotenv
-load_dotenv()
-
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from datagol_agent_harness import (
+from harnessx import (
     AgentConfig,
     MCPManager,
     PermissionLevel,
     SkillManager,
-    StreamingAgent,
-    StreamEventType,
+    Agent,
+    RunEventType,
+    ToolCall,
+    ToolResult,
+    PermissionManager,
+    ToolRegistry,
 )
-from datagol_agent_harness.builtin import register_all_tools
+from harnessx.builtin import register_all_tools
 
 HERE = os.path.dirname(__file__)
 STATIC_DIR = os.path.join(HERE, "static")
@@ -76,58 +80,59 @@ def _resolve_skill_paths() -> list[str]:
                     resolved.append(child_path)
     return resolved
 
+
 # ── Global state ─────────────────────────────────────────────────────────
 
-streaming_agent: StreamingAgent | None = None
+streaming_agent: Agent | None = None
 mcp_manager: MCPManager | None = None
+agent_lock = asyncio.Lock()
 
 
-def create_streaming_agent() -> StreamingAgent:
-    """Create the single streaming agent with all tools and skills registered."""
-    from anthropic import AsyncAnthropic
-    from datagol_agent_harness import PermissionManager, ConversationMemory, ToolRegistry
-
-    config = AgentConfig(
-        system_prompt=(
-            "You are a helpful AI assistant with access to tools. "
-            "Use tools when they help answer the user's question. "
-            "When a user's request matches a skill in <available-skills>, "
-            "call the Skill tool first to load its instructions. "
-            "Be concise and direct."
-        ),
-        max_iterations=0,
-    )
-
+def agent_bindings() -> dict[str, Any]:
+    """Rebind tools and skills for both new agents and restored snapshots."""
     tools = ToolRegistry()
-    register_all_tools(tools)
-
+    register_all_tools(tools, output_dir=OUTPUT_DIR)
     permissions = PermissionManager()
-    for t in ["read_file", "list_directory", "run_bash", "fetch_url", "write_file", "generate_file"]:
-        permissions.set_permission(t, PermissionLevel.ALLOW)
+    for name in [
+        "read_file",
+        "list_directory",
+        "run_bash",
+        "fetch_url",
+        "write_file",
+        "generate_file",
+    ]:
+        permissions.set_permission(name, PermissionLevel.ALLOW)
+    if mcp_manager and mcp_manager.tool_count:
+        mcp_manager.register_tools(tools, permission=PermissionLevel.ALLOW)
+    paths = _resolve_skill_paths()
+    return {
+        "tools": tools,
+        "permissions": permissions,
+        "skills": SkillManager.from_paths([*paths]) if paths else None,
+    }
 
-    # Register MCP tools if manager exists
-    if mcp_manager and mcp_manager.tool_count > 0:
-        registered = mcp_manager.register_tools(tools, permission=PermissionLevel.ALLOW)
-        for name in registered:
-            permissions.set_permission(name, PermissionLevel.ALLOW)
 
-    skill_paths = _resolve_skill_paths()
-    skills = SkillManager.from_paths(skill_paths) if skill_paths else None
-
-    sa = StreamingAgent(
-        config=config,
-        client=AsyncAnthropic(),
-        tools=tools,
-        memory=ConversationMemory(max_result_chars=config.max_result_chars),
-        permissions=permissions,
-        skills=skills,
+def create_streaming_agent() -> Agent:
+    return Agent(
+        config=AgentConfig(
+            system_prompt=(
+                "You are a helpful assistant with access to tools. "
+                "When a request matches an available skill, load it first. "
+                "Be concise and direct."
+            ),
+            max_iterations=25,
+        ),
+        **agent_bindings(),
     )
-    # The Skill tool itself was registered by SkillManager.install() with
-    # PermissionLevel.ALLOW already; this line is a safety net in case
-    # the permission manager is rebuilt elsewhere.
-    if skills is not None:
-        permissions.set_permission("Skill", PermissionLevel.ALLOW)
-    return sa
+
+
+@asynccontextmanager
+async def use_agent():
+    # This demo shares one conversation. Serialize runs and session/tool changes.
+    async with agent_lock:
+        if streaming_agent is None:
+            raise HTTPException(status_code=503, detail="Agent is not running")
+        yield streaming_agent
 
 
 @asynccontextmanager
@@ -135,21 +140,27 @@ async def lifespan(app: FastAPI):
     global streaming_agent, mcp_manager
     mcp_manager = MCPManager()
 
-    # Connect to MCP servers from environment
-    mcp_config = os.environ.get("MCP_SERVERS")
-    if mcp_config:
+    try:
+        # Connect to MCP servers from environment
+        mcp_config = os.environ.get("MCP_SERVERS")
+        if mcp_config:
+            try:
+                servers = json.loads(mcp_config)
+                await mcp_manager.connect_from_config(servers)
+            except Exception as e:
+                print(f"Warning: Failed to connect MCP servers: {e}")
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        streaming_agent = create_streaming_agent()
+        yield
+    finally:
         try:
-            servers = json.loads(mcp_config)
-            await mcp_manager.connect_from_config(servers)
-        except Exception as e:
-            print(f"Warning: Failed to connect MCP servers: {e}")
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    streaming_agent = create_streaming_agent()
-    yield
-
-    if mcp_manager:
-        await mcp_manager.disconnect_all()
+            if streaming_agent is not None:
+                await streaming_agent.aclose()
+        finally:
+            streaming_agent = None
+            await mcp_manager.disconnect_all()
+            mcp_manager = None
 
 
 app = FastAPI(title="Agent Harness API", lifespan=lifespan)
@@ -163,6 +174,7 @@ app.add_middleware(
 
 # ── Request/Response models ──────────────────────────────────────────────
 
+
 class ChatRequest(BaseModel):
     message: str
     system_prompt: str | None = None
@@ -170,16 +182,16 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    tool_calls: list[dict[str, Any]] = []
-    usage: dict[str, Any] = {}
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    usage: dict[str, Any] = Field(default_factory=dict)
 
 
 class MCPConnectRequest(BaseModel):
     name: str
     command: str | None = None
-    args: list[str] = []
+    args: list[str] = Field(default_factory=list)
     url: str | None = None
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class SessionResponse(BaseModel):
@@ -188,65 +200,91 @@ class SessionResponse(BaseModel):
 
 # ── API routes ───────────────────────────────────────────────────────────
 
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    """Non-streaming chat endpoint. Uses the streaming agent, collects all events."""
-    if req.system_prompt is not None:
-        streaming_agent.config.system_prompt = req.system_prompt
-
-    tool_calls_log: list[dict[str, Any]] = []
-    final_text = ""
-
-    async for event in streaming_agent.run_stream(req.message):
-        if event.type == StreamEventType.TEXT_COMPLETE:
-            final_text = event.data or ""
-        elif event.type == StreamEventType.TOOL_CALL_START:
-            tc = event.data
-            tool_calls_log.append({"name": tc.name, "input": tc.input, "status": "running"})
-        elif event.type == StreamEventType.TOOL_RESULT:
-            r = event.data
-            for entry in tool_calls_log:
-                if entry["status"] == "running":
-                    entry["status"] = "error" if r.is_error else "done"
-                    entry["result"] = r.content
-                    break
-
-    return ChatResponse(
-        response=final_text,
-        tool_calls=tool_calls_log,
-        usage=streaming_agent.guardrails.usage_summary,
-    )
+    async with use_agent() as agent:
+        if req.system_prompt is not None:
+            agent.config.system_prompt = req.system_prompt
+        calls: dict[str, dict[str, Any]] = {}
+        async with agent.run_stream(req.message) as events:
+            async for event in events:
+                if event.type == RunEventType.TOOL_CALL_START and isinstance(
+                    event.data, ToolCall
+                ):
+                    call = event.data
+                    calls[call.id] = {
+                        "id": call.id,
+                        "name": call.name,
+                        "input": call.input,
+                        "status": "running",
+                    }
+                elif event.type == RunEventType.TOOL_RESULT and isinstance(
+                    event.data, ToolResult
+                ):
+                    result = event.data
+                    if result.tool_call_id in calls:
+                        calls[result.tool_call_id].update(
+                            status="error" if result.is_error else "done",
+                            result=result.content,
+                        )
+            result = await events.result()
+        if result.status != "completed":
+            raise HTTPException(
+                status_code=502, detail=result.error or {"status": result.status.value}
+            )
+        return ChatResponse(
+            response=result.output,
+            tool_calls=list(calls.values()),
+            usage=agent.guardrails.usage_summary,
+        )
 
 
 @app.post("/api/stream")
 async def stream(req: ChatRequest):
-    """Streaming chat endpoint using Server-Sent Events."""
-    if req.system_prompt is not None:
-        streaming_agent.config.system_prompt = req.system_prompt
-
     async def event_generator():
-        async for event in streaming_agent.run_stream(req.message):
-            if event.type == StreamEventType.TEXT_DELTA:
-                yield f"data: {json.dumps({'type': 'text_delta', 'content': event.data})}\n\n"
-
-            elif event.type == StreamEventType.TEXT_COMPLETE:
-                yield f"data: {json.dumps({'type': 'text_complete', 'content': event.data})}\n\n"
-
-            elif event.type == StreamEventType.TOOL_CALL_START:
-                tc = event.data
-                yield f"data: {json.dumps({'type': 'tool_call_start', 'name': tc.name, 'input': tc.input, 'id': tc.id})}\n\n"
-
-            elif event.type == StreamEventType.TOOL_RESULT:
-                r = event.data
-                yield f"data: {json.dumps({'type': 'tool_result', 'tool_use_id': r.tool_use_id, 'content': r.content, 'is_error': r.is_error})}\n\n"
-
-            elif event.type == StreamEventType.TURN_COMPLETE:
-                usage = streaming_agent.guardrails.usage_summary
-                yield f"data: {json.dumps({'type': 'turn_complete', 'usage': usage})}\n\n"
-
-            elif event.type == StreamEventType.ERROR:
-                yield f"data: {json.dumps({'type': 'error', 'content': str(event.data)})}\n\n"
-
+        async with use_agent() as agent:
+            if req.system_prompt is not None:
+                agent.config.system_prompt = req.system_prompt
+            async with agent.run_stream(req.message) as events:
+                async for event in events:
+                    payload = None
+                    if event.type in (
+                        RunEventType.TEXT_DELTA,
+                        RunEventType.TEXT_COMPLETE,
+                    ):
+                        payload = {"type": event.type.value, "content": event.data}
+                    elif event.type == RunEventType.ATTEMPT_RESET:
+                        payload = {"type": "attempt_reset"}
+                    elif event.type == RunEventType.TOOL_CALL_START and isinstance(
+                        event.data, ToolCall
+                    ):
+                        call = event.data
+                        payload = {
+                            "type": "tool_call_start",
+                            "name": call.name,
+                            "input": call.input,
+                            "id": call.id,
+                        }
+                    elif event.type == RunEventType.TOOL_RESULT and isinstance(
+                        event.data, ToolResult
+                    ):
+                        result = event.data
+                        payload = {
+                            "type": "tool_result",
+                            "tool_call_id": result.tool_call_id,
+                            "content": result.content,
+                            "is_error": result.is_error,
+                        }
+                    elif event.type == RunEventType.TURN_COMPLETE:
+                        payload = {
+                            "type": "turn_complete",
+                            "usage": agent.guardrails.usage_summary,
+                        }
+                    elif event.type == RunEventType.ERROR:
+                        payload = {"type": "error", "content": str(event.data)}
+                    if payload is not None:
+                        yield f"data: {json.dumps(payload)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -259,7 +297,11 @@ async def status():
     tools = sa.tools.list_tools() if sa else []
     mcp_servers = mcp_manager.list_servers() if mcp_manager else {}
     mcp_tools = [
-        {"server": t.server_name, "name": t.tool_name, "description": t.description[:100]}
+        {
+            "server": t.server_name,
+            "name": t.tool_name,
+            "description": t.description[:100],
+        }
         for t in (mcp_manager.list_tools() if mcp_manager else [])
     ]
 
@@ -273,7 +315,7 @@ async def status():
         "status": "running" if sa else "stopped",
         "model": sa.config.model if sa else "",
         "system_prompt": sa.config.system_prompt[:200] if sa else "",
-        "session_id": "",
+        "session_id": sa.session_id if sa else "",
         "tools": tools,
         "mcp_servers": mcp_servers,
         "mcp_tools": mcp_tools,
@@ -305,78 +347,85 @@ async def list_skills():
 async def mcp_connect(req: MCPConnectRequest):
     """Connect to an MCP server at runtime."""
     global streaming_agent
-    try:
-        tools = await mcp_manager.connect(
-            req.name,
-            command=req.command,
-            args=req.args,
-            url=req.url,
-            headers=req.headers,
-            permission=PermissionLevel.ALLOW,
-        )
-    except Exception as e:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=400,
-            content={"error": str(e), "detail": f"Failed to connect to MCP server '{req.name}'"},
-        )
-    # Re-create agent with new tools
-    streaming_agent = create_streaming_agent()
-    return {
-        "server": req.name,
-        "tools": [{"name": t.tool_name, "description": t.description[:100]} for t in tools],
-    }
+    async with use_agent() as previous:
+        assert mcp_manager is not None
+        try:
+            tools = await mcp_manager.connect(
+                req.name,
+                command=req.command,
+                args=req.args,
+                url=req.url,
+                headers=req.headers,
+                permission=PermissionLevel.ALLOW,
+            )
+        except Exception as e:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": str(e),
+                    "detail": f"Failed to connect to MCP server '{req.name}'",
+                },
+            )
+        # Re-create agent with new tools
+        streaming_agent = create_streaming_agent()
+        await previous.aclose()
+        return {
+            "server": req.name,
+            "tools": [
+                {"name": t.tool_name, "description": t.description[:100]} for t in tools
+            ],
+        }
 
 
 @app.post("/api/mcp/disconnect/{name}")
 async def mcp_disconnect(name: str):
     """Disconnect an MCP server."""
     global streaming_agent
-    await mcp_manager.disconnect(name)
-    streaming_agent = create_streaming_agent()
-    return {"disconnected": name}
+    async with use_agent() as previous:
+        assert mcp_manager is not None
+        await mcp_manager.disconnect(name)
+        streaming_agent = create_streaming_agent()
+        await previous.aclose()
+        return {"disconnected": name}
 
 
 @app.post("/api/session/save", response_model=SessionResponse)
 async def save_session():
-    # Save streaming agent's memory
-    from datagol_agent_harness import PersistentMemory, SessionState
-    import uuid
-    storage = PersistentMemory()
-    session_id = str(uuid.uuid4())
-    state = SessionState(
-        session_id=session_id,
-        messages=streaming_agent.memory.get_messages(),
-        total_usage=streaming_agent.guardrails.total_usage,
-    )
-    storage.save_session(state)
-    return SessionResponse(session_id=session_id)
+    async with use_agent() as agent:
+        return SessionResponse(session_id=await agent.save_session())
 
 
 @app.post("/api/session/load/{session_id}")
 async def load_session(session_id: str):
-    from datagol_agent_harness import PersistentMemory
-    storage = PersistentMemory()
-    state = storage.load_session(session_id)
-    streaming_agent.memory.set_messages(state.messages)
-    return {"loaded": session_id}
+    global streaming_agent
+    async with use_agent() as previous:
+        restored = await Agent.load_session(session_id, **agent_bindings())
+        streaming_agent = restored
+        await previous.aclose()
+        return {"loaded": restored.session_id}
 
 
 @app.post("/api/session/clear")
 async def clear_session():
     global streaming_agent
-    streaming_agent = create_streaming_agent()
-    return {"status": "cleared"}
+    async with use_agent() as previous:
+        streaming_agent = create_streaming_agent()
+        await previous.aclose()
+        return {"status": "cleared"}
 
 
 @app.get("/api/sessions")
 async def list_sessions():
-    from datagol_agent_harness import PersistentMemory
+    from harnessx import PersistentMemory
+
     storage = PersistentMemory()
     return {"sessions": storage.list_sessions()}
 
 
 # ── Serve the UI ─────────────────────────────────────────────────────────
+
 
 @app.get("/")
 async def serve_ui():

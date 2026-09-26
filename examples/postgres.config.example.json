@@ -1,0 +1,4 @@
+{
+  "connection_string": "postgresql://YOUR_USER:{password}@YOUR_SERVER.postgres.database.azure.com:5432/YOUR_DATABASE?sslmode=require&connect_timeout=10",
+  "password": "REPLACE_WITH_PASSWORD"
+}

@@ -1,0 +1,559 @@
+"""Web API contracts and real offline example processes; no service credentials."""
+
+import asyncio
+from contextlib import asynccontextmanager
+import importlib.util
+import json
+from pathlib import Path
+import socket
+import sys
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+pytest.importorskip("fastapi")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness-web"))
+
+from harness_web.catalog import CATALOG, ROOT, arguments
+from harness_web.chat import create_chat
+from harness_web.files import open_workspace_file
+from harness_web.runs import RunManager
+from harness_web.server import create_app
+from harnessx import PermissionLevel, ProviderResponse, ToolCall
+from examples._fixtures import ScriptedProvider
+
+
+@pytest.fixture(autouse=True)
+def no_live_services(monkeypatch):
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGCHAIN_API_KEY",
+        "DATABASE_URL",
+    ):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setenv("AGENT_PROVIDER", "anthropic")
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGSMITH_TRACING_V2", "false")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Web tests must not contact live services")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+
+
+@asynccontextmanager
+async def web(tmp_path, **kwargs):
+    app = create_app(data_dir=tmp_path, load_env=False, **kwargs)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://testserver"
+        ) as client:
+            yield app, client
+
+
+async def start(client, example_id, **config):
+    response = await client.post("/api/runs", json={"example_id": example_id, **config})
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+async def wait_status(run, status):
+    async with asyncio.timeout(20):
+        while run.status != status:
+            assert run.status not in ("completed", "failed", "cancelled"), run.events
+            async with run.condition:
+                await run.condition.wait()
+
+
+def output(run):
+    return "".join(event.get("content", "") for event in run.events)
+
+
+def test_catalog_covers_every_example_entry_point(tmp_path):
+    expected = {
+        path.stem
+        for path in (ROOT / "examples").glob("*.py")
+        if not path.name.startswith("_")
+    }
+    assert set(CATALOG) == expected | {"web_app"}
+    for item in CATALOG.values():
+        assert importlib.util.find_spec(item.module)
+        config = {
+            "server": "fixture",
+            "command": "python3",
+            "args": "'path with spaces.py'",
+        }
+        args = arguments(item, config, tmp_path)
+        assert isinstance(args, list) and all(isinstance(arg, str) for arg in args)
+    assert arguments(CATALOG["run_evals"], {}, tmp_path) == ["--offline"]
+    assert arguments(CATALOG["run_evals"], {"mode": "live"}, tmp_path) == []
+    assert arguments(CATALOG["flight_recorder"], {}, tmp_path)[-1] == str(
+        tmp_path / "incident.hx"
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_missing_credentials_and_local_request_boundary(tmp_path):
+    async with web(tmp_path) as (app, client):
+        health = (await client.get("/api/health")).json()
+        assert health["app"] == "harness-web"
+        assert health["providers"][0]["missing"] == ["ANTHROPIC_API_KEY"]
+        assert len((await client.get("/api/examples")).json()) == len(CATALOG)
+        response = await client.post("/api/runs", json={"example_id": "coding_agent"})
+        assert response.status_code == 422 and "ANTHROPIC_API_KEY" in response.text
+        assert not app.state.manager.runs
+        assert (
+            await client.post("/api/runs", json={"example_id": "os"})
+        ).status_code == 404
+        assert (
+            await client.post(
+                "/api/runs", json={"example_id": "skills_demo", "command_line": "bad"}
+            )
+        ).status_code == 422
+        assert (
+            await client.post(
+                "/api/runs",
+                json={"example_id": "skills_demo"},
+                headers={"origin": "https://unrelated.example"},
+            )
+        ).status_code == 403
+        assert (
+            await client.get("/api/health", headers={"host": "unrelated.example"})
+        ).status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_provider_example_checks_selected_credentials_and_builds_arguments(
+    tmp_path, monkeypatch
+):
+    captured = []
+
+    async def launch(run, example, args, prompt):
+        captured.append((example.id, args, prompt))
+        await run.state("completed")
+
+    monkeypatch.setattr("harness_web.server.run_example", launch)
+    monkeypatch.setattr("harness_web.catalog.installed", lambda module: True)
+    async with web(tmp_path) as (app, client):
+        body = {
+            "example_id": "provider_chat",
+            "provider": "openai",
+            "model": "fixture-model",
+            "streaming": False,
+            "prompt": "40 * 10",
+        }
+        denied = await client.post("/api/runs", json=body)
+        assert denied.status_code == 422 and "OPENAI_API_KEY" in denied.text
+        assert "ANTHROPIC_API_KEY" not in denied.text
+        monkeypatch.setenv("OPENAI_API_KEY", "fixture-key")
+        missing_model = await client.post("/api/runs", json={**body, "model": ""})
+        assert missing_model.status_code == 422 and "model ID" in missing_model.text
+        assert not app.state.manager.runs
+        response = await client.post("/api/runs", json=body)
+        assert response.status_code == 201, response.text
+        run = app.state.manager.runs[response.json()["id"]]
+        await run.task
+        assert captured == [
+            (
+                "provider_chat",
+                ["--provider", "openai", "--model=fixture-model", "--no-stream"],
+                "40 * 10",
+            )
+        ]
+        assert run.mode == "live"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "example_id, expected",
+    [
+        ("skills_demo", "SKILL_INVOKED"),
+        ("flight_recorder", "Playback made zero model/tool calls"),
+        ("run_evals", "SCRIPTED FIXTURE"),
+        ("jev_routing", '"route": "sql"'),
+        ("jev_classification", '"choice": "W2"'),
+        ("jev_answer_review", '"probability": 0.96'),
+    ],
+)
+async def test_real_offline_example_and_event_replay(tmp_path, example_id, expected):
+    if example_id == "run_evals":
+        pytest.importorskip("langsmith")
+    async with web(tmp_path) as (app, client):
+        run_id = await start(client, example_id)
+        run = app.state.manager.runs[run_id]
+        await asyncio.wait_for(run.task, 30)
+        assert run.status == "completed", output(run)
+        assert expected in output(run)
+        first = await client.get(f"/api/runs/{run_id}/events")
+        records = [
+            json.loads(line[6:])
+            for line in first.text.splitlines()
+            if line.startswith("data: ") and line != "data: {}"
+        ]
+        assert records[-1]["status"] == "completed"
+        assert len({record["seq"] for record in records}) == len(records)
+        after = records[-2]["seq"]
+        replay = await client.get(
+            f"/api/runs/{run_id}/events", headers={"last-event-id": str(after)}
+        )
+        assert f"id: {after}\n" not in replay.text
+        assert f"id: {records[-1]['seq']}\n" in replay.text
+        if example_id == "flight_recorder":
+            files = (await client.get(f"/api/runs/{run_id}/files")).json()
+            assert files == [
+                {
+                    "name": "incident.hx",
+                    "size": (run.workdir / "incident.hx").stat().st_size,
+                }
+            ]
+            bundle = await client.get(f"/api/runs/{run_id}/files/incident.hx")
+            assert bundle.content.startswith(b"PK")
+            assert "attachment" in bundle.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision, exists", [("y", True), ("n", False)])
+async def test_original_persisted_approval_waits_for_exact_browser_prompt(
+    tmp_path, decision, exists
+):
+    async with web(tmp_path) as (app, client):
+        run_id = await start(client, "runtime_approvals")
+        run = app.state.manager.runs[run_id]
+        await wait_status(run, "waiting")
+        assert "Note exists: False" in output(run)
+        assert run.pending["kind"] == "approval"
+        assert not run.task.done()
+        bad = await client.post(
+            f"/api/runs/{run_id}/input", json={"prompt_id": "stale", "value": "y"}
+        )
+        assert bad.status_code == 409
+        prompt = run.pending["id"]
+        rejected = await client.post(
+            f"/api/runs/{run_id}/input", json={"prompt_id": prompt, "value": "a"}
+        )
+        assert rejected.status_code == 409
+        answer = {"prompt_id": prompt, "value": decision}
+        responses = await asyncio.gather(
+            *(client.post(f"/api/runs/{run_id}/input", json=answer) for _ in range(2))
+        )
+        assert sorted(response.status_code for response in responses) == [200, 409]
+        await asyncio.wait_for(run.task, 10)
+        assert run.status == "completed", output(run)
+        assert f"After approval: completed | Note exists: {exists}" in output(run)
+
+
+@pytest.mark.asyncio
+async def test_stop_pending_process_and_reject_late_approval(tmp_path):
+    async with web(tmp_path) as (app, client):
+        run_id = await start(client, "runtime_approvals")
+        run = app.state.manager.runs[run_id]
+        await wait_status(run, "waiting")
+        prompt = run.pending["id"]
+        response = await client.post(f"/api/runs/{run_id}/stop")
+        assert response.json()["status"] == "cancelled"
+        assert run.task.done() and run.process.returncode is not None
+        assert run.pending is None
+        assert (
+            await client.post(
+                f"/api/runs/{run_id}/input", json={"prompt_id": prompt, "value": "y"}
+            )
+        ).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_downloads_reject_symlinks_and_other_run_files(tmp_path):
+    async with web(tmp_path) as (app, client):
+        run = app.state.manager.create("Files", "fixture")
+        secret = tmp_path / "secret.txt"
+        secret.write_text("private")
+        (run.workdir / "escape.txt").symlink_to(secret)
+        (run.workdir / "folder").symlink_to(tmp_path, target_is_directory=True)
+        (run.workdir / ".env").write_text("private")
+        (run.workdir / "safe.txt").write_text("safe")
+        files = (await client.get(f"/api/runs/{run.id}/files")).json()
+        assert [item["name"] for item in files] == ["safe.txt"]
+        for name in ("escape.txt", "folder/secret.txt", ".env", "%2e%2e%2fsecret.txt"):
+            assert (
+                await client.get(f"/api/runs/{run.id}/files/{name}")
+            ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_demo_chat_tools_history_and_session_isolation(tmp_path):
+    async with web(tmp_path) as (app, client):
+        first = (await client.post("/api/chats", json={"provider": "demo"})).json()
+        second = (await client.post("/api/chats", json={"provider": "demo"})).json()
+        response = await client.post(
+            f"/api/chats/{first['id']}/messages", json={"message": "What is 48 * 12?"}
+        )
+        assert response.status_code == 201, response.text
+        run = app.state.manager.runs[response.json()["id"]]
+        await asyncio.wait_for(run.task, 5)
+        chat = (await client.get(f"/api/chats/{first['id']}")).json()
+        assert chat["messages"][-1]["tools"][0]["content"] == "576"
+        assert "576" in chat["messages"][-1]["content"]
+        assert "no model calls" in chat["messages"][-1]["content"]
+        assert (await client.get(f"/api/chats/{second['id']}")).json()["messages"] == []
+        agent = app.state.chats[first["id"]].agent
+        assert (await client.delete(f"/api/chats/{first['id']}")).status_code == 200
+        assert agent._closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision, exists", [("y", True), ("n", False), ("stop", False)]
+)
+async def test_chat_write_permission_is_enforced_in_engine(tmp_path, decision, exists):
+    def factory(provider, model, directory):
+        scripted = ScriptedProvider(
+            [
+                ProviderResponse(
+                    tool_calls=[
+                        ToolCall(
+                            "write",
+                            "write_file",
+                            {"path": "review.txt", "content": "Approved"},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                ),
+                ProviderResponse(text="Finished."),
+            ]
+        )
+        return create_chat(provider, model, directory, provider_instance=scripted)
+
+    async with web(tmp_path, chat_factory=factory) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()[
+            "id"
+        ]
+        response = await client.post(
+            f"/api/chats/{chat_id}/messages", json={"message": "Write a review"}
+        )
+        run = app.state.manager.runs[response.json()["id"]]
+        await wait_status(run, "waiting")
+        assert not (run.workdir / "review.txt").exists()
+        assert run.pending["tool"]["name"] == "write_file"
+        overlap = await client.post(
+            f"/api/chats/{chat_id}/messages", json={"message": "Another turn"}
+        )
+        assert overlap.status_code == 409
+        if decision == "stop":
+            await client.post(f"/api/runs/{run.id}/stop")
+        else:
+            await client.post(
+                f"/api/runs/{run.id}/input",
+                json={"prompt_id": run.pending["id"], "value": decision},
+            )
+            await asyncio.wait_for(run.task, 5)
+        assert (run.workdir / "review.txt").exists() is exists
+        assert not app.state.chats[chat_id].agent._busy
+
+
+@pytest.mark.asyncio
+async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
+    tmp_path,
+):
+    class FakeMCP:
+        def __init__(self):
+            self.servers = {}
+            self.connect_calls = []
+            self.closed = False
+
+        @property
+        def tool_count(self):
+            return sum(len(info["tools"]) for info in self.servers.values())
+
+        async def connect(self, name, **kwargs):
+            self.connect_calls.append((name, kwargs))
+            tools = [
+                SimpleNamespace(
+                    server_name=name,
+                    tool_name="inspect",
+                    description="Inspect a configured fixture",
+                    input_schema={"type": "object", "properties": {}},
+                )
+            ]
+            self.servers[name] = {
+                "transport": "stdio" if kwargs["command"] else "sse",
+                "tools": tools,
+                "permission": kwargs["permission"],
+            }
+            return tools
+
+        async def disconnect(self, name):
+            self.servers.pop(name, None)
+
+        async def disconnect_all(self):
+            self.closed = True
+            self.servers.clear()
+
+        def list_servers(self):
+            return {
+                name: {
+                    "connected": True,
+                    "transport": info["transport"],
+                    "tools": [tool.tool_name for tool in info["tools"]],
+                }
+                for name, info in self.servers.items()
+            }
+
+        def register_tools(self, registry):
+            names = []
+            for name, info in self.servers.items():
+                for tool in info["tools"]:
+                    tool_name = f"{name}_{tool.tool_name}"
+                    registry.register_with_schema(
+                        tool_name,
+                        tool.description,
+                        tool.input_schema,
+                        lambda: "fixture",
+                        permission=info["permission"],
+                    )
+                    names.append(tool_name)
+            return names
+
+    async with web(tmp_path) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()["id"]
+        chat = app.state.chats[chat_id]
+        fake_mcp = FakeMCP()
+        chat.mcp = fake_mcp
+        chat.agent.memory.add_user_message("Remember this history")
+        original_agent = chat.agent
+
+        updated = await client.patch(
+            f"/api/chats/{chat_id}/setup",
+            json={"system_prompt": "You are a precise data analyst."},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["system_prompt"] == "You are a precise data analyst."
+        assert chat.agent is not original_agent and original_agent._closed
+        assert chat.agent.memory.get_messages() == [{"role": "user", "content": "Remember this history"}]
+
+        skill = "---\nname: audit-check\ndescription: Check business-data assumptions\n---\n\nVerify source dates before advising.\n"
+        uploaded = await client.post(
+            f"/api/chats/{chat_id}/skills",
+            json={"name": "audit.md", "content": skill},
+        )
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["skills"] == [
+            {
+                "name": "audit-check",
+                "description": "Check business-data assumptions",
+                "file": "audit.md",
+                "body_chars": len("Verify source dates before advising."),
+            }
+        ]
+        assert "<available-skills>" in chat.agent.config.system_prompt
+        duplicate = await client.post(
+            f"/api/chats/{chat_id}/skills",
+            json={"name": "same-name.md", "content": skill},
+        )
+        assert duplicate.status_code == 422 and not (chat.directory / "skills" / "same-name.md").exists()
+        invalid_name = await client.post(
+            f"/api/chats/{chat_id}/skills",
+            json={"name": "../escape.md", "content": skill},
+        )
+        assert invalid_name.status_code == 422
+
+        connected = await client.post(
+            f"/api/chats/{chat_id}/mcp",
+            json={"name": "fixture", "command": "fixture-server", "args": "--safe 'path with spaces'"},
+        )
+        assert connected.status_code == 201, connected.text
+        assert fake_mcp.connect_calls == [
+            ("fixture", {"command": "fixture-server", "args": ["--safe", "path with spaces"], "url": None, "permission": PermissionLevel.ASK})
+        ]
+        assert connected.json()["mcp_servers"]["fixture"]["tools"] == ["inspect"]
+        definition = chat.agent.tools.get_tool("fixture_inspect")
+        assert definition.permission_level == PermissionLevel.ASK
+        denied = await chat.agent.tools.execute(ToolCall("mcp", "fixture_inspect", {}), permissions=chat.agent.permissions)
+        assert denied.is_error
+
+        disconnected = await client.delete(f"/api/chats/{chat_id}/mcp/fixture")
+        assert disconnected.status_code == 200
+        assert disconnected.json()["mcp_servers"] == {}
+        assert not chat.agent.tools.has_tool("fixture_inspect")
+        removed = await client.delete(f"/api/chats/{chat_id}/skills/audit.md")
+        assert removed.status_code == 200 and removed.json()["skills"] == []
+        assert not (chat.directory / "skills" / "audit.md").exists()
+        await client.delete(f"/api/chats/{chat_id}")
+        assert fake_mcp.closed
+
+
+@pytest.mark.asyncio
+async def test_chat_setup_rejects_active_turns_and_invalid_mcp_configuration(tmp_path):
+    async with web(tmp_path) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()["id"]
+        chat = app.state.chats[chat_id]
+        run = app.state.manager.create("active", "chat", workdir=chat.directory)
+        run.task = asyncio.create_task(asyncio.sleep(60))
+        chat.active = run
+        blocked = await client.patch(
+            f"/api/chats/{chat_id}/setup", json={"system_prompt": "Changed"}
+        )
+        assert blocked.status_code == 409
+        await run.stop()
+        for body in (
+            {"name": "both", "command": "tool", "url": "https://example.test/mcp"},
+            {"name": "bad", "url": "file:///tmp/server"},
+            {"name": "bad/name", "command": "tool"},
+            {"name": "quoted", "command": "tool", "args": "'unterminated"},
+        ):
+            response = await client.post(f"/api/chats/{chat_id}/mcp", json=body)
+            assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_bounded_history_reports_gap_and_early_cancel_is_terminal(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("harness_web.runs.MAX_EVENTS", 3)
+    manager = RunManager(tmp_path)
+    run = manager.create("bounded", "fixture")
+    for _ in range(8):
+        await run.emit("output", content="line")
+    await run.state("completed")
+    events = [event async for event in run.subscribe()]
+    assert events[0]["type"] == "gap" and len(events) == 4
+    pending = manager.create("cancel early", "fixture")
+    pending.task = asyncio.create_task(asyncio.sleep(60))
+    await pending.stop()
+    assert pending.status == "cancelled" and pending.task.cancelled()
+
+
+def test_mcp_arguments_validate_transports_and_keep_shell_characters_literal(tmp_path):
+    item = CATALOG["mcp_agent"]
+    with pytest.raises(ValueError):
+        arguments(
+            item,
+            {"server": "both", "command": "python", "url": "http://example.test"},
+            tmp_path,
+        )
+    with pytest.raises(ValueError):
+        arguments(item, {"server": "invalid", "url": "file:///etc/passwd"}, tmp_path)
+    args = arguments(
+        item,
+        {"server": "literal", "command": "python3", "args": "'a b.py' '; echo no'"},
+        tmp_path,
+    )
+    assert args[-1] == "--args='a b.py' '; echo no'"
+
+
+def test_download_pins_the_file_before_a_concurrent_path_swap(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    report = workspace / "report.txt"
+    report.write_text("intended download")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private")
+    with open_workspace_file(workspace, "report.txt") as stream:
+        report.unlink()
+        report.symlink_to(outside)
+        assert stream.read() == b"intended download"
+    with pytest.raises(OSError):
+        open_workspace_file(workspace, "report.txt")

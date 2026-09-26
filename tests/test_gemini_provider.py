@@ -9,14 +9,14 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
-from datagol_agent_harness.providers import make_provider
-from datagol_agent_harness.providers.gemini import (
+from harnessx.providers import make_provider
+from harnessx.providers.gemini import (
     THOUGHT_SIGNATURE_KEY,
     GeminiProvider,
     _to_gemini_contents,
     _to_gemini_tools,
 )
-from datagol_agent_harness.types import StopReason
+from harnessx.types import StopReason
 
 
 # ── genai response fakes ─────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ class TestHistoryTranslation(unittest.TestCase):
 
     def test_round_trip_through_conversation_memory(self):
         """Provider response blocks -> memory -> back to Gemini contents keeps the signature."""
-        from datagol_agent_harness.memory import ConversationMemory
+        from harnessx.memory import ConversationMemory
 
         sig = b"round-trip-sig"
         client = FakeClient(
@@ -363,12 +363,12 @@ class TestGeminiMisc(unittest.TestCase):
         import sys
         import unittest.mock as mock
 
-        import datagol_agent_harness.providers.gemini as gemini_mod
+        import harnessx.providers.gemini as gemini_mod
 
         with mock.patch.dict(sys.modules, {"google": None, "google.genai": None}):
             with self.assertRaises(ImportError) as ctx:
                 importlib.reload(gemini_mod)
-            self.assertIn("datagol-agent-harness[gemini]", str(ctx.exception))
+            self.assertIn("harnessx[gemini]", str(ctx.exception))
         importlib.reload(gemini_mod)
 
 

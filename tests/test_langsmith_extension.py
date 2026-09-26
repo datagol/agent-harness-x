@@ -1,4 +1,4 @@
-"""Tests for LangSmithExtension in datagol-agent-harness."""
+"""Tests for LangSmithExtension in harnessx."""
 
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ from typing import Any
 import unittest
 from unittest.mock import MagicMock, patch
 
-from datagol_agent_harness import (
+from harnessx import (
     Agent,
     AgentConfig,
     LangSmithExtension,
     PermissionLevel,
-    StreamingAgent,
+    Agent,
     TokenUsage,
     ToolCall,
     ToolResult,
 )
-from datagol_agent_harness.providers.base import LLMProvider
+from harnessx.providers.base import LLMProvider
 
 
 # ── Mock Response Structures ────────────────────────────────────────────────
@@ -73,7 +73,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
         """Verify extension metadata and graceful missing package handling."""
         self.assertEqual(LangSmithExtension.name, "langsmith")
 
-        with patch("datagol_agent_harness.extensions.langsmith._LANGSMITH_AVAILABLE", False):
+        with patch("harnessx.extensions.langsmith._LANGSMITH_AVAILABLE", False):
             with self.assertRaises(ImportError) as ctx:
                 LangSmithExtension()
             self.assertIn("The 'langsmith' package is required", str(ctx.exception))
@@ -87,8 +87,8 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             [MockResponse(content=[MockTextBlock(text="42")], stop_reason="end_turn")]
         )
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
-             patch("datagol_agent_harness.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
 
             ext = LangSmithExtension(
                 project_name="test-project",
@@ -102,7 +102,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
                 extensions=[ext],
             )
 
-            result = await agent.run("What is 17 + 25?")
+            result = (await agent.run("What is 17 + 25?")).output
             self.assertEqual(result, "42")
 
         # Verify posted runs: 1 root chain run + 1 child llm run
@@ -147,8 +147,8 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
-             patch("datagol_agent_harness.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
 
             ext = LangSmithExtension(project_name="tool-tests")
             agent = Agent(
@@ -161,7 +161,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             def add(a: int, b: int) -> int:
                 return a + b
 
-            result = await agent.run("Compute 10 + 20")
+            result = (await agent.run("Compute 10 + 20")).output
             self.assertEqual(result, "The sum is 30")
 
         # Runs posted:
@@ -201,8 +201,8 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
-             patch("datagol_agent_harness.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
 
             ext_orch = LangSmithExtension(project_name="multi-agent", run_name="Orchestrator")
             orchestrator = Agent(
@@ -220,9 +220,9 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
 
             @orchestrator.tools.register(permission=PermissionLevel.ALLOW)
             async def delegate(q: str) -> str:
-                return await sub_agent.run(q)
+                return (await sub_agent.run(q)).output
 
-            res = await orchestrator.run("Solve complex problem")
+            res = (await orchestrator.run("Solve complex problem")).output
             self.assertEqual(res, "Synthesized answer")
 
         # Let's inspect the hierarchy:
@@ -261,8 +261,8 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             async def count_tokens(self, **kwargs: Any) -> int:
                 return 0
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
-             patch("datagol_agent_harness.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
 
             ext = LangSmithExtension(project_name="error-test")
             agent = Agent(
@@ -271,8 +271,9 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
                 extensions=[ext],
             )
 
-            with self.assertRaises(RuntimeError):
-                await agent.run("Fail now")
+            result = await agent.run("Fail now")
+            self.assertEqual(result.status, "failed")
+            self.assertIn("API failure", result.error["message"])
 
         # Root run and LLM run should have ended with error
         self.assertTrue(any("API failure" in str(r.error) for r in patched_runs))
@@ -284,15 +285,15 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             [MockResponse(content=[MockTextBlock(text="ok")], stop_reason="end_turn")]
         )
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append):
             ext = LangSmithExtension(enabled=False)
             agent = Agent(provider=mock_provider, extensions=[ext])
-            await agent.run("hello")
+            (await agent.run("hello")).output
 
         self.assertEqual(len(posted_runs), 0)
 
     async def test_streaming_agent_lifecycle(self):
-        """Verify StreamingAgent turn events and LLM spans are traced."""
+        """Verify Agent turn events and LLM spans are traced."""
         posted_runs: list[Any] = []
         patched_runs: list[Any] = []
 
@@ -320,11 +321,11 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
         mock_client = MagicMock()
         mock_client.messages.stream.return_value = MockStream()
 
-        with patch("datagol_agent_harness.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
-             patch("datagol_agent_harness.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
 
             ext = LangSmithExtension(project_name="stream-test")
-            streaming_agent = StreamingAgent(
+            streaming_agent = Agent(
                 config=AgentConfig(model="claude-sonnet-4-6"),
                 client=mock_client,
                 extensions=[ext],

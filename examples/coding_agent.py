@@ -9,16 +9,24 @@ Run: python -m examples.coding_agent
 import asyncio
 import logging
 
-from datagol_agent_harness import (
+from harnessx import (
     AgentConfig,
+    CliPermissionManager,
     Middleware,
     MiddlewarePipeline,
     PermissionLevel,
-    StreamingAgent,
+    Agent,
 )
-from examples._console import console, get_user_input, handle_stream_event, print_banner, print_error, print_status
-from datagol_agent_harness.builtin.bash import register_bash_tools
-from datagol_agent_harness.builtin.filesystem import register_filesystem_tools
+from examples._console import (
+    console,
+    get_user_input,
+    handle_stream_event,
+    print_banner,
+    print_error,
+    print_status,
+)
+from harnessx.builtin.bash import register_bash_tools
+from harnessx.builtin.filesystem import register_filesystem_tools
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger("coding_agent")
@@ -32,7 +40,9 @@ class AuditMiddleware(Middleware):
         return tool_call
 
     async def after_tool_execution(self, result):
-        logger.info(f"AUDIT: result error={result.is_error} content={result.content[:100]}")
+        logger.info(
+            f"AUDIT: result error={result.is_error} content={result.content[:100]}"
+        )
         return result
 
 
@@ -42,7 +52,7 @@ async def main():
     middleware.add(AuditMiddleware())
 
     # Create streaming agent
-    agent = StreamingAgent(
+    agent = Agent(
         config=AgentConfig(
             system_prompt=(
                 "You are an expert coding assistant. You can read files, "
@@ -53,36 +63,39 @@ async def main():
             max_iterations=30,
         ),
         middleware=middleware,
+        permissions=CliPermissionManager(),
     )
 
-    register_filesystem_tools(agent.tools)
-    register_bash_tools(agent.tools)
+    async with agent:
+        register_filesystem_tools(agent.tools)
+        register_bash_tools(agent.tools)
 
-    # Auto-allow read operations
-    agent.permissions.set_permission("read_file", PermissionLevel.ALLOW)
-    agent.permissions.set_permission("list_directory", PermissionLevel.ALLOW)
+        # Auto-allow read operations
+        agent.permissions.set_permission("read_file", PermissionLevel.ALLOW)
+        agent.permissions.set_permission("list_directory", PermissionLevel.ALLOW)
 
-    print_banner(
-        "DataGOL Agent Harness — Coding Agent",
-        subtitle="Streaming mode | Read operations auto-allowed, writes require permission",
-        commands={"quit": "Exit"},
-    )
+        print_banner(
+            "HarnessX — Coding Agent",
+            subtitle="Streaming mode | Read operations auto-allowed, writes require permission",
+            commands={"quit": "Exit"},
+        )
 
-    while True:
-        user_input = get_user_input()
-        if user_input is None or user_input.lower() == "quit":
-            break
-        if not user_input:
-            continue
+        while True:
+            user_input = get_user_input()
+            if user_input is None or user_input.lower() == "quit":
+                break
+            if not user_input:
+                continue
 
-        try:
-            console.print()
-            async for event in agent.run_stream(user_input):
-                handle_stream_event(event)
-        except Exception as e:
-            print_error(e)
+            try:
+                console.print()
+                async with agent.run_stream(user_input) as stream:
+                    async for event in stream:
+                        handle_stream_event(event)
+            except Exception as e:
+                print_error(e)
 
-    print_status({"Session stats": agent.guardrails.usage_summary})
+        print_status({"Session stats": agent.guardrails.usage_summary})
 
 
 if __name__ == "__main__":

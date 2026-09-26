@@ -2,16 +2,19 @@
 
 Demonstrates:
   - Defining benchmark test cases with LangSmith Examples
-  - Running deterministic and model-graded evaluators
-  - Capturing tool accuracy, iteration counts, token usage, and cost
+  - Running deterministic tool-selection and output evaluators
+  - Capturing tool accuracy and iteration counts
   - Inspecting evaluation results locally and in the LangSmith Web UI
 
-Prerequisites for LangSmith upload:
+Prerequisites:
+  pip install -e '.[langsmith]'
+
+For live models and LangSmith upload:
   export ANTHROPIC_API_KEY=sk-ant-...
   export LANGSMITH_API_KEY=lsv2_pt_...
   export LANGSMITH_PROJECT="datagol-agent-evals"
 
-Run offline (no keys required, zero cost):
+Run the scripted fixture (no keys, model calls, or uploads):
   python -m examples.run_evals --offline
 
 Run live against Anthropic and upload to LangSmith:
@@ -22,13 +25,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
+from functools import partial
 
-from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
-from datagol_agent_harness.evals import (
+from harnessx import Agent, AgentConfig, PermissionLevel, ProviderResponse, ToolCall
+from examples._calculator import calculate
+from examples._fixtures import ScriptedProvider
+from harnessx.evals import (
     build_example,
     contains_evaluator,
-    default_evaluators,
     evaluate_agent,
     no_tool_errors_evaluator,
     tool_args_evaluator,
@@ -36,85 +40,110 @@ from datagol_agent_harness.evals import (
 )
 
 
-def build_math_agent(inputs: dict) -> Agent:
-    """Agent factory providing arithmetic tools."""
+def build_math_agent(inputs: dict, *, fixture: bool = False) -> Agent:
+    """Fresh agent per row; the fixture verifies integration, not model quality."""
+    provider = None
+    if fixture:
+        expressions = {
+            "What is 48 * 2?": "48 * 2",
+            "Can you compute (15 + 35) / 2?": "(15 + 35) / 2",
+        }
+        prompt = inputs["prompt"]
+        if prompt in expressions:
+            expression = expressions[prompt]
+            responses = [
+                ProviderResponse(
+                    tool_calls=[
+                        ToolCall("calculate", "calculate", {"expression": expression})
+                    ],
+                    stop_reason="tool_use",
+                ),
+                ProviderResponse(text=calculate(expression)),
+            ]
+        elif prompt == "What is the capital of Japan?":
+            responses = [ProviderResponse(text="Tokyo")]
+        else:
+            raise ValueError("This prompt has no scripted fixture")
+        provider = ScriptedProvider(responses)
     agent = Agent(
+        provider=provider,
         config=AgentConfig(
             model=os.getenv("AGENT_MODEL", "claude-sonnet-4-6"),
             system_prompt=(
-                "You are an expert math assistant. Always use the calculate tool "
-                "to evaluate mathematical expressions accurately."
+                "Use the calculate tool for arithmetic. Answer non-arithmetic "
+                "questions directly without invoking it."
             ),
             max_iterations=5,
-        )
+        ),
     )
 
-    @agent.tools.register(permission=PermissionLevel.ALLOW)
-    def calculate(expression: str) -> str:
-        """Safely compute simple arithmetic expressions.
-
-        Args:
-            expression: Arithmetic expression like '144 / 12'.
-        """
-        try:
-            allowed = set("0123456789+-*/(). ")
-            if not all(c in allowed for c in expression):
-                return "Error: only basic arithmetic characters allowed"
-            return str(eval(expression, {"__builtins__": None}, {}))
-        except Exception as e:
-            return f"Error: {e}"
+    agent.tools.register_tool(
+        calculate, permission=PermissionLevel.ALLOW, replay_policy="safe"
+    )
 
     return agent
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run agent evaluations with LangSmith")
-    parser.add_argument("--offline", action="store_true", help="Run locally without LangSmith upload")
-    parser.add_argument("--suite", default="tool_calling", help="Benchmark dataset name or 'custom'")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use the scripted custom fixture; no model calls or uploads",
+    )
+    parser.add_argument(
+        "--suite",
+        default="custom",
+        choices=["custom"],
+        help="The three-case arithmetic example; use harnessx.evals.cli for broader suites",
+    )
     args = parser.parse_args()
 
     has_key = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
-    offline = args.offline or not has_key
+    upload = not args.offline and has_key
 
     print("=" * 65)
-    print("DataGOL Agent Harness — LangSmith Evaluation Demo")
-    print(f"Mode: {'OFFLINE (Local)' if offline else 'LIVE (Uploading to LangSmith)'}")
+    print("HarnessX — LangSmith Evaluation Demo")
+    print(
+        "Mode:",
+        "SCRIPTED FIXTURE (no network)"
+        if args.offline
+        else "LIVE MODEL (API usage applies)",
+    )
+    print("LangSmith upload:", "enabled" if upload else "disabled")
     print("=" * 65)
 
-    # 1. Define custom evaluation dataset or load from registry
-    if args.suite == "custom":
-        dataset = [
-            build_example(
-                inputs={"prompt": "What is 48 * 2?"},
-                outputs={
-                    "expected_tools": ["calculate"],
-                    "contains_all": ["96"],
-                    "expected_args": {"calculate": {"expression": "48 * 2"}},
-                    "max_allowed_iterations": 3,
-                },
-                metadata={"difficulty": "easy"},
-            ),
-            build_example(
-                inputs={"prompt": "Can you compute (15 + 35) / 2?"},
-                outputs={
-                    "expected_tools": ["calculate"],
-                    "contains_all": ["25"],
-                    "max_allowed_iterations": 3,
-                },
-                metadata={"difficulty": "easy"},
-            ),
-            build_example(
-                inputs={"prompt": "What is the capital of Japan?"},
-                outputs={
-                    "forbidden_tools": ["calculate"],
-                    "contains_all": ["Tokyo"],
-                    "max_allowed_iterations": 2,
-                },
-                metadata={"category": "negative_tool_avoidance"},
-            ),
-        ]
-    else:
-        dataset = args.suite
+    # 1. Define this example's three evaluation cases.
+    dataset = [
+        build_example(
+            inputs={"prompt": "What is 48 * 2?"},
+            outputs={
+                "expected_tools": ["calculate"],
+                "contains_all": ["96"],
+                "expected_args": {"calculate": {"expression": "48 * 2"}},
+                "max_allowed_iterations": 3,
+            },
+            metadata={"difficulty": "easy"},
+        ),
+        build_example(
+            inputs={"prompt": "Can you compute (15 + 35) / 2?"},
+            outputs={
+                "expected_tools": ["calculate"],
+                "contains_all": ["25"],
+                "max_allowed_iterations": 3,
+            },
+            metadata={"difficulty": "easy"},
+        ),
+        build_example(
+            inputs={"prompt": "What is the capital of Japan?"},
+            outputs={
+                "forbidden_tools": ["calculate"],
+                "contains_all": ["Tokyo"],
+                "max_allowed_iterations": 2,
+            },
+            metadata={"category": "negative_tool_avoidance"},
+        ),
+    ]
 
     # 2. Select evaluators
     evaluators = [
@@ -126,16 +155,18 @@ def main() -> None:
 
     # 3. Run evaluation
     summary = evaluate_agent(
-        agent=build_math_agent,
+        agent=partial(build_math_agent, fixture=args.offline),
         dataset=dataset,
         evaluators=evaluators,
         experiment_prefix="demo-math-agent",
-        offline=offline,
+        offline=not upload,  # Runner offline=True disables upload, not model calls.
         print_summary=True,
     )
 
     if summary.url:
-        print(f"\nExplore interactive traces and comparison in LangSmith:\n{summary.url}\n")
+        print(
+            f"\nExplore interactive traces and comparison in LangSmith:\n{summary.url}\n"
+        )
 
 
 if __name__ == "__main__":

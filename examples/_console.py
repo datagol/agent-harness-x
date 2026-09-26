@@ -11,7 +11,15 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from datagol_agent_harness import HookContext, HookManager, StreamEvent, StreamEventType
+from harnessx import (
+    HookContext,
+    HookManager,
+    RunEvent,
+    RunEventType,
+    RunResult,
+    ToolCall,
+    ToolResult,
+)
 
 theme = Theme(
     {
@@ -28,7 +36,9 @@ theme = Theme(
 console = Console(theme=theme)
 
 
-def print_banner(title: str, subtitle: str = "", commands: dict[str, str] | None = None) -> None:
+def print_banner(
+    title: str, subtitle: str = "", commands: dict[str, str] | None = None
+) -> None:
     """Print a styled startup banner."""
     lines = [f"[bold]{title}[/bold]"]
     if subtitle:
@@ -70,23 +80,46 @@ def print_tool_result(result: Any, *, is_error: bool = False) -> None:
 def print_response(text: str) -> None:
     """Print the agent's response as rendered markdown in a panel."""
     md = Markdown(text)
-    console.print(Panel(md, title="[agent.label]Assistant[/agent.label]", border_style="magenta", padding=(0, 1)))
+    console.print(
+        Panel(
+            md,
+            title="[agent.label]Assistant[/agent.label]",
+            border_style="magenta",
+            padding=(0, 1),
+        )
+    )
 
 
 def print_error(error: Exception | str) -> None:
     """Print an error message."""
-    console.print(Panel(str(error), title="[bold red]Error[/bold red]", border_style="red"))
+    console.print(
+        Panel(str(error), title="[bold red]Error[/bold red]", border_style="red")
+    )
 
 
-def print_status(data: dict[str, str]) -> None:
+def print_status(data: dict[str, Any]) -> None:
     """Print status key-value pairs."""
     for key, value in data.items():
         console.print(f"  [info]{key}:[/info] {value}")
 
 
+def completed_output(result: RunResult) -> str:
+    """Surface failed or pending runs instead of displaying an empty answer."""
+    if result.status != "completed":
+        message = (
+            result.error["message"]
+            if result.error
+            else f"Run status: {result.status.value}"
+        )
+        raise RuntimeError(message)
+    return result.output
+
+
 def print_delegation(from_agent: str, to_agent: str) -> None:
     """Print agent delegation arrow."""
-    console.print(f"  [warning]{from_agent}[/warning] [dim]->[/dim] [warning]{to_agent}[/warning]")
+    console.print(
+        f"  [warning]{from_agent}[/warning] [dim]->[/dim] [warning]{to_agent}[/warning]"
+    )
 
 
 def get_user_input(prompt: str = "You") -> str | None:
@@ -98,19 +131,25 @@ def get_user_input(prompt: str = "You") -> str | None:
         return None
 
 
-def handle_stream_event(event: StreamEvent) -> None:
+def handle_stream_event(event: RunEvent) -> None:
     """Handle a single streaming event with rich output."""
-    if event.type == StreamEventType.TEXT_DELTA:
-        console.print(event.data, end="")
-    elif event.type == StreamEventType.TEXT_COMPLETE:
+    if event.type == RunEventType.TEXT_DELTA:
+        console.print(event.data, end="", markup=False)
+    elif event.type == RunEventType.TEXT_COMPLETE:
         console.print()  # newline after streamed text
-    elif event.type == StreamEventType.TOOL_CALL_START:
+    elif event.type == RunEventType.ATTEMPT_RESET:
+        console.print(
+            "\n[warning]Model retry: preceding partial text is incomplete.[/warning]"
+        )
+    elif event.type == RunEventType.TOOL_CALL_START and isinstance(
+        event.data, ToolCall
+    ):
         print_tool_call(event.data.name, event.data.input)
-    elif event.type == StreamEventType.TOOL_RESULT:
+    elif event.type == RunEventType.TOOL_RESULT and isinstance(event.data, ToolResult):
         if event.data.is_error:
             print_tool_result(event.data, is_error=True)
-    elif event.type == StreamEventType.ERROR:
-        print_error(event.data)
+    elif event.type == RunEventType.ERROR:
+        print_error(str(event.data))
 
 
 def create_hooks() -> HookManager:

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "datagol-agent-harness"
-version = "0.2.2"
+name = "harnessx"
+version = "0.3.0"
 description = "A lightweight, production-grade LLM agent toolkit in Python: streaming, MCP, lazy skills, memory, and sandboxing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -43,9 +45,13 @@ dependencies = [
     "rich>=13.0.0",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
+    "jsonschema>=4.20",
 ]
 
 [project.optional-dependencies]
+jev = ["typesafe-sdk>=0.7.1,<0.8"]
+postgres = ["psycopg[binary,pool]>=3.2"]
+temporal = ["temporalio>=1.9", "redis>=5", "boto3>=1.35"]
 langsmith = ["langsmith>=0.1.0"]
 openai = ["openai>=1.50.0", "tiktoken>=0.7.0"]
 openrouter = ["openai>=1.50.0", "tiktoken>=0.7.0"]
@@ -53,18 +59,11 @@ gemini = ["google-genai>=1.0.0"]
 mcp = ["mcp[cli]>=1.0.0"]
 docker = ["docker>=7.0.0"]
 server = ["fastapi>=0.110.0", "uvicorn[standard]>=0.27.0", "python-dotenv>=1.0.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
-all = [
-    "langsmith>=0.1.0",
-    "openai>=1.50.0",
-    "tiktoken>=0.7.0",
-    "google-genai>=1.0.0",
-    "mcp[cli]>=1.0.0",
-    "docker>=7.0.0",
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.27.0",
-    "python-dotenv>=1.0.0",
-]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "mypy>=1.18", "build>=1.2"]
+all = ["harnessx[jev,postgres,temporal,langsmith,openai,gemini,mcp,docker,server]"]
+
+[project.scripts]
+harnessx-evals = "harnessx.evals.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/datagol/harness-x"
@@ -73,11 +72,21 @@ Issues = "https://github.com/datagol/harness-x/issues"
 Documentation = "https://github.com/datagol/harness-x#readme"
 
 [tool.setuptools.packages.find]
-include = ["datagol_agent_harness*"]
+include = ["harnessx*"]
 exclude = ["apps*", "examples*", "tests*"]
 
 [tool.setuptools.package-data]
-datagol_agent_harness = ["py.typed"]
+harnessx = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["harnessx/types.py", "harnessx/messages.py", "harnessx/execution.py", "harnessx/subagents.py", "harnessx/recorder.py", "harnessx/_journal.py", "harnessx/decisions", "tests/typing/sdk_usage.py", "tests/typing/decision_usage.py", "examples", "harness-web/harness_web", "harness-web/run.py"]
+follow_imports = "silent"
+ignore_missing_imports = true
+check_untyped_defs = true
+show_error_codes = true

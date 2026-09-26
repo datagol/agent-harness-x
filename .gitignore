@@ -5,6 +5,7 @@ apps/
 .env
 *.env
 !.env.example
+/examples/postgres.config.json
 
 # Python
 __pycache__/
@@ -19,7 +20,17 @@ build/
 .agent_memory/
 .agent_sessions/
 output/
+.harness-web/
 
 # OS / editor
 .DS_Store
 .claude/
+
+# Local scratch (not part of the project)
+/fibonacci.py
+/classify_document.py
+/error.log
+/future_architecture_plan.md
+/site-*.patch
+.vscode/
+*.log
