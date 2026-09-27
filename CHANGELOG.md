@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-09-26
 
 First release under the new name. Version 0.2.2 was bumped in the repository but
 never published; this release supersedes it.
@@ -53,5 +53,5 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[0.3.0]: https://github.com/datagol/harness-x/compare/1c522e1...HEAD
+[0.3.0]: https://github.com/datagol/harness-x/compare/7fe798a...v0.3.0
 [0.2.1]: https://pypi.org/project/datagol-agent-harness/0.2.1/
