@@ -49,7 +49,7 @@ def evaluate_agent(
     dataset: Union[str, Sequence[Example], Sequence[dict[str, Any]]],
     *,
     evaluators: Sequence[Callable[[Run, Example], Any]] | None = None,
-    experiment_prefix: str = "datagol-agent-eval",
+    experiment_prefix: str = "harnessx-eval",
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     max_concurrency: int = 1,
@@ -94,7 +94,7 @@ def evaluate_agent(
     if should_upload:
         try:
             if isinstance(dataset, str) and not isinstance(data_to_evaluate, str):
-                cloud_ds_name = f"datagol-{dataset.replace('_', '-')}"
+                cloud_ds_name = f"harnessx-{dataset.replace('_', '-')}"
                 sync_dataset_to_langsmith(cloud_ds_name, data_to_evaluate, client=client)
                 data_to_evaluate = cloud_ds_name
             elif isinstance(data_to_evaluate, (list, tuple)) and data_to_evaluate and hasattr(data_to_evaluate[0], "inputs"):
@@ -266,3 +266,34 @@ def _print_summary_report(summary: EvaluationSummary, *, offline: bool) -> None:
     console.print(Panel(summary_text, title="HarnessX Evaluation", border_style=overall_color))
     console.print(table)
     console.print()
+
+
+async def evaluate_agent_async(
+    agent: AgentOrFactory,
+    dataset: Union[str, Sequence[Example], Sequence[dict[str, Any]]],
+    *,
+    evaluators: Sequence[Callable[[Run, Example], Any]] | None = None,
+    experiment_prefix: str = "harnessx-eval",
+    description: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    max_concurrency: int = 1,
+    client: Any | None = None,
+    offline: bool = False,
+    upload_results: bool | None = None,
+    print_summary: bool = True,
+) -> EvaluationSummary:
+    """Await evaluate_agent from a running event loop.
+
+    The synchronous runner drives each example with asyncio.run(), so it runs in
+    a worker thread. Pass a factory rather than an Agent bound to the caller's
+    loop; the evaluation cannot be cancelled once started; do not nest it inside
+    another evaluation.
+    """
+    import asyncio
+    import functools
+
+    return await asyncio.to_thread(functools.partial(
+        evaluate_agent, agent, dataset, evaluators=evaluators, experiment_prefix=experiment_prefix,
+        description=description, metadata=metadata, max_concurrency=max_concurrency, client=client,
+        offline=offline, upload_results=upload_results, print_summary=print_summary,
+    ))

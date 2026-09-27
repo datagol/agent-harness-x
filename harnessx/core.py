@@ -9,8 +9,9 @@ from __future__ import annotations
 import uuid
 import asyncio
 from dataclasses import asdict
-from typing import Any
+from typing import Any, AsyncIterator, Callable
 
+from .errors import ConfigurationError, RuntimeStateError
 from .execution import RunResult, RunStream
 from .hooks import HookManager, MiddlewarePipeline
 from .memory import ConversationMemory, PersistentMemory
@@ -18,6 +19,7 @@ from .permissions import GuardrailsEngine, PermissionManager
 from .extensions.base import Extension, close_extensions, install_extensions, validate_extensions
 from .mcp import MCPManager
 from .providers import LLMProvider, make_provider
+from .providers.registry import BUILTIN_PROVIDERS
 from .sandbox import Sandbox
 from .skills import SkillManager
 from .subagents import SubAgent, install_subagent, prepare_subagents
@@ -41,11 +43,19 @@ class Agent:
         result = await agent.run("What files are in the current directory?")
     """
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> "Agent":
+        # Removed in 0.4; a bare unexpected-keyword error would not say what to do instead.
+        if "client" in kwargs:
+            raise TypeError(
+                "Agent(client=...) was removed in harnessx 0.4. Wrap the SDK client: "
+                "Agent(provider=AnthropicProvider(client=client))."
+            )
+        return super().__new__(cls)
+
     def __init__(
         self,
         config: AgentConfig | None = None,
         provider: LLMProvider | None = None,
-        client: Any | None = None,  # back-compat shim, wrapped into AnthropicProvider
         tools: ToolRegistry | list[Any] | None = None,
         memory: ConversationMemory | None = None,
         permissions: PermissionManager | None = None,
@@ -58,43 +68,34 @@ class Agent:
         subagents: list[SubAgent] | None = None,
     ) -> None:
         extensions = validate_extensions(extensions)
-        if provider is not None and client is not None:
-            raise ValueError("Pass provider or client, not both")
-        if client is not None and config is not None and config.provider != "anthropic":
-            raise ValueError("The legacy client argument requires the anthropic provider")
-        provider_name = getattr(provider, "name", "")
-        if provider_name in ("anthropic", "openai", "gemini", "openrouter", "azure"):
-            if config is None and provider_name != "anthropic":
-                raise ValueError("An injected non-Anthropic provider requires AgentConfig with its provider and model")
-            if config is not None and config.provider != provider_name:
-                raise ValueError("Injected provider does not match AgentConfig.provider")
+        _check_provider_binding(config, provider)
         self.config = config or AgentConfig()
-        self.tools = normalize_tool_registry(tools)
+        self.tools = normalize_tool_registry(tools, policy=self.config.tools, sandbox=sandbox)
+        # Caller-owned resources with a job: the sandbox is the bash built-in's
+        # engine; the MCP manager's discovered tools are bridged into the
+        # registry now (register_tools is idempotent for one manager).
+        self.sandbox = sandbox
+        self.mcp = mcp
+        self.mcp_tools: tuple[str, ...] = tuple(mcp.register_tools(self.tools)) if mcp is not None else ()
         self.subagents = prepare_subagents(subagents, self.tools)
         for subagent in self.subagents:
             install_subagent(self, subagent)
-        self._owns_provider = provider is None and client is None
+        self._owns_provider = provider is None
         self._busy = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
-        if provider is not None:
-            self.provider = provider
-        elif client is not None:
-            # Back-compat: a raw Anthropic client was passed.
-            from .providers.anthropic import AnthropicProvider
-            self.provider = AnthropicProvider(client=client)
-        else:
-            self.provider = make_provider(self.config.provider)
+        self.provider = provider if provider is not None else make_provider(self.config.provider)
         self._owns_memory = memory is None
-        self.memory = memory or ConversationMemory(max_result_chars=self.config.max_result_chars)
+        self.memory = memory or ConversationMemory(max_result_chars=self.config.limits.max_result_chars)
         self.permissions = permissions or PermissionManager()
         self.hooks = hooks or HookManager()
         self.middleware = middleware or MiddlewarePipeline()
-        self.sandbox = sandbox
-        self.mcp = mcp
+        if sandbox is not None and getattr(sandbox, "hooks", None) is None:
+            sandbox.hooks = self.hooks  # SANDBOX_EXEC events reach this agent's observers
+        limits = self.config.limits
         self.guardrails = GuardrailsEngine(
-            max_iterations=self.config.max_iterations, max_cost_dollars=self.config.max_cost_dollars,
-            input_cost_per_m=self.config.input_cost_per_m, output_cost_per_m=self.config.output_cost_per_m,
+            max_iterations=limits.max_iterations, max_cost_dollars=limits.max_cost_dollars,
+            input_cost_per_m=limits.input_cost_per_m, output_cost_per_m=limits.output_cost_per_m,
         )
         self._session_id = str(uuid.uuid4())
         self.prompt_providers: list[Any] = []
@@ -148,10 +149,26 @@ class Agent:
     async def __aexit__(self, *exc):
         await self.aclose()
 
+    @property
+    def closed(self) -> bool:
+        """True once aclose() has started; the agent accepts no more runs."""
+        return self._closed
+
+    @property
+    def busy(self) -> bool:
+        """True while a run is in progress; one agent executes one run at a time."""
+        return self._busy
+
+    def _check_available(self) -> None:
+        if self._closed:
+            raise RuntimeStateError("Agent is closed")
+        if self._busy:
+            raise RuntimeStateError("Agent is busy with another run")
+
     async def run(self, user_message: str) -> RunResult:
+        """Run one turn to completion and return its result. Failures are in result.error."""
         from .engine import drive, new_state
-        if self._busy or self._closed:
-            raise RuntimeError("Agent is busy or closed")
+        self._check_available()
         self._busy = True
         async def discard(event):
             pass
@@ -161,10 +178,10 @@ class Agent:
             self._busy = False
 
     def run_stream(self, user_message: str) -> RunStream:
+        """Run one turn as a stream of typed events; the final RunResult is the last event."""
         from .engine import drive, new_state
         async def run(emit):
-            if self._busy or self._closed:
-                raise RuntimeError("Agent is busy or closed")
+            self._check_available()
             self._busy = True
             try:
                 state = new_state(self, user_message)
@@ -173,6 +190,18 @@ class Agent:
             finally:
                 self._busy = False
         return RunStream(run)
+
+    async def stream_text(
+        self, user_message: str, *, on_reset: Callable[[], Any] | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield the answer's text as it arrives; raise RunFailed if the run does not complete.
+
+        ``on_reset`` is called when a retried model call restarts the answer, so
+        a display can discard the provisional text it has shown.
+        """
+        async with self.run_stream(user_message) as stream:
+            async for text in stream.text(on_reset=on_reset):
+                yield text
 
     def _build_system_prompt(self) -> str:
         """Compose static system prompt with dynamic prompt providers."""
@@ -195,7 +224,7 @@ class Agent:
         Artifacts remain until PersistentMemory.delete_session() is called.
         """
         if self._busy or self._closed:
-            raise RuntimeError("Cannot snapshot a busy or closed agent")
+            raise RuntimeStateError("Cannot snapshot a busy or closed agent")
         from .engine import snapshot
 
         storage = PersistentMemory(storage_dir)
@@ -224,15 +253,15 @@ class Agent:
         storage = PersistentMemory(storage_dir)
         state = await asyncio.to_thread(storage.load_session, session_id)
         if state.config:
-            saved_config = AgentConfig(**state.config)
+            saved_config = AgentConfig.from_dict(state.config)
             if "config" in kwargs and kwargs["config"] is not None and asdict(kwargs["config"]) != asdict(saved_config):
-                raise ValueError("Explicit configuration differs from saved session")
+                raise ConfigurationError("Explicit configuration differs from saved session")
             kwargs["config"] = saved_config
         agent = cls(**kwargs)
         try:
             missing = set(state.extensions) - {ext.name for ext in agent.extensions}
             if missing:
-                raise ValueError(f"Missing extension bindings for restored snapshot: {sorted(missing)}")
+                raise ConfigurationError(f"Missing extension bindings for restored snapshot: {sorted(missing)}")
             agent._artifact_store = storage.artifact_store(session_id)
             await restore(agent, {
                 "session_id": state.session_id, "messages": state.messages,
@@ -248,3 +277,23 @@ class Agent:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+
+def _check_provider_binding(config: AgentConfig | None, provider: LLMProvider | None) -> None:
+    """Reject only a genuine contradiction: two different built-in names.
+
+    Custom providers (empty or registered names) are always accepted; the
+    injected object is what runs, and the config name is a label.
+    """
+    if provider is None:
+        return
+    injected = getattr(provider, "name", "") or ""
+    configured = config.provider if config is not None else "anthropic"
+    if injected in BUILTIN_PROVIDERS and configured in BUILTIN_PROVIDERS and injected != configured:
+        if config is None:
+            raise ConfigurationError(
+                "An injected non-Anthropic provider requires AgentConfig with its provider and model"
+            )
+        raise ConfigurationError(
+            f"Injected provider {injected!r} does not match AgentConfig.provider {configured!r}"
+        )

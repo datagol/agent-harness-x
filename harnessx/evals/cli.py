@@ -28,7 +28,7 @@ if not os.getenv("LANGSMITH_API_KEY") and os.getenv("LANGCHAIN_API_KEY"):
 from ..core import Agent
 from ..subagents import SubAgent
 from ..permissions import PermissionLevel
-from ..types import AgentConfig
+from ..types import AgentConfig, Limits
 from .datasets.registry import list_datasets
 from .evaluators import default_evaluators, list_evaluator_names, resolve_evaluators
 from .runner import evaluate_agent
@@ -62,7 +62,7 @@ def _build_benchmark_agent_factory(
                 model=model,
                 provider=provider,
                 system_prompt=system_prompt,
-                max_iterations=10,
+                limits=Limits(max_iterations=10),
             ),
             skills=sample_skills if sample_skills and suite in ("skills", "all") else None,
             subagents=[
@@ -72,7 +72,7 @@ def _build_benchmark_agent_factory(
                     config=AgentConfig(
                         model=model, provider=provider,
                         system_prompt="You are a research specialist. Provide key comparison points.",
-                        max_iterations=5,
+                        limits=Limits(max_iterations=5),
                     ),
                 ),
                 SubAgent(
@@ -81,7 +81,7 @@ def _build_benchmark_agent_factory(
                     config=AgentConfig(
                         model=model, provider=provider,
                         system_prompt="You are a code review specialist. Highlight any security flaws.",
-                        max_iterations=5,
+                        limits=Limits(max_iterations=5),
                     ),
                 ),
             ],

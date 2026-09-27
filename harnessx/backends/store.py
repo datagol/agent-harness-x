@@ -1,6 +1,10 @@
 """Transactional runtime storage shared by SQLite and PostgreSQL."""
 
 from __future__ import annotations
+
+from typing import Self
+
+from ..errors import HarnessError
 import hashlib
 import asyncio
 from functools import wraps
@@ -10,7 +14,7 @@ from ..execution import RunEvent, wire
 from .._journal import checkpoint, record
 
 
-class StorageError(RuntimeError):
+class StorageError(HarnessError, RuntimeError):
     pass
 
 
@@ -68,6 +72,13 @@ def retry_transaction(method):
 
 class SQLStore:
     """Backends implement transaction(), fencing, initialization and close."""
+
+    async def __aenter__(self) -> Self:
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
 
     postgres = False
     supports_recording = True

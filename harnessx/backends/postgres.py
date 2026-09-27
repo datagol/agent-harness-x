@@ -65,6 +65,13 @@ class PostgresBackend(SQLStore):
     def __repr__(self):
         return f"PostgresBackend(schema={self.schema!r}, connection_string=<redacted>)"
 
+    @classmethod
+    async def connect(cls, connection_string: str, **kwargs) -> "PostgresBackend":
+        """Construct and initialize (open the pool, migrate) in one call."""
+        backend = cls(connection_string, **kwargs)
+        await backend.initialize()
+        return backend
+
     async def initialize(self):
         async with self._init_lock:
             if self._initialized:

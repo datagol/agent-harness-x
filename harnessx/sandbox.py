@@ -34,10 +34,25 @@ class Sandbox:
             result = await sandbox.execute_command("ls -la")
     """
 
-    def __init__(self, config: SandboxConfig | None = None) -> None:
+    def __init__(self, config: SandboxConfig | None = None, *, hooks: Any | None = None) -> None:
         self.config = config or SandboxConfig()
         self._workdir: str | None = None
         self._temp_dir_obj: tempfile.TemporaryDirectory | None = None
+        # A HookManager that receives SANDBOX_EXEC; Agent(sandbox=...) supplies its own.
+        self.hooks = hooks
+
+    async def _observe(self, kind: str, result: SandboxResult) -> None:
+        if self.hooks is None:
+            return
+        from .hooks import HookContext, HookEvent
+
+        await self.hooks.emit(HookEvent.SANDBOX_EXEC, HookContext(
+            event=HookEvent.SANDBOX_EXEC,
+            data={
+                "kind": kind, "tier": self.config.tier, "exit_code": result.exit_code,
+                "timed_out": result.timed_out, "execution_time_ms": result.execution_time_ms,
+            },
+        ))
 
     def _validate_backend(self) -> None:
         self.config.__post_init__()
@@ -81,11 +96,13 @@ class Sandbox:
 
         tier = self.config.tier
         if tier == "docker":
-            return await self._execute_docker(code, language)
+            result = await self._execute_docker(code, language)
         elif tier == "seatbelt":
-            return await self._execute_seatbelt(code, language)
+            result = await self._execute_seatbelt(code, language)
         else:
-            return await self._execute_process(code, language)
+            result = await self._execute_process(code, language)
+        await self._observe("code", result)
+        return result
 
     async def execute_command(self, command: str) -> SandboxResult:
         """Execute a shell command in the sandbox."""
@@ -94,11 +111,13 @@ class Sandbox:
 
         tier = self.config.tier
         if tier == "docker":
-            return await self._execute_docker_command(command)
+            result = await self._execute_docker_command(command)
         elif tier == "seatbelt":
-            return await self._execute_seatbelt_command(command)
+            result = await self._execute_seatbelt_command(command)
         else:
-            return await self._execute_process_command(command)
+            result = await self._execute_process_command(command)
+        await self._observe("command", result)
+        return result
 
     # ── Tier 1: Process sandbox ──────────────────────────────────────────
 

@@ -10,7 +10,11 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypedDict, Union
+
+if TYPE_CHECKING:
+    from .execution import RunResult
+    from .types import ProviderResponse, ToolCall, ToolResult
 
 
 class HookEvent(Enum):
@@ -28,9 +32,97 @@ class HookEvent(Enum):
     ERROR = "error"
 
 
+class AgentStartData(TypedDict):
+    message: str
+
+
+class AgentEndData(TypedDict):
+    result: "RunResult"
+
+
+class LoopIterationData(TypedDict):
+    iteration: int
+
+
+class LLMRequestData(TypedDict):
+    message_count: int
+    tool_count: int
+    prefix_key: str | None  # prompt-cache key; None when caching is disabled
+
+
+class LLMResponseData(TypedDict):
+    response: "ProviderResponse"
+    stop_reason: Any
+
+
+class ToolCallStartData(TypedDict):
+    tool_call: "ToolCall"
+
+
+class ToolCallEndData(TypedDict):
+    tool_call: "ToolCall"
+    result: "ToolResult"
+
+
+class ErrorData(TypedDict):
+    error: str
+
+
+class SkillInvokedData(TypedDict, total=False):
+    skill: str
+    found: bool
+    source_path: str
+    body_chars: int
+
+
+class SandboxExecData(TypedDict):
+    kind: str  # "code" or "command"
+    tier: str
+    exit_code: int
+    timed_out: bool
+    execution_time_ms: float
+
+
+class CheckpointEventData(TypedDict):
+    session_id: str
+    run_id: str
+    status: str
+    phase: str
+
+
+# The payload each built-in event carries. ``HookContext.data`` stays an open
+# dict so custom events can carry anything; cast to the event's TypedDict for
+# typed access: ``payload = cast(ToolCallStartData, ctx.data)``.
+HookData = Union[
+    AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
+    ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, SandboxExecData,
+    CheckpointEventData,
+]
+
+HOOK_PAYLOADS: dict[HookEvent, type] = {
+    HookEvent.AGENT_START: AgentStartData,
+    HookEvent.AGENT_END: AgentEndData,
+    HookEvent.LOOP_ITERATION_START: LoopIterationData,
+    HookEvent.LOOP_ITERATION_END: LoopIterationData,
+    HookEvent.LLM_REQUEST: LLMRequestData,
+    HookEvent.LLM_RESPONSE: LLMResponseData,
+    HookEvent.TOOL_CALL_START: ToolCallStartData,
+    HookEvent.TOOL_CALL_END: ToolCallEndData,
+    HookEvent.ERROR: ErrorData,
+    HookEvent.SKILL_INVOKED: SkillInvokedData,
+    HookEvent.SANDBOX_EXEC: SandboxExecData,
+    HookEvent.CHECKPOINT: CheckpointEventData,
+}
+
+
 @dataclass
 class HookContext:
-    """Data passed to hook callbacks."""
+    """Data passed to hook callbacks.
+
+    ``data`` holds the event's payload; the keys for each built-in event are
+    declared by the ``*Data`` TypedDicts in this module (``HOOK_PAYLOADS`` maps
+    an event to its shape).
+    """
 
     event: HookEvent
     agent: Any = None
@@ -84,21 +176,18 @@ class HookManager:
             except Exception:
                 pass  # Hooks should never crash the agent
 
-    # Convenience decorators
-    def before_tool(self, callback: HookCallback) -> HookCallback:
-        """Decorator: register a TOOL_CALL_START hook."""
-        self.on(HookEvent.TOOL_CALL_START, callback)
-        return callback
+    # Convenience registrations; each returns the handle that removes it.
+    def before_tool(self, callback: HookCallback) -> Registration:
+        """Register a TOOL_CALL_START hook."""
+        return self.on(HookEvent.TOOL_CALL_START, callback)
 
-    def after_tool(self, callback: HookCallback) -> HookCallback:
-        """Decorator: register a TOOL_CALL_END hook."""
-        self.on(HookEvent.TOOL_CALL_END, callback)
-        return callback
+    def after_tool(self, callback: HookCallback) -> Registration:
+        """Register a TOOL_CALL_END hook."""
+        return self.on(HookEvent.TOOL_CALL_END, callback)
 
-    def on_error(self, callback: HookCallback) -> HookCallback:
-        """Decorator: register an ERROR hook."""
-        self.on(HookEvent.ERROR, callback)
-        return callback
+    def on_error(self, callback: HookCallback) -> Registration:
+        """Register an ERROR hook."""
+        return self.on(HookEvent.ERROR, callback)
 
 
 class Middleware:

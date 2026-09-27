@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import warnings
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, TypedDict
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, TypedDict
 import math
 import uuid
 
-from .types import TokenUsage, ToolCall, ToolResult
+from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed
+from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult
 
 
 class RunStatus(str, Enum):
@@ -38,12 +40,6 @@ class RunEventType(str, Enum):
     GAP = "gap"
 
 
-class ReplayPolicy(str, Enum):
-    SAFE = "safe"
-    IDEMPOTENT = "idempotent"
-    MANUAL = "manual"
-
-
 class RunFailure(TypedDict):
     type: str
     message: str
@@ -55,14 +51,70 @@ class ToolCallData(TypedDict):
     input: dict[str, Any]
 
 
-class PendingTool(TypedDict):
-    call: ToolCallData
-    status: Literal["approval", "uncertain"]
-    attempt: int
+@dataclass(frozen=True)
+class PendingTool:
+    """A tool call the run stopped on: it needs approval, or its outcome is unknown.
+
+    Resolve it with ``AgentRuntime.approve``/``decline`` (status ``"approval"``)
+    or ``AgentRuntime.resolve_tool`` (status ``"uncertain"``).
+    """
+
     execution_key: str
-    policy: str
-    concurrent: bool
-    timeout: float
+    call: ToolCall
+    status: Literal["approval", "uncertain"]
+    attempt: int = 0
+    policy: str = "manual"
+    concurrent: bool = False
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        if self.status not in ("approval", "uncertain") or not isinstance(self.execution_key, str):
+            raise ValueError("Invalid pending tool operation")
+        if isinstance(self.call, dict):
+            object.__setattr__(self, "call", ToolCall(**self.call))
+
+    def to_dict(self) -> dict[str, Any]:
+        """The persisted shape; unchanged since 0.3 (``timeout``, not ``timeout_seconds``)."""
+        return {
+            "call": {"id": self.call.id, "name": self.call.name, "input": self.call.input},
+            "status": self.status,
+            "attempt": self.attempt,
+            "execution_key": self.execution_key,
+            "policy": self.policy,
+            "concurrent": self.concurrent,
+            "timeout": self.timeout_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PendingTool:
+        """Accepts a run-state tool entry, ignoring bookkeeping keys such as ``result``."""
+        call = data["call"]
+        return cls(
+            execution_key=data["execution_key"],
+            call=ToolCall(call["id"], call["name"], dict(call.get("input") or {})),
+            status=data["status"],
+            attempt=int(data.get("attempt", 0)),
+            policy=str(data.get("policy", "manual")),
+            concurrent=bool(data.get("concurrent", False)),
+            timeout_seconds=float(data.get("timeout", data.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))),
+        )
+
+    def __getitem__(self, key: str) -> Any:
+        warnings.warn(
+            "PendingTool is a dataclass since harnessx 0.4; use attribute access "
+            f"(pending.{'timeout_seconds' if key == 'timeout' else key})",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_dict()[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        warnings.warn(
+            "PendingTool is a dataclass since harnessx 0.4; use attribute access",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_dict().get(key, default)
 
 
 class AttemptReset(TypedDict):
@@ -91,9 +143,49 @@ class RunResult:
         self.status = RunStatus(self.status)
         if self.error is not None and not all(isinstance(self.error.get(key), str) for key in ("type", "message")):
             raise ValueError("Run failure requires type and message strings")
-        for pending in self.pending:
-            if pending.get("status") not in ("approval", "uncertain") or not isinstance(pending.get("execution_key"), str):
-                raise ValueError("Invalid pending tool operation")
+        self.pending = [
+            item if isinstance(item, PendingTool) else PendingTool.from_dict(item)
+            for item in self.pending
+        ]
+
+    @property
+    def ok(self) -> bool:
+        """True when the run completed. Failures, pauses, and cancellations are not ok."""
+        return self.status is RunStatus.COMPLETED
+
+    @property
+    def failed(self) -> bool:
+        return self.status is RunStatus.FAILED
+
+    @property
+    def needs_input(self) -> bool:
+        """True when the run is waiting for an approval or an uncertain-outcome resolution."""
+        return self.status is RunStatus.AWAITING_INPUT
+
+    def raise_for_status(self) -> RunResult:
+        """Return the result if it completed; otherwise raise a RunError describing why."""
+        if self.status is RunStatus.COMPLETED:
+            return self
+        if self.status is RunStatus.FAILED:
+            raise RunFailed(self)
+        if self.status is RunStatus.AWAITING_INPUT:
+            raise RunAwaitingInput(self)
+        if self.status is RunStatus.CANCELLED:
+            raise RunCancelled(self)
+        raise RunError(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "output": self.output,
+            "status": self.status.value,
+            "stop_reason": self.stop_reason,
+            "usage": asdict(self.usage),
+            "error": dict(self.error) if self.error is not None else None,
+            "pending": [item.to_dict() for item in self.pending],
+            "usage_incomplete": self.usage_incomplete,
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> RunResult:
@@ -109,7 +201,7 @@ class RunResult:
 @dataclass
 class RunEvent:
     type: RunEventType
-    data: str | ToolCall | ToolResult | RunResult | PendingTool | AttemptReset | EventGap | None = None
+    data: str | ToolCall | ToolResult | RunResult | PendingTool | AttemptReset | EventGap
     session_id: str = ""
     run_id: str = ""
     step_id: str = ""
@@ -158,7 +250,8 @@ def wire(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return wire(asdict(value))
+        to_dict = getattr(value, "to_dict", None)
+        return wire(to_dict() if callable(to_dict) else asdict(value))
     if isinstance(value, dict):
         if any(not isinstance(k, str) for k in value):
             raise TypeError("Execution state dictionary keys must be strings")
@@ -233,7 +326,7 @@ def result_from_state(state: dict) -> RunResult:
         usage=TokenUsage(**state.get("usage", {})),
         error=state.get("error"),
         pending=[
-            t
+            PendingTool.from_dict(t)
             for t in state.get("tools", [])
             if t["status"] in ("approval", "uncertain")
         ],
@@ -282,6 +375,19 @@ class RunStream(AsyncIterator[RunEvent]):
     async def result(self) -> RunResult:
         return await asyncio.shield(self._start())
 
+    async def text(self, *, on_reset: Callable[[], Any] | None = None) -> AsyncIterator[str]:
+        """Yield text deltas only; raise RunError if the run does not complete.
+
+        ``on_reset`` is called on ATTEMPT_RESET, when a retried model call
+        restarts the answer and text shown so far should be discarded.
+        """
+        async for event in self:
+            if event.type is RunEventType.TEXT_DELTA:
+                yield event.data  # type: ignore[misc]
+            elif event.type is RunEventType.ATTEMPT_RESET and on_reset is not None:
+                on_reset()
+        (await self.result()).raise_for_status()
+
     async def aclose(self):
         if self._task and not self._task.done():
             self._task.cancel()
@@ -299,8 +405,17 @@ class RunStream(AsyncIterator[RunEvent]):
         await self.aclose()
 
 
-class ToolApprovalRequired(RuntimeError):
+class ToolApprovalRequired(HarnessError, RuntimeError):
     """A dispatch-time policy change requires a new exact-call approval."""
+
+
+def model_timeout_from_wire(config: Mapping[str, Any] | None) -> float:
+    """Model-call timeout from a persisted config, 0.4 nested or 0.3 flat."""
+    config = config or {}
+    retry = config.get("retry")
+    if isinstance(retry, dict) and retry.get("call_timeout_seconds") is not None:
+        return float(retry["call_timeout_seconds"])
+    return float(config.get("model_timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
 
 
 def cancel_state(state: dict) -> dict:

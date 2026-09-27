@@ -151,7 +151,7 @@ class LangSmithExtension(Extension):
             project_name
             or os.getenv("LANGSMITH_PROJECT")
             or os.getenv("LANGCHAIN_PROJECT")
-            or "datagol-agents"
+            or "harnessx-agents"
         )
         self.run_name = run_name
         self.tags = list(tags) if tags else []

@@ -8,12 +8,12 @@ Supports two transports:
   - sse: connects to a remote HTTP server via Server-Sent Events
 
 Usage:
-    mcp_manager = MCPManager()
-    await mcp_manager.connect("filesystem", command="npx", args=[...])
-    await mcp_manager.connect("remote", url="http://localhost:8000/sse")
-    mcp_manager.register_tools(agent.tools)
-    # Now the agent can use all MCP tools transparently
-    await mcp_manager.disconnect_all()
+    async with MCPManager() as mcp:
+        await mcp.connect("filesystem", command="npx", args=[...])
+        await mcp.connect("remote", url="http://localhost:8000/sse")
+        agent = Agent(mcp=mcp)  # bridges the discovered tools into agent.tools
+        ...
+    # leaving the block disconnects every server
 """
 
 from __future__ import annotations
@@ -40,6 +40,15 @@ def _sanitize_tool_name(name: str) -> str:
     sanitized = sanitized.strip('_-')
     # Truncate to 128 chars
     return sanitized[:128]
+
+
+def _registered_name(server_name: str, tool_name: str, *, prefix: bool = True) -> str:
+    """The registry name of an MCP tool: sanitized, server-prefixed unless already so."""
+    san_server = _sanitize_tool_name(server_name)
+    san_tool = _sanitize_tool_name(tool_name)
+    if prefix and not san_tool.startswith(san_server):
+        return _sanitize_tool_name(f"{san_server}_{san_tool}")
+    return san_tool
 
 
 @dataclass
@@ -254,7 +263,13 @@ class MCPManager:
 
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
-        self._tool_to_server: dict[str, str] = {}  # tool_name -> server_name
+        self._tool_to_server: dict[str, str] = {}  # registry tool name -> server name
+
+    async def __aenter__(self) -> "MCPManager":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.disconnect_all()
 
     async def connect(
         self,
@@ -272,6 +287,8 @@ class MCPManager:
         For stdio transport: provide command (and optionally args, env).
         For SSE transport: provide url (and optionally headers).
         """
+        if name in self._connections:
+            raise ValueError(f"MCP server {name!r} is already connected; disconnect it first")
         config = MCPServerConfig(
             name=name,
             command=command,
@@ -287,10 +304,9 @@ class MCPManager:
 
         self._connections[name] = conn
 
-        # Map tool names to server (prefix with server name to avoid collisions)
+        # Map registry names to their server so lookups match register_tools().
         for tool in tools:
-            qualified_name = f"{name}__{tool.tool_name}"
-            self._tool_to_server[qualified_name] = name
+            self._tool_to_server[_registered_name(name, tool.tool_name)] = name
 
         return tools
 
@@ -341,22 +357,28 @@ class MCPManager:
             permission: Override permission level for all MCP tools. If None, uses per-server config.
 
         Returns:
-            List of registered tool names.
+            The MCP tool names present in the registry after the call. Calling
+            this twice with the same manager is a no-op for tools it already
+            bridged; a name held by anything else raises ValueError.
         """
         registered: list[str] = []
 
         for server_name, conn in self._connections.items():
             for tool_info in conn.tools:
-                # Prefix with server name, but skip if tool already starts with it
-                san_server = _sanitize_tool_name(server_name)
-                san_tool = _sanitize_tool_name(tool_info.tool_name)
-                if prefix and not san_tool.startswith(san_server):
-                    raw_name = f"{san_server}_{san_tool}"
-                else:
-                    raw_name = san_tool
-                # Sanitize: only allow [a-zA-Z0-9_-], truncate to 128 chars
-                tool_name = _sanitize_tool_name(raw_name)
+                tool_name = _registered_name(server_name, tool_info.tool_name, prefix=prefix)
                 perm = permission or conn.config.permission
+                if registry.has_tool(tool_name):
+                    existing = registry.get_tool(tool_name).handler
+                    if (
+                        getattr(existing, "__mcp_tool__", None) == (server_name, tool_info.tool_name)
+                        and getattr(existing, "__mcp_manager__", None) is self
+                    ):
+                        registered.append(tool_name)
+                        continue
+                    raise ValueError(
+                        f"Tool {tool_name!r} is already registered by something other than "
+                        f"MCP server {server_name!r} on this manager"
+                    )
 
                 # Create a handler that routes to the MCP server
                 handler = self._make_mcp_handler(server_name, tool_info.tool_name)
@@ -386,6 +408,8 @@ class MCPManager:
 
         handler.__name__ = f"mcp_{server_name}_{tool_name}"
         handler.__doc__ = f"MCP tool '{tool_name}' on server '{server_name}'"
+        handler.__mcp_tool__ = (server_name, tool_name)  # type: ignore[attr-defined]
+        handler.__mcp_manager__ = manager  # type: ignore[attr-defined]
         return handler
 
     async def disconnect(self, name: str) -> None:

@@ -1,6 +1,8 @@
 """Optional Temporal client facade. Importing Harness never imports the SDK."""
 
 from __future__ import annotations
+
+from typing import Self
 import asyncio
 import json
 import uuid
@@ -144,6 +146,7 @@ class TemporalBackend:
 
         self.client, self.task_queue, self.events = client, task_queue, events
         self.artifact_store, self.registry = artifact_store, registry or agents
+        self._owns_client = False  # connect() sets this; an injected client is caller-owned
 
     @classmethod
     async def connect(
@@ -158,7 +161,16 @@ class TemporalBackend:
             namespace=namespace,
             data_converter=DataConverter(payload_codec=ArtifactCodec(artifact_store)),
         )
-        return cls(client, events=events, artifact_store=artifact_store, **kwargs)
+        backend = cls(client, events=events, artifact_store=artifact_store, **kwargs)
+        backend._owns_client = True
+        return backend
+
+    async def __aenter__(self) -> Self:
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
 
     async def initialize(self):
         # Redis may be down without blocking durable work.
@@ -257,4 +269,23 @@ class TemporalBackend:
         )
 
     async def aclose(self):
-        await self.events.aclose()
+        """Close the event bus and, when connect() created it, the Temporal client."""
+        import inspect
+
+        errors = []
+        try:
+            await self.events.aclose()
+        except Exception as exc:
+            errors.append(exc)
+        if self._owns_client and self.client is not None:
+            closer = getattr(self.client, "aclose", None) or getattr(self.client, "close", None)
+            if closer is not None:
+                try:
+                    outcome = closer()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception as exc:
+                    errors.append(exc)
+            self.client = None
+        if errors:
+            raise ExceptionGroup("TemporalBackend cleanup failed", errors)
