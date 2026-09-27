@@ -243,22 +243,23 @@ class MCPConnection:
 
 class MCPManager:
     """Manages connections to multiple MCP servers and bridges their tools
-    into the agent's ToolRegistry.
+    into an agent's ToolRegistry.
 
     Usage:
-        manager = MCPManager()
+        async with MCPManager() as mcp:
+            # Connect to servers first; discovery happens here.
+            await mcp.connect("files", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+            await mcp.connect("api", url="http://localhost:8000/sse")
 
-        # Connect to servers
-        await manager.connect("files", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
-        await manager.connect("api", url="http://localhost:8000/sse")
+            # Agent(mcp=...) bridges every discovered tool into agent.tools and
+            # lists the registered names on agent.mcp_tools.
+            async with Agent(mcp=mcp) as agent:
+                ...  # the model uses MCP tools like native ones
+        # leaving the block disconnects every server
 
-        # Register all MCP tools into the agent's registry
-        manager.register_tools(agent.tools)
-
-        # ... agent runs and uses MCP tools transparently ...
-
-        # Cleanup
-        await manager.disconnect_all()
+    ``register_tools(registry)`` remains available for a registry that is not
+    handed to an Agent; it is idempotent for the same manager. The manager is
+    caller-owned: closing an agent never disconnects it.
     """
 
     def __init__(self) -> None:
