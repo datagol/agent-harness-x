@@ -44,7 +44,7 @@ Core principles:
 
 `harnessx` is a library-first harness ("the 9 pillars of LLM agent infrastructure"):
 
-- **Agent loops:** `Agent` (`core.py`, non-streaming, provider-agnostic via `LLMProvider`) and `StreamingAgent` (`streaming.py`, streaming, Anthropic-only) — two parallel implementations with duplicated logic.
+- **Agent loops:** `Agent` (`core.py`, non-streaming, provider-agnostic via `LLMProvider`) and `Agent.run_stream` (`streaming.py`, streaming, Anthropic-only) — two parallel implementations with duplicated logic.
 - **Providers:** `providers/base.py` (`LLMProvider.create`/`count_tokens`, canonical Anthropic-shaped `ProviderResponse`), `AnthropicProvider`, `OpenAIProvider` (non-streaming; full format translation), `make_provider(name)` factory.
 - **Tools:** `ToolRegistry` with decorator registration and schema auto-generation from type hints; `register_with_schema` for explicit schemas; execution never raises (errors → `ToolResult(is_error=True)`); results stringified. No cancellation or progress callbacks.
 - **Safety:** `PermissionLevel` (`ALLOW`/`ASK`/`DENY`), `PermissionManager` (interactive stdin prompts, session grants), `GuardrailsEngine` (iteration/cost limits), 3-tier `Sandbox` (process/docker/seatbelt).
@@ -60,7 +60,7 @@ Core principles:
 
 | Dimension | tau | harnessx |
 |---|---|---|
-| Agent loop | One loop, streaming-first, typed event stream | Two parallel loops (`Agent` / `StreamingAgent`), duplicated logic |
+| Agent loop | One loop, streaming-first, typed event stream | Two parallel loops (`Agent` / `Agent.run_stream`), duplicated logic |
 | Providers | Provider-neutral **stream**; catalog.toml + dynamic registration | Non-streaming `create()`; canonical shape is Anthropic's; streaming bypasses the abstraction |
 | Event model | Typed events are *the* public contract | `HookEvent` (observe-only); `StreamEvent` only on the Anthropic streaming path |
 | Tools | Schema + `execute_fn(id, args, signal, on_update)` — cancellation + progress | Decorator w/ schema-from-type-hints (better DX); no cancellation, no progress; stringified results |
@@ -167,7 +167,7 @@ Wiring:
 - `Agent.run(user_message)` — new `HookEvent.INPUT` (or a dedicated dispatch) runs before the message enters memory; `transform` rewrites, `handled` short-circuits.
 - `Agent._handle_tool_calls` — `TOOL_CALL` interception before permission check: `block=True` → `ToolResult(reason, is_error=False)` fed to the model without executing; `arguments` replaces `tool_call.input`. **Fail-safe:** a crashing `tool_call` handler blocks the tool (matching tau); all other hook failures are logged and swallowed.
 - Tool-result rewriting composes with (and is implemented on top of) the existing middleware pipeline — Phase 2 largely *formalizes* what middleware can already do, giving extensions a named, typed contract plus the blocking semantics middleware lacks.
-- Mirror the same wiring in `StreamingAgent` (until Phase 4 unifies the loops).
+- Mirror the same wiring in `Agent.run_stream` (until Phase 4 unifies the loops).
 
 ### Phase 3 — Discovery & loading
 
@@ -211,6 +211,6 @@ class ExtensionRuntime:
 - `harnessx/extensions/base.py` — current `Extension` ABC, `install_extensions`, `close_extensions`
 - `harnessx/extensions/result_spill.py` — reference extension (port of pi-dca's result-spill)
 - `harnessx/core.py` — `Agent._agentic_loop`, `_handle_tool_calls` (Phase 2 wiring points)
-- `harnessx/streaming.py` — `StreamingAgent` (mirrored wiring; Phase 4 merge target)
+- `harnessx/streaming.py` — `Agent.run_stream` (mirrored wiring; Phase 4 merge target)
 - `harnessx/hooks.py` — `HookEvent`, `HookManager`, `Middleware`, `MiddlewarePipeline`
 - `apps/dca/server/pi/session_registry.py` — production consumer of `ResultSpillExtension`
