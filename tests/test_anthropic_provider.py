@@ -4,7 +4,14 @@ import json
 import socket
 from copy import deepcopy
 
-import httpx
+import anthropic
+
+# anthropic >= 1.0 moved its transport to the httpx2 package; an injected
+# http_client must come from the same package the SDK uses.
+if int(anthropic.__version__.split(".")[0]) >= 1:
+    import httpx2 as httpx
+else:
+    import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage

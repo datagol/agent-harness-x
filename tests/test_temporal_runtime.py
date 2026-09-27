@@ -15,6 +15,7 @@ from harnessx import (
     ProviderResponse,
     ToolCall,
     Extension,
+    PermissionLevel,
 )
 from harnessx.providers import LLMProvider
 
@@ -110,7 +111,7 @@ async def test_approval_survives_worker_restart(tmp_path):
                 return ProviderResponse(text="done")
 
         agent = Agent(provider=Tools())
-        agent.tools.register(name="write")(lambda: effects.append("effect"))
+        agent.tools.register(name="write", permission=PermissionLevel.ASK)(lambda: effects.append("effect"))
         return agent
 
     ref = registry.register("writer", factory)

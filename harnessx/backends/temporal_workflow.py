@@ -19,7 +19,12 @@ with workflow.unsafe.imports_passed_through():
     from ..runtime import resolve_entry
 
 
-@workflow.defn(name="HarnessAgentSessionV1")
+# The workflow sandbox re-imports this module's parent package, and importing
+# harnessx pulls in provider SDKs and LangSmith, whose HTTP stacks the sandbox
+# rejects. Running unsandboxed applies to workers and replayers alike; the
+# workflow stays deterministic by delegating every model and tool call to
+# activities and keeping only serialized state.
+@workflow.defn(name="HarnessAgentSessionV1", sandboxed=False)
 class AgentSessionWorkflow:
     @workflow.init
     def __init__(self, data: dict):
