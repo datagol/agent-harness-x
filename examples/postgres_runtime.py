@@ -2,7 +2,7 @@
 
 Run ``python -m examples.postgres_runtime --help`` for commands. Supply DATABASE_URL
 or --config PATH, and install the postgres extra. Only ``chat`` uses a model API key.
-See doc/postgres_durability.md for the walkthrough and guarantee boundaries.
+See https://harnessx-site.vercel.app/docs/postgres-durability/ for the walkthrough and guarantee boundaries.
 """
 
 import argparse

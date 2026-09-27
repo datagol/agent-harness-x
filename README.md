@@ -20,7 +20,7 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 - **Guardrails & Execution Backends:** Budget and iteration limits, host subprocess execution, and Docker or macOS Seatbelt access isolation.
 - **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote SSE) in 3 lines of code.
 - **Full Observability & Evals:** Zero-overhead lifecycle hooks, middleware transforms, native LangSmith tracing, and benchmark evaluations.
-- **Typed Decisions:** Optional Jev SDK for Choice routing/classification, Score rubrics, and Noul evidence checks. See the [decision SDK guide](https://github.com/datagol/harness-x/blob/main/doc/decisions.md).
+- **Typed Decisions:** Optional Jev SDK for Choice routing/classification, Score rubrics, and Noul evidence checks. See the [decision SDK guide](https://harnessx-site.vercel.app/docs/decisions/).
 
 ---
 
@@ -44,8 +44,8 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 ## Setup
 
 The distribution and Python import are both named `harnessx`:
-`from harnessx import Agent`. Upgrading from `datagol-agent-harness`? See the
-[rename guide](https://github.com/datagol/harness-x/blob/main/doc/harnessx_rename.md) and the [changelog](https://github.com/datagol/harness-x/blob/main/CHANGELOG.md).
+`from harnessx import Agent`. Upgrading from `datagol-agent-harness`? Update the import
+to `harnessx` (there is no compatibility alias) and see the [changelog](https://github.com/datagol/harness-x/blob/main/CHANGELOG.md).
 
 ```bash
 # From PyPI
@@ -86,14 +86,13 @@ OpenAI, Gemini, or OpenRouter, use [provider chat](https://github.com/datagol/ha
 See the [provider setup guide](https://github.com/datagol/harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
 optional dependencies, and streaming options.
 
-The standalone [decision SDK](https://github.com/datagol/harness-x/blob/main/doc/decisions.md) provides typed Jev assessments
+The standalone [decision SDK](https://harnessx-site.vercel.app/docs/decisions/) provides typed Jev assessments
 alongside agents. Try its offline examples with `python -m examples.jev_routing
 --min-confidence 0.8`, `python -m examples.jev_classification`, or
 `python -m examples.jev_answer_review`. Live calls require the `jev` extra,
 `TYPESAFE_API_KEY`, and an explicit `--live` flag.
 
-For 0.3 API changes, see the [migration guide](https://github.com/datagol/harness-x/blob/main/doc/durable_runtime.md) and
-[SDK audit implementation report](https://github.com/datagol/harness-x/blob/main/doc/sdk_audit_fixes_2026-09-18.md).
+For 0.3 API changes, see the [migration guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
 
 ---
 
@@ -979,9 +978,9 @@ agent = Agent(extensions=[SearchNormalization()])
 
 Read the detailed guides:
 
-- [Middleware and hooks](https://github.com/datagol/harness-x/blob/main/doc/middleware.md): all four stages, ordering, complete
+- [Middleware and hooks](https://harnessx-site.vercel.app/docs/hooks/): all four stages, ordering, complete
   examples, streaming behavior, errors, retries, and observation boundaries.
-- [Extensions](https://github.com/datagol/harness-x/blob/main/doc/extensions.md): when to use an extension, composing middleware
+- [Extensions](https://harnessx-site.vercel.app/docs/extensions/): when to use an extension, composing middleware
   with tools and hooks, lifecycle callbacks, ownership, persistence, and built-ins.
 
 Hook data is event specific. `LLM_REQUEST` carries `message_count`,
@@ -1044,7 +1043,7 @@ unsupported values instead of stringifying them. Saved artifacts survive agent
 closure until `PersistentMemory(directory).delete_session(session_id)`.
 
 For managed multi-session services (checkpointing, pause/resume, expiry),
-see [durable runtimes and the 0.3 migration guide](https://github.com/datagol/harness-x/blob/main/doc/durable_runtime.md).
+see [durable runtimes and the 0.3 migration guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
 
 The default backend is SQLite. PostgreSQL automatically provisions its schema from
 a connection string; Temporal adds distributed workflow recovery and Redis events.
@@ -1054,7 +1053,7 @@ construct a fresh compatible `Agent` and call `await runtime.resume(session_id)`
 No agent registry is needed for this pattern. `AgentRef` and `AgentRegistry` remain
 available for named definitions and Temporal workers.
 
-Try the [PostgreSQL crash-and-resume walkthrough](https://github.com/datagol/harness-x/blob/main/doc/postgres_durability.md): write
+Try the [PostgreSQL crash-and-resume walkthrough](https://harnessx-site.vercel.app/docs/postgres-durability/): write
 a report, let the process exit abruptly, and finish the same run in another process
 with the tool invocation count still at one. It uses scripted model responses,
 so only PostgreSQL and the `postgres` extra are required, not a model API key.
@@ -1064,7 +1063,7 @@ supports automatic password URL encoding. Use the `check` command to connect and
 prepare the runtime schema before starting a run.
 
 For incident debugging, opt in with `AgentRuntime(..., recording=True)`. The
-[flight recorder](https://github.com/datagol/harness-x/blob/main/doc/flight_recorder.md) preserves model/tool attempt boundaries,
+[flight recorder](https://harnessx-site.vercel.app/docs/flight-recorder/) preserves model/tool attempt boundaries,
 exports portable incident bundles, and verifies/plays them back offline. Export
 payloads and artifacts are opt-in. SQLite is locally tested; PostgreSQL requires
 service qualification, and Temporal recording is not implemented. Try

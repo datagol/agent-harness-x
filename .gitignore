@@ -34,3 +34,6 @@ output/
 /site-*.patch
 .vscode/
 *.log
+
+# Internal design notes and guides live outside the repository
+doc/
