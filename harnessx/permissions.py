@@ -179,6 +179,9 @@ class GuardrailsEngine:
             "lifetime_iterations": self._lifetime_iterations,
             "input_tokens": self._total_usage.input_tokens,
             "output_tokens": self._total_usage.output_tokens,
+            "cache_creation_input_tokens": self._total_usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": self._total_usage.cache_read_input_tokens,
+            "thinking_tokens": self._total_usage.thinking_tokens,
             "estimated_cost": f"${self.estimated_cost:.4f}",
         }
 

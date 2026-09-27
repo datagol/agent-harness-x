@@ -12,7 +12,7 @@ Prerequisites:
 For live models and LangSmith upload:
   export ANTHROPIC_API_KEY=sk-ant-...
   export LANGSMITH_API_KEY=lsv2_pt_...
-  export LANGSMITH_PROJECT="datagol-agent-evals"
+  export LANGSMITH_PROJECT="harnessx-evals"
 
 Run the scripted fixture (no keys, model calls, or uploads):
   python -m examples.run_evals --offline

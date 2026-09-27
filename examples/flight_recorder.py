@@ -25,7 +25,7 @@ from harnessx.providers import LLMProvider
 
 
 class FixtureProvider(LLMProvider):
-    """A scripted fixture, not a production Datagol connector."""
+    """A scripted fixture standing in for a real model provider."""
 
     def __init__(self):
         self.calls = 0
@@ -100,8 +100,10 @@ async def main(destination: Path):
     # Database and agent resources are now gone. Playback uses only the bundle.
     counts = (provider.calls, len(tool_calls))
     playback = await IncidentRecorder().playback(bundle)
-    assert playback.report.valid and playback.report.complete
-    assert (provider.calls, len(tool_calls)) == counts == (3, 1)
+    if not (playback.report.valid and playback.report.complete):
+        raise RuntimeError("Playback reported an invalid or incomplete bundle")
+    if (provider.calls, len(tool_calls)) != counts or counts != (3, 1):
+        raise RuntimeError("Playback must not invoke the provider or tools again")
     for record in playback.records:
         if record["kind"].startswith(("model.", "tool.")):
             print(

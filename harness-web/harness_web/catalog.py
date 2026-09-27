@@ -67,6 +67,15 @@ EXAMPLES = [
         detail="Exports a downloadable .hx incident bundle. Uses synthetic invoices and a scripted provider; no model calls.",
     ),
     Example(
+        "prompt_caching",
+        "Prompt caching",
+        "Keep the prompt prefix stable and watch cache reads arrive across iterations.",
+        "Agents",
+        "activity",
+        offline=True,
+        detail="Runs a two-iteration loop with a scripted provider that reports cache writes and reads; no model calls.",
+    ),
+    Example(
         "runtime_approvals",
         "Durable approvals",
         "Pause a workflow, review a tool action, and resume its persisted execution.",

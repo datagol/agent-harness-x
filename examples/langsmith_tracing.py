@@ -1,4 +1,4 @@
-"""LangSmith tracing example: full lifecycle observability for DataGOL agents.
+"""LangSmith tracing example: full lifecycle observability for HarnessX agents.
 
 Demonstrates:
   - Automatic LangSmith run tree creation for agent turns

@@ -9,10 +9,11 @@ It includes live output, input and approval controls, generated-file downloads,
 and a separate general chat workspace.
 
 ```bash
-python -m pip install -e '.[dev,all]'
+uv sync --all-extras
+uv run python -m examples.skills_demo
 ```
 
-For a minimal installation use `python -m pip install -e .` and add only the extras
+`uv sync` alone installs the SDK without integrations; add `--extra NAME` for only the extras
 listed below. Most interactive examples use the SDK's default Anthropic provider
 and require `ANTHROPIC_API_KEY`; they make billable model calls.
 
@@ -20,6 +21,7 @@ and require `ANTHROPIC_API_KEY`; they make billable model calls.
 
 ```bash
 python -m examples.skills_demo
+python -m examples.prompt_caching
 python -m examples.runtime_approvals
 python -m examples.flight_recorder --output /tmp/invoice-incident.hx
 python -m examples.run_evals --offline  # Requires the langsmith extra.
@@ -39,12 +41,13 @@ writing a temporary note. The recorder's destination must not already exist;
 | Command | Demonstrates | Requirements |
 |---|---|---|
 | `python -m examples.simple_chat` | Streaming chat, bounded arithmetic, workspace reads | Anthropic key |
-| `python -m examples.provider_chat --provider PROVIDER --model MODEL_ID` | Same calculator agent across four providers, streaming or ordinary runs | Selected provider's SDK extra and API key |
+| `python -m examples.provider_chat --provider PROVIDER --model MODEL_ID` | Same calculator agent across five providers, streaming or ordinary runs | Selected provider's SDK extra and API key |
 | `python -m examples.coding_agent` | Coding tools, middleware, terminal permissions | Anthropic key; writes and shell calls ask for approval |
 | `python -m examples.memory_agent` | Persistent markdown notes and structured facts | Anthropic key; stores data in `.agent_memory/` |
 | `python -m examples.multi_agent` | Constructor-defined specialists with isolated conversations | Anthropic key; URL research requests ask for approval |
 | `python -m examples.skills_agent` | Interactive lazy skill loading | Anthropic key by default |
 | `python -m examples.skills_demo` | Skill invocation and hook ordering | No external services |
+| `python -m examples.prompt_caching` | Stable prompt prefix, the cache hint a provider receives, and cache read/write counters | No external services by default; `--live` uses the Anthropic key |
 | `python -m examples.jev_routing --min-confidence 0.8` | Choice selects one fixed agent factory; general fallback | No external services by default |
 | `python -m examples.jev_classification` | Choice classifies W2, Deposit, Insurance, Payroll, or unknown | No external services by default |
 | `python -m examples.jev_answer_review` | Score checks coverage; Noul checks evidence support after a completed run | No external services by default |
@@ -128,12 +131,13 @@ The new `provider_chat` example uses that same default, and accepts an explicit
 provider and model on the command line. Configure the key for your chosen provider
 in the repository's `.env` or your environment:
 
-| Provider | Install from this checkout | API key |
+| Provider | Add the extra | API key |
 |---|---|---|
-| `anthropic` | `python3 -m pip install -e .` | `ANTHROPIC_API_KEY` |
-| `openai` | `python3 -m pip install -e '.[openai]'` | `OPENAI_API_KEY` |
-| `gemini` | `python3 -m pip install -e '.[gemini]'` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
-| `openrouter` | `python3 -m pip install -e '.[openrouter]'` | `OPENROUTER_API_KEY` |
+| `anthropic` | `uv add harnessx` | `ANTHROPIC_API_KEY` |
+| `openai` | `uv add "harnessx[openai]"` | `OPENAI_API_KEY` |
+| `gemini` | `uv add "harnessx[gemini]"` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| `openrouter` | `uv add "harnessx[openrouter]"` | `OPENROUTER_API_KEY` |
+| `azure` | `uv add "harnessx[azure]"` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_VERSION`; `--model` is the deployment name |
 
 ```bash
 python3 -m examples.provider_chat

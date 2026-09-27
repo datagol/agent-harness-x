@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `examples/prompt_caching.py`, a self-contained example showing the stable
+  prefix key, the cache hint a provider receives, and cache counters.
+- `GuardrailsEngine.usage_summary` now includes `cache_creation_input_tokens`,
+  `cache_read_input_tokens`, and `thinking_tokens`.
+- `examples/provider_chat.py` accepts `--provider azure`.
+
+### Changed
+
+- Installation docs use `uv add harnessx` from PyPI; repository work uses
+  `uv sync --all-extras` and `uv run`.
+- The web example no longer installs wildcard CORS, and the coding agent
+  example bounds filesystem tools to the working directory.
+
 ## [0.3.0] - 2026-09-26
 
 First release under the new name. Version 0.2.2 was bumped in the repository but

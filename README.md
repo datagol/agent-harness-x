@@ -48,18 +48,24 @@ The distribution and Python import are both named `harnessx`:
 to `harnessx` (there is no compatibility alias) and see the [changelog](https://github.com/datagol/agent-harness-x/blob/main/CHANGELOG.md).
 
 ```bash
-# From PyPI
+# Add it to a uv project (extras: openai, azure, gemini, openrouter, jev, mcp,
+# postgres, temporal, docker, langsmith, server, all)
+uv add harnessx
+uv add "harnessx[openai]"
+uv add "harnessx[all]"
+
+# Or with pip, into any environment
 pip install harnessx
+```
 
-# With optional extras (LangSmith, OpenAI, Azure OpenAI, Jev, MCP, Docker, or everything)
-pip install "harnessx[langsmith]"
-pip install "harnessx[openai]"
-pip install "harnessx[azure]"
-pip install "harnessx[jev]"
-pip install "harnessx[all]"
+To work on the SDK itself, clone the repository and let uv create the
+environment from the committed lockfile:
 
-# For local development (editable)
-pip install -e ".[all]"
+```bash
+git clone https://github.com/datagol/agent-harness-x.git
+cd agent-harness-x
+uv sync --all-extras          # SDK, every integration, and the dev tools
+uv run pytest -q              # the suite runs offline
 ```
 
 Set your key (a root `.env` is auto-loaded by the `examples` package):
@@ -70,18 +76,20 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 ```
 
-Run examples as modules from the repo root (not as plain scripts):
+The examples live in the repository, not in the package. Run them as modules
+from the checkout root, through the environment uv created:
 
 ```bash
-python -m examples.simple_chat
+uv run python -m examples.simple_chat
 ```
 
 See the [examples guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md) for every entry point, optional
 dependencies, and service requirements. For a first run without API keys, use
-`python -m examples.skills_demo` or `python -m examples.flight_recorder --output incident.hx`.
+`uv run python -m examples.skills_demo`, `uv run python -m examples.prompt_caching`, or
+`uv run python -m examples.flight_recorder --output incident.hx`.
 
 `Agent()` and `examples.simple_chat` use Anthropic by default. To choose Anthropic,
-OpenAI, Gemini, or OpenRouter, use [provider chat](https://github.com/datagol/agent-harness-x/blob/main/examples/provider_chat.py):
+OpenAI, Gemini, OpenRouter, or Azure OpenAI, use [provider chat](https://github.com/datagol/agent-harness-x/blob/main/examples/provider_chat.py):
 `python -m examples.provider_chat --provider openai --model YOUR_MODEL_ID`.
 See the [provider setup guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
 optional dependencies, and streaming options.
@@ -185,7 +193,7 @@ failing open.
 
 ### Azure OpenAI
 
-Install the extra (`pip install "harnessx[azure]"`; the `openai`
+Install the extra (`uv add "harnessx[azure]"`; the `openai`
 package covers Azure). Azure reuses the OpenAI translation layer through the
 `AsyncAzureOpenAI` client, so completion **and streaming** both work. On Azure
 the `model` you pass is the **deployment name**, and both an endpoint and an
@@ -1231,22 +1239,30 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 
 ## Runnable examples
 
-Prerequisites and local verification coverage are listed in [examples/README.md](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md).
+Every example is a module in the repository's `examples/` directory, run from a
+checkout with `uv run python -m examples.<name>`. Prerequisites and test coverage
+are listed in [examples/README.md](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md).
+Examples marked "no services" use scripted model responses and run without keys.
 
-| Example | Shows |
-|---|---|
-| `python -m examples.simple_chat` | Streaming interactive chat + basic tools |
-| `python -m examples.multi_agent` | Orchestrator + specialist agents |
-| `python -m examples.langsmith_tracing` | LangSmith lifecycle tracing + multi-agent nesting |
-| `python -m examples.run_evals --offline` | Scripted evaluations with no live model or uploads |
-| `python -m examples.skills_agent` | Lazy skill loading |
-| `python -m examples.skills_demo` | Scripted skill loading without API keys |
-| `python -m examples.memory_agent` | Two-layer persistent memory |
-| `python -m examples.mcp_agent --help` | MCP connection options and tool integration |
-| `python -m examples.coding_agent` | Full coding assistant |
-| `python -m examples.sandboxed_coder` | Process resource limits and temporary workspace |
-| `python -m examples.runtime_approvals` | SQLite approval/resume with a scripted model |
-| `python -m examples.postgres_runtime` | PostgreSQL runtime with a live model |
-| `python -m examples.postgres_runtime crash` / `status` / `resume` | PostgreSQL process-crash recovery with a scripted model |
-| `python -m examples.flight_recorder --output incident.hx` | Portable recording, verification, and offline playback |
-| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Trusted local web demo with streaming UI, MCP, and skills |
+| Example | Shows | Needs |
+|---|---|---|
+| `examples.simple_chat` | Streaming interactive chat, a calculator tool, workspace reads | Anthropic key |
+| `examples.provider_chat --provider P --model M` | The same agent across Anthropic, OpenAI, Gemini, OpenRouter, and Azure; streaming or ordinary runs; usage with cache counters | The provider's extra and key |
+| `examples.prompt_caching` | A stable prompt prefix, the cache hint a provider receives, and cache write/read counters across a two-step loop | No services; `--live` uses Anthropic |
+| `examples.coding_agent` | File and shell tools, an audit middleware, terminal approvals | Anthropic key |
+| `examples.memory_agent` | Markdown notes and structured long-term facts as tools | Anthropic key |
+| `examples.multi_agent` | Constructor-declared specialists with isolated tools and permissions | Anthropic key; URL research asks for approval |
+| `examples.skills_agent` | Lazy skill loading in a live conversation, with a hook showing invocations | Anthropic key by default |
+| `examples.skills_demo` | Skill discovery, invocation, and hook ordering | No services |
+| `examples.runtime_approvals` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
+| `examples.flight_recorder --output incident.hx` | A retried model call, middleware boundaries, and offline playback of the exported incident | No services; unused output path |
+| `examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |
+| `examples.postgres_runtime` | Live streaming on the PostgreSQL runtime | `postgres` extra, `DATABASE_URL` or `--config`, Anthropic key |
+| `examples.postgres_runtime check` / `crash` / `status` / `resume` | Storage check, a report, a hard process exit, and recovery of the same run without repeating the tool | `postgres` extra and a database; no model key |
+| `examples.jev_routing --min-confidence 0.8` | A Choice decision selects one agent factory, with a general fallback | No services by default; `--live` needs the `jev` extra |
+| `examples.jev_classification` | A Choice decision classifies a document into five categories | No services by default |
+| `examples.jev_answer_review` | Score reviews coverage and Noul checks evidence after a completed run | No services by default |
+| `examples.langsmith_tracing` | LangSmith lifecycle tracing with a nested specialist span | `langsmith` extra, Anthropic and LangSmith keys |
+| `examples.run_evals --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
+| `examples.mcp_agent --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
+| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Single-agent web chat with SSE streaming, MCP management, and snapshots | `server` extra, Anthropic key |

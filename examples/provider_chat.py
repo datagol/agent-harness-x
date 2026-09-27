@@ -33,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--provider",
-        choices=("anthropic", "openai", "gemini", "openrouter"),
+        choices=("anthropic", "openai", "gemini", "openrouter", "azure"),
         default=defaults.provider,
         help="Model provider (default: anthropic).",
     )
@@ -109,13 +109,7 @@ async def main(argv: list[str] | None = None) -> int:
             if not prompt:
                 continue
             if prompt.lower() == "usage":
-                usage = agent.guardrails.total_usage
-                print_status(
-                    {
-                        "Input tokens": usage.input_tokens,
-                        "Output tokens": usage.output_tokens,
-                    }
-                )
+                print_status({"Usage": agent.guardrails.usage_summary})
                 continue
             try:
                 console.print()

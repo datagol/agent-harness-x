@@ -18,7 +18,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -163,13 +162,10 @@ async def lifespan(app: FastAPI):
             mcp_manager = None
 
 
+# The UI is served from this same origin, so no CORS middleware is installed:
+# this server has no authentication and exposes shell and file tools, and a
+# wildcard origin would let any open web page drive it.
 app = FastAPI(title="Agent Harness API", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ── Request/Response models ──────────────────────────────────────────────

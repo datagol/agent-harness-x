@@ -8,6 +8,7 @@ Run: python -m examples.coding_agent
 
 import asyncio
 import logging
+from pathlib import Path
 
 from harnessx import (
     AgentConfig,
@@ -67,7 +68,7 @@ async def main():
     )
 
     async with agent:
-        register_filesystem_tools(agent.tools)
+        register_filesystem_tools(agent.tools, base_path=str(Path.cwd()))
         register_bash_tools(agent.tools)
 
         # Auto-allow read operations

@@ -252,7 +252,7 @@ async def test_provider_chat_interactive_followups(
     assert await provider_chat.main([]) == 0
     agent = example_environment[0]
     assert len(agent.memory.get_messages()) == 4
-    assert "Input tokens" in capsys.readouterr().out
+    assert "cache_read_input_tokens" in capsys.readouterr().out
     assert agent._closed
 
 
@@ -282,6 +282,20 @@ async def test_skills_demo_uses_real_skill_tool(example_environment, capsys):
 
     await skills_demo.main()
     assert "SKILL_INVOKED  skill=code-review" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_prompt_caching_example_shows_a_stable_prefix(example_environment, capsys):
+    from examples.prompt_caching import main
+
+    assert await main() == 0
+    out = capsys.readouterr().out
+    assert "prefix stable across iterations: yes" in out
+    assert "cache reads (tokens)  1150" in out and "cache writes (tokens) 1150" in out
+
+    assert await main(disabled=True) == 0
+    out = capsys.readouterr().out
+    assert "Caching: off" in out and "enabled=False" in out and "cache reads (tokens)  0" in out
 
 
 @pytest.mark.asyncio
