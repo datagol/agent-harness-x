@@ -27,7 +27,7 @@ import argparse
 import os
 from functools import partial
 
-from harnessx import Agent, AgentConfig, PermissionLevel, ProviderResponse, ToolCall
+from harnessx import Agent, AgentConfig, Limits, PermissionLevel, ProviderResponse, ToolCall
 from examples._calculator import calculate
 from examples._fixtures import ScriptedProvider
 from harnessx.evals import (
@@ -73,7 +73,7 @@ def build_math_agent(inputs: dict, *, fixture: bool = False) -> Agent:
                 "Use the calculate tool for arithmetic. Answer non-arithmetic "
                 "questions directly without invoking it."
             ),
-            max_iterations=5,
+            limits=Limits(max_iterations=5),
         ),
     )
 

@@ -78,12 +78,16 @@ def test_hint_survives_the_wire_and_absent_means_legacy():
     assert hint_from_wire(hint) is hint
 
 
-def test_accepts_cache_detects_the_keyword_or_var_kwargs():
+def test_accepts_cache_requires_an_explicit_parameter():
     async def explicit(*, model, cache=None): ...
     async def open_ended(**kwargs): ...
     async def legacy(*, model): ...
 
-    assert accepts_cache(explicit) and accepts_cache(open_ended) and not accepts_cache(legacy)
+    # **kwargs no longer counts: a provider that swallows unknown keywords would
+    # otherwise be handed a hint it never reads.
+    assert accepts_cache(explicit)
+    assert not accepts_cache(open_ended)
+    assert not accepts_cache(legacy)
 
 
 # ── Engine wiring ─────────────────────────────────────────────────────────────

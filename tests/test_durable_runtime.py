@@ -4,7 +4,6 @@ import pytest
 
 from harnessx import (
     Agent,
-    AgentConfig,
     AgentRegistry,
     AgentRuntime,
     SQLiteBackend,
@@ -77,7 +76,7 @@ async def test_unspecified_tool_permissions_allow_execution(tmp_path, registrati
             runtime = AgentRuntime(agent, backend=store)
             try:
                 await runtime.start()
-                result = await runtime.execute("What is 48 * 12?")
+                result = await runtime.run("What is 48 * 12?")
             finally:
                 await runtime.stop()
                 await store.aclose()
@@ -146,8 +145,8 @@ async def test_sqlite_roundtrip_dedup_and_binding(tmp_path):
     store = SQLiteBackend(tmp_path / "runtime.db")
     runtime = AgentRuntime(ref, backend=store, registry=registry)
     sid = await runtime.start()
-    first = await runtime.execute("hello", request_id="r1")
-    again = await runtime.execute("hello", request_id="r1")
+    first = await runtime.run("hello", request_id="r1")
+    again = await runtime.run("hello", request_id="r1")
     assert first.run_id == again.run_id
     assert len((await store.get_run(first.run_id))["messages"]) == 2
     events = await store.read_events(first.run_id)
@@ -158,7 +157,7 @@ async def test_sqlite_roundtrip_dedup_and_binding(tmp_path):
     store2 = SQLiteBackend(tmp_path / "runtime.db")
     runtime2 = AgentRuntime(ref, backend=store2, registry=registry)
     assert await runtime2.resume(sid) is None
-    result = await runtime2.execute("again")
+    result = await runtime2.run("again")
     assert result.output == "done"
     assert len((await store2.get_run(result.run_id))["messages"]) == 4
     await runtime2.stop()
@@ -196,9 +195,9 @@ async def test_approval_persists_and_resume_does_not_repeat_model(tmp_path, poli
     store = SQLiteBackend(tmp_path / "runtime.db")
     runtime = AgentRuntime(ref, registry=registry, backend=store)
     sid = await runtime.start()
-    result = await runtime.execute("write")
+    result = await runtime.run("write")
     assert result.status == "awaiting_input" and not effects
-    key = result.pending[0]["execution_key"]
+    key = result.pending[0].execution_key
     await runtime.approve(key)
     handle = await runtime.resume(sid)
     assert (await handle.result()).status == "completed"
@@ -246,7 +245,7 @@ async def test_recover_uncertain_manual_call_without_reexecution(tmp_path):
     result = await handle.result()
     assert result.status == "awaiting_input" and not effects
     await runtime.resolve_tool(
-        result.pending[0]["execution_key"], result=ToolResult("t", "already written")
+        result.pending[0].execution_key, result=ToolResult("t", "already written")
     )
     handle = await runtime.resume(sid)
     assert (await handle.result()).output == "done" and not effects
@@ -316,7 +315,7 @@ async def test_artifacts_survive_close_and_rehydrate(tmp_path):
     store = SQLiteBackend(tmp_path / "r.db")
     runtime = AgentRuntime(ref, registry=registry, backend=store)
     sid = await runtime.start()
-    result = await runtime.execute("hello")
+    result = await runtime.run("hello")
     assert result.status == "completed"
     state = await store.get_run(result.run_id)
     path = next(iter(state["extensions"]["result_spill"]["results"].values()))["path"]
@@ -362,7 +361,7 @@ async def test_raw_tool_result_is_committed_before_failing_result_middleware(tmp
     store = SQLiteBackend(tmp_path / "r.db")
     runtime = AgentRuntime(ref, registry=registry, backend=store)
     sid = await runtime.start()
-    failed = await runtime.execute("hello")
+    failed = await runtime.run("hello")
     assert failed.status == "failed" and effects == [1]
     saved = await store.get_run(failed.run_id)
     assert saved["tools"][0]["status"] == "raw_completed"
@@ -454,7 +453,7 @@ async def test_overlapping_direct_runs_are_rejected():
         await entered.wait()
         with pytest.raises(RuntimeError, match="busy"):
             await a.run("second")
-    assert not a._busy
+    assert not a.busy
 
 
 @pytest.mark.asyncio
@@ -465,7 +464,7 @@ async def test_completed_request_dedup_during_new_run(tmp_path):
     store = SQLiteBackend(tmp_path / "r.db")
     runtime = AgentRuntime(Agent(provider=provider), backend=store)
     await runtime.start()
-    first = await runtime.execute("a", request_id="a")
+    first = await runtime.run("a", request_id="a")
     second = await runtime.submit("b", request_id="b")
     duplicate = await runtime.submit("a", request_id="a")
     assert (await duplicate.result()).run_id == first.run_id
@@ -490,8 +489,8 @@ async def test_fresh_created_run_is_discoverable_before_first_snapshot(tmp_path)
 @pytest.mark.asyncio
 async def test_retry_model_marks_usage_incomplete():
     provider = Provider([ConnectionError("interrupted"), ProviderResponse(text="done")])
-    # Provider-level retry would absorb the failure; this test covers the runtime layer.
-    agent = Agent(config=AgentConfig(llm_max_attempts=1), provider=provider)
+    # The default RetryPolicy(attempts=2) retries the transient failure once.
+    agent = Agent(provider=provider)
     async with agent.run_stream("go") as stream:
         events = [e async for e in stream]
         result = await stream.result()
@@ -536,7 +535,7 @@ async def test_real_process_crash_after_effect(tmp_path, policy):
                 os._exit(42)
             store=SQLiteBackend(root/'r.db'); runtime=AgentRuntime(a,backend=store)
             (root/'session').write_text(await runtime.start())
-            await runtime.execute('go')
+            await runtime.run('go')
         asyncio.run(main())
     """)
     )
@@ -599,7 +598,7 @@ async def test_cancelled_turn_can_be_followed_by_valid_conversation(tmp_path):
     await runtime.submit("go")
     await entered.wait()
     await runtime.cancel()
-    assert (await runtime.execute("next")).output == "next"
+    assert (await runtime.run("next")).output == "next"
     await runtime.stop()
     await store.aclose()
 
@@ -661,9 +660,9 @@ async def test_runtime_rechecks_new_ask_policy_before_dispatch(tmp_path):
         await save(state, events, lease)
 
     store.save_run = change_policy
-    result = await runtime.execute("go")
+    result = await runtime.run("go")
     assert result.status == "awaiting_input" and not effects
-    await runtime.approve(result.pending[0]["execution_key"])
+    await runtime.approve(result.pending[0].execution_key)
     handle = await runtime.resume(runtime.session_id)
     assert (await handle.result()).status == "completed" and effects == [1]
     await runtime.stop()
@@ -761,7 +760,7 @@ async def test_session_deadline_interrupts_provider_and_returns_result(tmp_path)
         runtime_config=RuntimeConfig(max_session_duration_seconds=0.03),
     )
     await runtime.start()
-    result = await runtime.execute("go")
+    result = await runtime.run("go")
     assert result.status == "cancelled" and result.stop_reason == "timeout"
     await runtime.stop()
     await store.aclose()

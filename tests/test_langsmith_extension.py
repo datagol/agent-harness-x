@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from harnessx import (
     AgentConfig,
+    AnthropicProvider,
     LangSmithExtension,
     PermissionLevel,
     Agent,
@@ -323,7 +324,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
             ext = LangSmithExtension(project_name="stream-test")
             streaming_agent = Agent(
                 config=AgentConfig(model="claude-sonnet-4-6"),
-                client=mock_client,
+                provider=AnthropicProvider(client=mock_client),
                 extensions=[ext],
             )
 

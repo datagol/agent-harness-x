@@ -129,12 +129,12 @@ class RecordingAzureSDK:
 
 
 class TestAzureFactory(unittest.TestCase):
-    def test_factory_builds_azure_provider_both_aliases(self):
+    def test_factory_builds_azure_provider(self):
         client = FakeAzureClient()
         self.assertIsInstance(make_provider("azure", client=client), AzureOpenAIProvider)
-        self.assertIsInstance(
-            make_provider("azure-openai", client=client), AzureOpenAIProvider
-        )
+        # The "azure-openai" alias was removed in 0.4; AgentConfig never accepted it.
+        with self.assertRaises(ValueError):
+            make_provider("azure-openai", client=client)
 
     def test_factory_case_insensitive(self):
         client = FakeAzureClient()
@@ -555,7 +555,7 @@ class TestAzureIntegration(unittest.TestCase):
                 await runtime.start()
                 try:
                     self.assertIs(runtime._agent.provider, provider)
-                    result = await runtime.execute("Hi")
+                    result = await runtime.run("Hi")
                     self.assertEqual(result.output, "hello")
                 finally:
                     await runtime.stop()

@@ -21,7 +21,7 @@ Run:
 import asyncio
 import os
 
-from harnessx import Agent, AgentConfig, LangSmithExtension, PermissionLevel
+from harnessx import Agent, AgentConfig, LangSmithExtension, Limits, PermissionLevel
 from examples._calculator import calculate
 from examples._console import completed_output
 
@@ -36,7 +36,7 @@ async def run_specialist(topic: str) -> str:
         config=AgentConfig(
             model="claude-sonnet-4-6",
             system_prompt="You are a concise research specialist. Give 2-3 bullet points.",
-            max_iterations=5,
+            limits=Limits(max_iterations=5),
         ),
         extensions=[
             LangSmithExtension(
@@ -73,7 +73,7 @@ async def main() -> None:
                 "You are a helpful assistant. Use tools when helpful. "
                 "Delegate in-depth research to the research_topic tool."
             ),
-            max_iterations=10,
+            limits=Limits(max_iterations=10),
         ),
         extensions=[ls_ext],
     )

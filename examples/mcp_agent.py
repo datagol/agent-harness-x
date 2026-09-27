@@ -29,6 +29,7 @@ from harnessx import (
     Agent,
     AgentConfig,
     CliPermissionManager,
+    Limits,
     MCPManager,
     PermissionLevel,
 )
@@ -63,9 +64,8 @@ async def main():
     hooks = create_hooks()
 
     async with AsyncExitStack() as resources:
-        # Create MCP manager and connect
-        mcp = MCPManager()
-        resources.push_async_callback(mcp.disconnect_all)
+        # The manager disconnects every server when the stack unwinds.
+        mcp = await resources.enter_async_context(MCPManager())
 
         console.print(
             f"Connecting to MCP server [bold cyan]'{args.server}'[/bold cyan]..."
@@ -95,17 +95,16 @@ async def main():
                     "You are a helpful assistant with access to tools. "
                     "Use the available tools to help the user."
                 ),
-                max_iterations=20,
+                limits=Limits(max_iterations=20),
             ),
             hooks=hooks,
             permissions=CliPermissionManager(),
-            mcp=mcp,
+            mcp=mcp,  # bridges the discovered tools into agent.tools
         )
 
         await resources.enter_async_context(agent)
 
-        # Register MCP tools into agent's tool registry
-        registered = mcp.register_tools(agent.tools)
+        registered = agent.mcp_tools
         console.print(
             f"  [info]Registered {len(registered)} MCP tools into agent[/info]"
         )

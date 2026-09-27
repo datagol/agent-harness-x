@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from harnessx import (
+    Limits,
     AgentConfig,
     MCPManager,
     PermissionLevel,
@@ -119,7 +120,7 @@ def create_streaming_agent() -> Agent:
                 "When a request matches an available skill, load it first. "
                 "Be concise and direct."
             ),
-            max_iterations=25,
+            limits=Limits(max_iterations=25),
         ),
         **agent_bindings(),
     )

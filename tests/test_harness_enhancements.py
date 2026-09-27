@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from unittest.mock import MagicMock
 
 from harnessx import (
+    Limits,
     AgentConfig,
     ConversationMemory,
     Extension,
@@ -96,7 +97,6 @@ class TestCanonicalTypes(unittest.TestCase):
         # StopReason inherits from str, Enum
         self.assertEqual(StopReason.END_TURN, "end_turn")
         self.assertEqual(StopReason.TOOL_USE, "tool_use")
-        self.assertEqual(StopReason.TOOL_CALLS, "tool_use")
         self.assertEqual(StopReason.MAX_TOKENS, "max_tokens")
 
     def test_provider_response_post_init(self):
@@ -152,7 +152,7 @@ class TestAgentLoopFixes(unittest.IsolatedAsyncioTestCase):
         # max_iterations = 4: turn 1 takes 3 iterations, turn 2 takes 3 iterations.
         # Cumulative = 6. With old bug, turn 2 would crash because 6 >= 4.
         provider = MockTestProvider(make_turn_responses() + make_turn_responses())
-        agent = Agent(config=AgentConfig(max_iterations=4), provider=provider)
+        agent = Agent(config=AgentConfig(limits=Limits(max_iterations=4)), provider=provider)
 
         @agent.tools.register(permission=PermissionLevel.ALLOW)
         def dummy() -> str:

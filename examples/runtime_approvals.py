@@ -20,21 +20,20 @@ from harnessx import (
 from examples._fixtures import ScriptedProvider
 
 
-async def approve_pending(runtime: AgentRuntime, result: RunResult):
-    unresolved = False
-    for pending in result.pending:
-        if pending["status"] != "approval":
-            print("Tool outcome needs reconciliation:", pending["execution_key"])
-            unresolved = True
-            continue
-        call = pending["call"]
-        response = await asyncio.to_thread(
-            input, f"Allow {call['name']} {call['input']}? [y/N] "
-        )
-        await runtime.approve(
-            pending["execution_key"], allow=response.strip().lower() == "y"
-        )
-    return None if unresolved else await runtime.resume(runtime.session_id)
+async def decide(runtime: AgentRuntime, result: RunResult) -> RunResult:
+    """Ask about the paused tool, record the decision, and finish the run."""
+    pending = result.pending[0]
+    if pending.status != "approval":
+        print("Tool outcome needs reconciliation:", pending.execution_key)
+        return result
+    answer = await asyncio.to_thread(
+        input, f"Allow {pending.call.name} {pending.call.input}? [y/N] "
+    )
+    # approve(..., resume=True) persists the decision and runs the turn to its end.
+    # With several pending tools, approve each without resume, then resume once.
+    return await runtime.approve(
+        pending, allow=answer.strip().lower() == "y", resume=True
+    )
 
 
 async def main() -> None:
@@ -62,17 +61,15 @@ async def main() -> None:
         backend = SQLiteBackend(str(Path(directory) / "runtime.db"))
         try:
             async with AgentRuntime(agent, backend=backend) as runtime:
-                result = await runtime.execute("Create a review note")
+                result = await runtime.run("Create a review note")
                 print(
                     "Before approval:",
                     result.status.value,
                     "| Note exists:",
                     note.exists(),
                 )
-                if result.status == "awaiting_input":
-                    handle = await approve_pending(runtime, result)
-                    if handle:
-                        result = await handle.result()
+                if result.needs_input:
+                    result = await decide(runtime, result)
                 print(
                     "After approval:",
                     result.status.value,

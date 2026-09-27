@@ -52,7 +52,7 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.jev_classification` | Choice classifies W2, Deposit, Insurance, Payroll, or unknown | No external services by default |
 | `python -m examples.jev_answer_review` | Score checks coverage; Noul checks evidence support after a completed run | No external services by default |
 | `python -m examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |
-| `python -m examples.runtime_approvals` | Persisted `ASK` approval and explicit resume | No external services; terminal input |
+| `python -m examples.runtime_approvals` | Persisted `ASK` approval finished with `approve(pending, resume=True)` | No external services; terminal input |
 | `python -m examples.flight_recorder --output incident.hx` | Retry history, middleware boundaries, offline playback | No external services; unused output path |
 | `python -m examples.postgres_runtime` | PostgreSQL runtime streaming and cleanup | `postgres` extra, `DATABASE_URL` or `--config PATH`, Anthropic key |
 | `python -m examples.postgres_runtime check` / `crash` / `status` / `resume` | Check storage, write a report, crash, and finish the same run without repeating the tool | `postgres` extra and `DATABASE_URL` or `--config PATH`; no model key |

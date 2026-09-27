@@ -16,7 +16,6 @@ import pytest
 
 from harnessx import (
     Agent,
-    AgentConfig,
     AgentRef,
     AgentRuntime,
     BundleLimits,
@@ -137,7 +136,7 @@ async def test_raw_and_processed_are_private_and_offline(tmp_path, monkeypatch):
     async with session(
         tmp_path, provider=provider, configure=lambda a: a.middleware.add(Transform())
     ) as (runtime, store):
-        result = await runtime.execute("hello")
+        result = await runtime.run("hello")
         assert result.output == "approved output"
         public = await store.read_events(result.run_id)
         assert "private raw output" not in str(public)
@@ -171,11 +170,9 @@ async def test_retry_retains_distinct_model_attempts(tmp_path):
     provider = Provider(
         [ConnectionError("lost response"), ProviderResponse(text="recovered")]
     )
-    # Provider-level retry is off so the failure reaches the durable attempt journal.
-    async with session(
-        tmp_path, provider=provider, config=AgentConfig(llm_max_attempts=1)
-    ) as (runtime, _):
-        result = await runtime.execute("hello")
+    # The engine's single retry loop journals each attempt: one failed, one recovered.
+    async with session(tmp_path, provider=provider) as (runtime, _):
+        result = await runtime.run("hello")
         bundle = await export(runtime, result, tmp_path)
     playback = await IncidentRecorder().playback(bundle)
     assert playback.report.complete
@@ -214,7 +211,7 @@ async def test_concurrent_tools_keep_separate_ordered_outcomes(tmp_path):
         runtime,
         _,
     ):
-        result = await runtime.execute("parallel")
+        result = await runtime.run("parallel")
         playback = await IncidentRecorder().playback(
             await export(runtime, result, tmp_path)
         )
@@ -251,7 +248,7 @@ async def test_ambiguous_commit_preserves_one_return_record_and_no_repeated_effe
                 raise ConnectionError("commit succeeded but response was lost")
 
         store.save_run = ambiguous
-        failed = await runtime.execute("act")
+        failed = await runtime.run("act")
         assert failed.status == "failed" and effects == [1]
         result = await (await runtime.resume(runtime.session_id)).result()
         playback = await IncidentRecorder().playback(
@@ -264,7 +261,7 @@ async def test_ambiguous_commit_preserves_one_return_record_and_no_repeated_effe
 @pytest.mark.asyncio
 async def test_conflicting_journal_record_rolls_back_state_update(tmp_path):
     async with session(tmp_path) as (runtime, store):
-        result = await runtime.execute("hello")
+        result = await runtime.run("hello")
         state, records, _ = await store.incident_snapshot(
             runtime.session_id, result.run_id
         )
@@ -304,9 +301,9 @@ async def test_raw_tool_recovery_and_approval_journal(tmp_path):
         runtime,
         store,
     ):
-        waiting = await runtime.execute("act")
+        waiting = await runtime.run("act")
         assert waiting.status == "awaiting_input" and effects == []
-        key = waiting.pending[0]["execution_key"]
+        key = waiting.pending[0].execution_key
         await runtime.approve(key)
         failed = await (await runtime.resume(runtime.session_id)).result()
         assert failed.status == "failed" and effects == [1]
@@ -384,7 +381,7 @@ async def test_required_recording_failure_blocks_dispatch(tmp_path, boundary):
             return await original(state, events, lease, records=records)
 
         store.save_run = unreliable
-        result = await runtime.execute("act")
+        result = await runtime.run("act")
         assert result.status in ("failed", "awaiting_input")
         assert effects == [] and provider.calls == (
             0 if boundary == "model.started" else 1
@@ -404,7 +401,7 @@ async def test_default_export_omits_payloads_and_custom_redaction_is_copied(tmp_
             [ProviderResponse(text='{"api_key":"credential","value":7}')]
         ),
     ) as (runtime, store):
-        result = await runtime.execute("sensitive business question")
+        result = await runtime.run("sensitive business question")
         metadata = await runtime.export_incident(
             result.run_id, destination=tmp_path / "metadata.hx"
         )
@@ -445,7 +442,7 @@ async def test_redacted_final_checkpoint_does_not_validate_against_an_older_stat
         )
 
     async with session(tmp_path) as (runtime, _):
-        result = await runtime.execute("hello")
+        result = await runtime.run("hello")
         bundle = await export(runtime, result, tmp_path, redact=redact)
     report = await IncidentRecorder().verify(bundle)
     assert report.valid and not report.complete
@@ -468,7 +465,7 @@ async def test_artifact_export_portability_and_missing_content(tmp_path):
         configure=configure,
         extensions=extensions,
     ) as (runtime, store):
-        result = await runtime.execute("large result")
+        result = await runtime.run("large result")
         assert result.status == "completed"
         bundle = await export(runtime, result, tmp_path, include_artifacts=True)
         playback = await IncidentRecorder().playback(bundle)
@@ -541,7 +538,7 @@ async def test_portable_raw_file_result_still_gives_middleware_a_local_path(tmp_
         provider=Provider([call(), ProviderResponse(text="done")]),
         configure=configure,
     ) as (runtime, _):
-        result = await runtime.execute("capture file")
+        result = await runtime.run("capture file")
         assert result.status == "completed", result.error
         playback = await IncidentRecorder().playback(
             await export(runtime, result, tmp_path, include_artifacts=True)
@@ -564,7 +561,7 @@ async def test_portable_raw_file_result_still_gives_middleware_a_local_path(tmp_
 )
 async def test_bundle_validation_rejects_corruption(tmp_path, corruption):
     async with session(tmp_path) as (runtime, _):
-        bundle = await export(runtime, await runtime.execute("hello"), tmp_path)
+        bundle = await export(runtime, await runtime.run("hello"), tmp_path)
     options = {
         "checksum": dict(
             change_records=lambda r: r[0].update(step_id="changed"), rehash=False
@@ -588,7 +585,7 @@ async def test_bundle_validation_rejects_corruption(tmp_path, corruption):
 @pytest.mark.asyncio
 async def test_missing_raw_boundary_cannot_claim_complete_capture(tmp_path):
     async with session(tmp_path) as (runtime, _):
-        bundle = await export(runtime, await runtime.execute("hello"), tmp_path)
+        bundle = await export(runtime, await runtime.run("hello"), tmp_path)
 
     def remove_response(records):
         records[:] = [item for item in records if item["kind"] != "model.response"]
@@ -617,7 +614,7 @@ async def test_missing_raw_boundary_cannot_claim_complete_capture(tmp_path):
 @pytest.mark.asyncio
 async def test_limits_no_overwrite_and_session_scope(tmp_path):
     async with session(tmp_path) as (runtime, store):
-        result = await runtime.execute("hello")
+        result = await runtime.run("hello")
         bundle = await export(runtime, result, tmp_path)
         before = bundle.read_bytes()
         with pytest.raises(FileExistsError):
@@ -644,7 +641,7 @@ async def test_limits_no_overwrite_and_session_scope(tmp_path):
 @pytest.mark.asyncio
 async def test_recording_off_and_persisted_choice(tmp_path):
     async with session(tmp_path, recording=False) as (runtime, store):
-        result = await runtime.execute("hello")
+        result = await runtime.run("hello")
         sid = runtime.session_id
         async with store.transaction() as tx:
             assert (await tx.one("SELECT COUNT(*) FROM journal"))[0] == 0
@@ -715,7 +712,7 @@ async def test_real_crash_then_fresh_process_offline_playback(tmp_path):
                 os._exit(42)
             runtime = AgentRuntime(agent, backend=SQLiteBackend(root / "runtime.db"), recording=True)
             (root / "session").write_text(await runtime.start())
-            await runtime.execute("act")
+            await runtime.run("act")
         asyncio.run(main())
     """)
     )
@@ -771,7 +768,7 @@ async def test_real_crash_then_fresh_process_offline_playback(tmp_path):
         assert len(of_kind(playback, "tool.dispatched")) == 1 and not of_kind(
             playback, "tool.returned"
         )
-        key = result.pending[0]["execution_key"]
+        key = result.pending[0].execution_key
         await runtime.resolve_tool(key, result=ToolResult("t", "confirmed externally"))
         finished = await (await runtime.resume(runtime.session_id)).result()
         assert finished.status == "completed" and effects == []

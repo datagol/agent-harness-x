@@ -9,6 +9,7 @@ import uuid
 from harnessx import (
     Agent,
     AgentConfig,
+    Limits,
     PermissionLevel,
     PermissionManager,
     ProviderResponse,
@@ -141,7 +142,7 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
             provider="anthropic" if chat.provider == "demo" else chat.provider,
             model=chat.model,
             system_prompt=chat.system_prompt,
-            max_iterations=20,
+            limits=Limits(max_iterations=20),
         ),
         provider=provider_instance
         or (DemoProvider() if chat.provider == "demo" else None),
@@ -157,8 +158,7 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
         agent.permissions.set_permission(name, PermissionLevel.ASK)
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
-    if chat.mcp.tool_count:
-        chat.mcp.register_tools(agent.tools)
+    # Agent(mcp=chat.mcp) already bridged the connected servers' tools.
     return agent
 
 

@@ -189,8 +189,8 @@ async def test_timeout_or_cancellation_closes_child(monkeypatch, cancel):
                 await task
         else:
             result = await asyncio.wait_for(task, 2)
-            assert result.status == "awaiting_input" and result.pending[0]["status"] == "uncertain"
-        assert child.closed and not parent._busy
+            assert result.status == "awaiting_input" and result.pending[0].status == "uncertain"
+        assert child.closed and not parent.busy
 
 
 @pytest.mark.asyncio
@@ -281,7 +281,7 @@ async def test_durable_raw_result_is_reused_after_processing_failure(monkeypatch
     runtime = AgentRuntime(ref, registry=registry, backend=store)
     try:
         sid = await runtime.start()
-        failed = await runtime.execute("review")
+        failed = await runtime.run("review")
         assert failed.status == "failed" and len(children) == 1
         saved = await store.get_run(failed.run_id)
         assert saved["tools"][0]["status"] == "raw_completed"
@@ -319,8 +319,8 @@ async def test_uncertain_durable_delegation_requires_manual_recovery(monkeypatch
         await store.release(sid, lease)
         handle = await runtime.resume(sid)
         result = await handle.result()
-        assert result.status == "awaiting_input" and result.pending[0]["status"] == "uncertain"
-        await runtime.resolve_tool(result.pending[0]["execution_key"], result=ToolResult(call.id, "verified result"))
+        assert result.status == "awaiting_input" and result.pending[0].status == "uncertain"
+        await runtime.resolve_tool(result.pending[0].execution_key, result=ToolResult(call.id, "verified result"))
         handle = await runtime.resume(sid)
         assert (await handle.result()).output == "synthesized"
     finally:

@@ -180,7 +180,7 @@ async def recovery_demo(command: str, dsn: str, workspace: Path, schema: str) ->
                         json.dump({"session_id": session_id, "schema": schema}, file)
                     print("Session:", session_id, flush=True)
                     print("Workspace:", workspace, flush=True)
-                    result = await runtime.execute(
+                    result = await runtime.run(
                         "Create the weekly sales report", request_id="weekly-report"
                     )
                     raise RuntimeError(
@@ -219,7 +219,7 @@ async def live_chat(dsn: str) -> None:
         agent = Agent(config=AgentConfig(system_prompt="You are helpful."))
         async with agent, AgentRuntime(agent, backend=backend) as runtime:
             print("Session:", runtime.session_id)
-            async with runtime.execute_stream(
+            async with runtime.run_stream(
                 "Explain durable execution briefly."
             ) as stream:
                 async for event in stream:

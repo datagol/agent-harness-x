@@ -301,7 +301,7 @@ async def test_demo_chat_tools_history_and_session_isolation(tmp_path):
         assert (await client.get(f"/api/chats/{second['id']}")).json()["messages"] == []
         agent = app.state.chats[first["id"]].agent
         assert (await client.delete(f"/api/chats/{first['id']}")).status_code == 200
-        assert agent._closed
+        assert agent.closed
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_chat_write_permission_is_enforced_in_engine(tmp_path, decision, e
             )
             await asyncio.wait_for(run.task, 5)
         assert (run.workdir / "review.txt").exists() is exists
-        assert not app.state.chats[chat_id].agent._busy
+        assert not app.state.chats[chat_id].agent.busy
 
 
 @pytest.mark.asyncio
@@ -431,7 +431,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         )
         assert updated.status_code == 200, updated.text
         assert updated.json()["system_prompt"] == "You are a precise data analyst."
-        assert chat.agent is not original_agent and original_agent._closed
+        assert chat.agent is not original_agent and original_agent.closed
         assert chat.agent.memory.get_messages() == [{"role": "user", "content": "Remember this history"}]
 
         skill = "---\nname: audit-check\ndescription: Check business-data assumptions\n---\n\nVerify source dates before advising.\n"

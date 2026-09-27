@@ -62,7 +62,7 @@ async def test_routing_uses_only_fixed_factories_and_required_confidence(label, 
         "query", decisions, {name: factory(name) for name in ("sql", "research", "general")}, min_confidence=.8,
     )
     assert route == result.output == expected
-    assert len(created) == 1 and created[0][0] == expected and created[0][1]._closed
+    assert len(created) == 1 and created[0][0] == expected and created[0][1].closed
 
 
 class UnavailableProvider(DecisionProvider):
@@ -84,7 +84,7 @@ async def test_unavailable_decision_falls_back_and_agent_failure_does_not_rerout
     route, _, result = await run_routed_query(
         "query", UnavailableProvider(), {name: factory for name in ("sql", "research", "general")}, min_confidence=.8,
     )
-    assert result.status == "failed" and len(created) == 1 and created[0]._closed
+    assert result.status == "failed" and len(created) == 1 and created[0].closed
 
 
 @pytest.mark.asyncio

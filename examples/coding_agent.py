@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from harnessx import (
+    Limits,
     AgentConfig,
     CliPermissionManager,
     Middleware,
@@ -61,7 +62,7 @@ async def main():
                 "their coding tasks. Always read files before editing them. "
                 "Think step-by-step about the best approach."
             ),
-            max_iterations=30,
+            limits=Limits(max_iterations=30),
         ),
         middleware=middleware,
         permissions=CliPermissionManager(),

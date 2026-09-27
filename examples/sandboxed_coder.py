@@ -11,6 +11,7 @@ import asyncio
 from pathlib import Path
 
 from harnessx import (
+    Limits,
     AgentConfig,
     AgentRuntime,
     PermissionLevel,
@@ -61,7 +62,7 @@ async def main():
                     "Limits: 15s timeout and 10s CPU; the 256MB address-space limit is platform-dependent.\n"
                     "If code fails, read the error and iterate. Write clean, tested code."
                 ),
-                max_iterations=25,
+                limits=Limits(max_iterations=25),
             ),
             runtime_config=RuntimeConfig(
                 storage_dir=".sandbox_sessions",
@@ -164,7 +165,7 @@ async def main():
                 if not user_input:
                     continue
                 if user_input.lower() == "status":
-                    status = await runtime.get_status()
+                    status = await runtime.status()
                     print_status(
                         {
                             "State": status["state"],
@@ -174,7 +175,7 @@ async def main():
                     continue
 
                 try:
-                    response = completed_output(await runtime.execute(user_input))
+                    response = completed_output(await runtime.run(user_input))
                     print_response(response)
                 except Exception as e:
                     print_error(e)

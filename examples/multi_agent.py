@@ -6,7 +6,7 @@ Run: python -m examples.multi_agent
 import asyncio
 from pathlib import Path
 
-from harnessx import Agent, AgentConfig, CliPermissionManager, PermissionLevel, SubAgent, ToolRegistry
+from harnessx import Agent, AgentConfig, CliPermissionManager, Limits, PermissionLevel, SubAgent, ToolRegistry
 from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.builtin.web import fetch_url
 from examples._console import (
@@ -34,7 +34,7 @@ def specialist_definitions(base_path: str) -> list[SubAgent]:
             description="Review supplied code for correctness, quality, and security.",
             config=AgentConfig(
                 system_prompt="Review the supplied code. Explain specific issues and reference lines where possible.",
-                max_iterations=5,
+                limits=Limits(max_iterations=5),
             ),
             permission=PermissionLevel.ALLOW,
         ),
@@ -43,7 +43,7 @@ def specialist_definitions(base_path: str) -> list[SubAgent]:
             description="Read public URLs supplied in a research task and compare their evidence.",
             config=AgentConfig(
                 system_prompt="Read the supplied URLs, answer the research question, and cite your sources.",
-                max_iterations=10,
+                limits=Limits(max_iterations=10),
             ),
             tools=web,
             permission=PermissionLevel.ASK,
@@ -53,7 +53,7 @@ def specialist_definitions(base_path: str) -> list[SubAgent]:
             description="Read files in the workspace and answer questions about their contents.",
             config=AgentConfig(
                 system_prompt="Read and analyze the requested workspace files. Explain your findings.",
-                max_iterations=10,
+                limits=Limits(max_iterations=10),
             ),
             tools=files,
             permission=PermissionLevel.ALLOW,
@@ -70,7 +70,7 @@ async def main():
                 "specialists. Supply the code, URLs, or paths they need, then synthesize "
                 "their results into a coherent response. You also have filesystem tools."
             ),
-            max_iterations=20,
+            limits=Limits(max_iterations=20),
         ),
         subagents=specialist_definitions(str(Path.cwd())),
     ) as orchestrator:

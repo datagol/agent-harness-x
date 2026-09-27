@@ -48,10 +48,10 @@ async def test_concurrent_provisioning_and_roundtrip():
         await asyncio.gather(*(s.initialize() for s in stores))
         runtime = AgentRuntime(Agent(provider=P()), backend=stores[0])
         await runtime.start()
-        result = await runtime.execute("hello", request_id="request1")
+        result = await runtime.run("hello", request_id="request1")
         assert result.output == "postgres works"
         assert (
-            await runtime.execute("hello", request_id="request1")
+            await runtime.run("hello", request_id="request1")
         ).run_id == result.run_id
         loaded = await stores[1].get_run(result.run_id)
         assert loaded["status"] == "completed"
@@ -89,7 +89,7 @@ async def test_recorded_run_export(tmp_path):
     runtime = AgentRuntime(Agent(provider=P()), backend=store, recording=True)
     try:
         await runtime.start()
-        result = await runtime.execute("record this")
+        result = await runtime.run("record this")
         bundle = await runtime.export_incident(
             result.run_id, destination=tmp_path / "postgres.hx",
             policy=ExportPolicy(include_payloads=True),
