@@ -33,6 +33,10 @@ class OpenRouterProvider(OpenAIProvider):
     """
 
     name = "openrouter"
+    # OpenRouter forwards requests to many upstreams; prompt_cache_key is not
+    # sent because not every upstream accepts it. Upstream automatic caching
+    # still applies to a stable prefix.
+    supports_prompt_cache_key = False
 
     def __init__(
         self,

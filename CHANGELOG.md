@@ -30,7 +30,13 @@ never published; this release supersedes it.
 - Per-tool timeouts with a `ToolRegistry(default_timeout_seconds=...)` fallback,
   and opt-in `ToolRegistry(dedupe_calls=True)` so an identical repeated call
   returns the first result.
-- Opt-in explicit prompt caching for the Gemini provider.
+- Harness-level prompt caching, on by default: `AgentConfig.prompt_cache`
+  (`PromptCachePolicy`) turns into a per-request `PromptCacheHint` with a stable
+  prefix key and breakpoints. Anthropic gets `cache_control` markers, OpenAI a
+  `prompt_cache_key`, Gemini an explicit cache when a TTL is set; all fail open.
+  `LLM_REQUEST` hooks carry `prefix_key`. `prompt_cache=None` disables it.
+- Opt-in explicit prompt caching for the Gemini provider (now driven by the
+  policy TTL, with the constructor and `GEMINI_PROMPT_CACHE_TTL` as fallbacks).
 - Durable runtime (`AgentRuntime`, `RunHandle`) with SQLite, PostgreSQL, and
   Temporal backends, S3 artifact storage, and run recovery.
 - Flight recorder: incident export, offline playback, and integrity verification.

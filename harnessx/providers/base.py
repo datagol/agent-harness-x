@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
 from ..types import ProviderResponse, StopReason, StreamChunk, ToolCall, TokenUsage
+from ..types import PromptCacheHint
 
 
 class LLMProvider(ABC):
@@ -28,8 +29,13 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> ProviderResponse:
-        """Single non-streaming completion. Returns canonical-shape response."""
+        """Single non-streaming completion. Returns canonical-shape response.
+
+        ``cache`` is the engine's prompt-cache hint. A provider may ignore it;
+        one that honors it must fail open when the vendor rejects the request.
+        """
 
     async def stream(
         self,
@@ -40,6 +46,7 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream response from the provider.
         
@@ -54,6 +61,7 @@ class LLMProvider(ABC):
             tools=tools,
             max_tokens=max_tokens,
             temperature=temperature,
+            cache=cache,
         )
         if resp.text:
             yield StreamChunk(kind="text_delta", data=resp.text)

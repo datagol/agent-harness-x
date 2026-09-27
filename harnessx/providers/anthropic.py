@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 from anthropic import AsyncAnthropic
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import PromptCacheHint
 from .base import LLMProvider
 
 
@@ -44,6 +45,62 @@ def _messages_for_request(messages: list[dict[str, Any]]) -> list[dict[str, Any]
     return prepared
 
 
+def _cache_control(cache: PromptCacheHint) -> dict[str, Any]:
+    control: dict[str, Any] = {"type": "ephemeral"}
+    if cache.ttl_seconds is not None and cache.ttl_seconds >= 3600:
+        control["ttl"] = "1h"
+    return control
+
+
+def _apply_prompt_cache(kwargs: dict[str, Any], cache: PromptCacheHint | None) -> dict[str, Any]:
+    """Place cache_control markers at the hint's breakpoints.
+
+    Anthropic caches the prefix up to each marker. The system prompt, the tool
+    list, and the last message each get one, which stays under the API's
+    four-marker limit. Blocks that cannot carry a marker are left alone.
+    """
+    if cache is None or not cache.enabled or not cache.breakpoints:
+        return kwargs
+    out = dict(kwargs)
+    control = _cache_control(cache)
+    for breakpoint in cache.breakpoints:
+        if breakpoint == "system" and out.get("system"):
+            system = out["system"]
+            if isinstance(system, str):
+                out["system"] = [{"type": "text", "text": system, "cache_control": dict(control)}]
+            elif isinstance(system, list) and system and isinstance(system[-1], dict):
+                system = deepcopy(system)
+                system[-1]["cache_control"] = dict(control)
+                out["system"] = system
+        elif breakpoint == "tools" and out.get("tools"):
+            tools = deepcopy(out["tools"])
+            if isinstance(tools[-1], dict):
+                tools[-1]["cache_control"] = dict(control)
+                out["tools"] = tools
+        elif breakpoint.startswith("message:"):
+            try:
+                index = int(breakpoint.split(":", 1)[1])
+            except ValueError:
+                continue
+            messages = out.get("messages") or []
+            if not 0 <= index < len(messages):
+                continue
+            messages = deepcopy(messages)
+            message = messages[index]
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                message["content"] = [{"type": "text", "text": content, "cache_control": dict(control)}]
+            elif isinstance(content, list) and content and isinstance(content[-1], dict):
+                if content[-1].get("type") not in ("thinking", "redacted_thinking"):
+                    content[-1]["cache_control"] = dict(control)
+            out["messages"] = messages
+    return out
+
+
+def _rejected_cache_control(exc: BaseException) -> bool:
+    return "cache_control" in str(exc)
+
+
 class AnthropicProvider(LLMProvider):
     """Talks to Anthropic's Messages API and normalizes responses to ProviderResponse."""
 
@@ -61,6 +118,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> ProviderResponse:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -74,13 +132,20 @@ class AnthropicProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
 
-        filtered_kwargs = _filter_kwargs(self.client.messages.create, kwargs)
+        uncached = _filter_kwargs(self.client.messages.create, kwargs)
+        filtered_kwargs = _filter_kwargs(self.client.messages.create, _apply_prompt_cache(kwargs, cache))
         try:
             resp = await self.client.messages.create(**filtered_kwargs)
         except TypeError as exc:
             if "temperature" in str(exc) and "temperature" in filtered_kwargs:
                 filtered_kwargs.pop("temperature", None)
                 resp = await self.client.messages.create(**filtered_kwargs)
+            else:
+                raise
+        except Exception as exc:
+            # Caching is an optimization: a rejected marker runs the call uncached.
+            if filtered_kwargs is not uncached and filtered_kwargs != uncached and _rejected_cache_control(exc):
+                resp = await self.client.messages.create(**uncached)
             else:
                 raise
         return _from_anthropic_response(resp)
@@ -94,6 +159,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> AsyncIterator[StreamChunk]:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -107,7 +173,8 @@ class AnthropicProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
 
-        filtered_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
+        uncached = _filter_kwargs(self.client.messages.stream, kwargs)
+        filtered_kwargs = _filter_kwargs(self.client.messages.stream, _apply_prompt_cache(kwargs, cache))
         try:
             stream_ctx = self.client.messages.stream(**filtered_kwargs)
         except TypeError as exc:
@@ -117,11 +184,21 @@ class AnthropicProvider(LLMProvider):
             else:
                 raise
 
-        async with stream_ctx as stream:
-            async for text in stream.text_stream:
-                yield StreamChunk(kind="text_delta", data=text)
-            final_resp = await stream.get_final_message()
-            yield StreamChunk(kind="response", data=_from_anthropic_response(final_resp))
+        try:
+            async with stream_ctx as stream:
+                async for text in stream.text_stream:
+                    yield StreamChunk(kind="text_delta", data=text)
+                final_resp = await stream.get_final_message()
+        except Exception as exc:
+            # Only before any output: a rejected marker fails at stream open.
+            if filtered_kwargs != uncached and _rejected_cache_control(exc):
+                async with self.client.messages.stream(**uncached) as stream:
+                    async for text in stream.text_stream:
+                        yield StreamChunk(kind="text_delta", data=text)
+                    final_resp = await stream.get_final_message()
+            else:
+                raise
+        yield StreamChunk(kind="response", data=_from_anthropic_response(final_resp))
 
     async def count_tokens(
         self,

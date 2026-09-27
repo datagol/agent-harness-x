@@ -62,6 +62,7 @@ except ImportError as e:
     ) from e
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import PromptCacheHint
 from .base import LLMProvider
 
 THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
@@ -69,6 +70,7 @@ THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL_MARGIN_S = 60  # recreate slightly before Gemini expires it
+_CACHE_RETRY_HOLD_S = 600  # after a failed create, do not retry that prefix for a while
 
 
 def _is_stale_cache_error(exc: Exception) -> bool:
@@ -106,6 +108,8 @@ class GeminiProvider(LLMProvider):
         self.prompt_cache_ttl = prompt_cache_ttl or None  # None/0 = disabled
         # key -> (cache_name, expires_at monotonic)
         self._prompt_caches: dict[str, tuple[str, float]] = {}
+        # key -> monotonic time before which caches.create is not retried
+        self._cache_failures: dict[str, float] = {}
 
     # ── request building ────────────────────────────────────────────────
 
@@ -141,8 +145,32 @@ class GeminiProvider(LLMProvider):
         )
         return hashlib.sha256(payload.encode()).hexdigest()
 
+    def _cache_settings(
+        self,
+        model: str,
+        system: str | None,
+        tools: list[dict[str, Any]],
+        cache: PromptCacheHint | None,
+    ) -> tuple[str, int] | None:
+        """(key, ttl) when an explicit cache should be used, else None.
+
+        A hint with ``enabled=False`` switches explicit caching off. A hint
+        without a TTL, or no hint at all, falls back to the constructor/env
+        TTL; when that is unset too, only Gemini's implicit caching applies.
+        """
+        if cache is not None and not cache.enabled:
+            return None
+        ttl = (cache.ttl_seconds if cache is not None else None) or self.prompt_cache_ttl
+        if not ttl or not (system or tools):
+            return None
+        key = self._cache_key(model, system, tools)
+        if cache is not None and cache.prefix_key:
+            key = hashlib.sha256(f"{key}:{cache.prefix_key}".encode()).hexdigest()
+        return key, int(ttl)
+
     async def _cached_config(
         self,
+        settings: tuple[str, int] | None,
         model: str,
         system: str | None,
         tools: list[dict[str, Any]],
@@ -156,14 +184,17 @@ class GeminiProvider(LLMProvider):
         references it via ``cached_content`` and must then omit system/tools
         (Gemini requires exclusivity). Fails open to ``base`` on any create
         error — including prefixes below Gemini's minimum cacheable size
-        (4,096 tokens on 3.x flash models)."""
-        if not self.prompt_cache_ttl or not (system or tools):
+        (4,096 tokens on 3.x flash models) — and holds off retrying that
+        prefix for a while so a small prompt does not fail on every call."""
+        if settings is None:
             return base
-        key = self._cache_key(model, system, tools)
+        key, ttl = settings
         now = time.monotonic()
         cached = self._prompt_caches.get(key)
         if cached is None or cached[1] <= now:
-            cache_config: dict[str, Any] = {"ttl": f"{self.prompt_cache_ttl}s"}
+            if self._cache_failures.get(key, 0.0) > now:
+                return base
+            cache_config: dict[str, Any] = {"ttl": f"{ttl}s"}
             if system:
                 cache_config["system_instruction"] = system
             if tools:
@@ -173,13 +204,15 @@ class GeminiProvider(LLMProvider):
                     model=model, config=cache_config
                 )
             except Exception as exc:
+                self._cache_failures[key] = now + _CACHE_RETRY_HOLD_S
                 logger.warning(
                     "Gemini prompt cache create failed; running uncached: %s", exc
                 )
                 return base
+            self._cache_failures.pop(key, None)
             self._prompt_caches[key] = (
                 created.name,
-                now + max(60, self.prompt_cache_ttl - _CACHE_TTL_MARGIN_S),
+                now + max(60, ttl - _CACHE_TTL_MARGIN_S),
             )
         config = {
             k: v
@@ -189,8 +222,9 @@ class GeminiProvider(LLMProvider):
         config["cached_content"] = self._prompt_caches[key][0]
         return config
 
-    def _drop_cache(self, model: str, system: str | None, tools: list[dict[str, Any]]) -> None:
-        self._prompt_caches.pop(self._cache_key(model, system, tools), None)
+    def _drop_cache(self, settings: tuple[str, int] | None) -> None:
+        if settings is not None:
+            self._prompt_caches.pop(settings[0], None)
 
     async def create(
         self,
@@ -201,9 +235,11 @@ class GeminiProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> ProviderResponse:
         base = self._build_config(system, tools, max_tokens, temperature)
-        config = await self._cached_config(model, system, tools, base)
+        settings = self._cache_settings(model, system, tools, cache)
+        config = await self._cached_config(settings, model, system, tools, base)
         contents = _to_gemini_contents(messages)
         try:
             resp = await self.client.aio.models.generate_content(
@@ -213,7 +249,7 @@ class GeminiProvider(LLMProvider):
             if "cached_content" not in config or not _is_stale_cache_error(exc):
                 raise
             # Stale/evicted cache name: drop it and retry this call uncached.
-            self._drop_cache(model, system, tools)
+            self._drop_cache(settings)
             resp = await self.client.aio.models.generate_content(
                 model=model, contents=contents, config=base
             )
@@ -237,9 +273,11 @@ class GeminiProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> AsyncIterator[StreamChunk]:
         base = self._build_config(system, tools, max_tokens, temperature)
-        config = await self._cached_config(model, system, tools, base)
+        settings = self._cache_settings(model, system, tools, cache)
+        config = await self._cached_config(settings, model, system, tools, base)
         contents = _to_gemini_contents(messages)
         try:
             stream = await self.client.aio.models.generate_content_stream(
@@ -249,7 +287,7 @@ class GeminiProvider(LLMProvider):
             if "cached_content" not in config or not _is_stale_cache_error(exc):
                 raise
             # Stale/evicted cache name: drop it and retry this call uncached.
-            self._drop_cache(model, system, tools)
+            self._drop_cache(settings)
             stream = await self.client.aio.models.generate_content_stream(
                 model=model, contents=contents, config=base
             )

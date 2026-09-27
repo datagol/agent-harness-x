@@ -212,6 +212,47 @@ class StreamChunk:
     data: Any = None
 
 
+@dataclass(frozen=True)
+class PromptCachePolicy:
+    """How the harness asks providers to cache the stable prompt prefix.
+
+    The engine turns this into a per-request PromptCacheHint; each provider
+    translates the hint into its vendor's mechanism and fails open when the
+    vendor rejects it. ``AgentConfig(prompt_cache=None)`` disables caching.
+    """
+
+    ttl_seconds: int | None = None  # None means the vendor's default lifetime
+    cache_history: bool = True  # also mark the last complete turn as cacheable
+    key_salt: str = ""  # separate caches for otherwise identical prompts
+
+    def __post_init__(self) -> None:
+        if self.ttl_seconds is not None and (
+            isinstance(self.ttl_seconds, bool) or type(self.ttl_seconds) is not int or self.ttl_seconds <= 0
+        ):
+            raise ValueError("ttl_seconds must be a positive integer or None")
+        if not isinstance(self.cache_history, bool):
+            raise TypeError("cache_history must be a bool")
+        if not isinstance(self.key_salt, str):
+            raise TypeError("key_salt must be a string")
+
+
+@dataclass(frozen=True)
+class PromptCacheHint:
+    """Per-request caching instruction the engine hands to a provider.
+
+    ``prefix_key`` is a stable hash of model, system prompt, tools, and salt.
+    ``breakpoints`` name where the reusable prefix ends: ``"system"``,
+    ``"tools"``, or ``"message:<index>"``. ``enabled=False`` tells a provider
+    that caching is switched off for this agent, which differs from ``None``
+    (a caller that predates the hint).
+    """
+
+    prefix_key: str
+    breakpoints: tuple[str, ...] = ()
+    ttl_seconds: int | None = None
+    enabled: bool = True
+
+
 @dataclass
 class AgentConfig:
     """All configuration for an Agent, with sensible defaults."""
@@ -228,6 +269,8 @@ class AgentConfig:
     # that a retry would duplicate output the caller has already seen.
     llm_max_attempts: int = 2
     llm_retry_backoff_seconds: float = 0.5
+    # Prompt caching is on by default; None disables it for every provider.
+    prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)
     max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
     max_context_tokens: int = 150_000
     max_cost_dollars: float | None = None
@@ -246,6 +289,10 @@ class AgentConfig:
         if type(self.max_iterations) is not int or self.max_iterations < 0:
             raise ValueError("max_iterations must be nonnegative (0 means unlimited)")
         _positive(self.model_timeout_seconds, "model_timeout_seconds")
+        if isinstance(self.prompt_cache, dict):  # restored from a snapshot or session
+            self.prompt_cache = PromptCachePolicy(**self.prompt_cache)
+        if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCachePolicy):
+            raise TypeError("prompt_cache must be a PromptCachePolicy or None")
         if type(self.llm_max_attempts) is not int or self.llm_max_attempts < 1:
             raise ValueError("llm_max_attempts must be a positive integer (1 disables retry)")
         if isinstance(self.llm_retry_backoff_seconds, bool) or not math.isfinite(self.llm_retry_backoff_seconds) or self.llm_retry_backoff_seconds < 0:

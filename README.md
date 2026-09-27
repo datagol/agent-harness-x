@@ -138,6 +138,51 @@ asyncio.run(main())
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `max_result_chars` | `12000` | Tool-result eviction threshold in memory |
+| `llm_max_attempts` | `2` | Attempts per model call for transient failures (429, 5xx, timeouts); `1` disables retry |
+| `llm_retry_backoff_seconds` | `0.5` | Base delay between attempts, doubled each time |
+| `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
+
+### Prompt caching
+
+Every iteration of the loop resends the system prompt, the tool list, and the
+conversation so far. Caching is on by default: the engine computes a stable
+prefix key and marks where the reusable prefix ends, and each provider
+translates that into its vendor's mechanism. Caching is an optimization, never
+a correctness dependency, so a provider whose vendor rejects the request runs
+it uncached.
+
+```python
+from harnessx import Agent, AgentConfig, PromptCachePolicy
+
+# Default: on, vendor default lifetime, history breakpoint after the last turn.
+agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"))
+
+# Tuned: a one-hour lifetime and per-tenant separation of identical prompts.
+agent = Agent(config=AgentConfig(
+    provider="gemini",
+    model="gemini-3.6-flash",
+    prompt_cache=PromptCachePolicy(ttl_seconds=3600, key_salt="tenant-a"),
+))
+
+# Off, for every provider.
+agent = Agent(config=AgentConfig(prompt_cache=None))
+```
+
+| Provider | What the hint becomes |
+|---|---|
+| `anthropic` | `cache_control` markers after the system prompt, the last tool, and the last message. `ttl_seconds >= 3600` selects the one-hour cache; otherwise the five-minute default applies. Requests are only cached above Anthropic's minimum prefix size |
+| `openai` | Automatic prefix caching, plus `prompt_cache_key` set to the prefix key so identical prefixes route to the same cache |
+| `azure`, `openrouter` | Automatic prefix caching only; no routing key is sent |
+| `gemini` | Implicit caching by default. With `ttl_seconds` set (or the `GEMINI_PROMPT_CACHE_TTL` variable), the system prompt and tools are uploaded once as an explicit cache and referenced per call. A prefix below Gemini's minimum cacheable size runs uncached, and that prefix is not retried for ten minutes |
+
+Cache hits show up in the usual usage fields: `RunResult.usage.cache_read_input_tokens`
+and `cache_creation_input_tokens`. Every `LLM_REQUEST` hook carries
+`data["prefix_key"]`, so an observer can assert that consecutive iterations
+share one key. A prefix that drifts, for example a timestamp in the system
+prompt or tools registered in a different order, silently defeats every
+vendor's cache. Custom providers receive the hint as an optional `cache`
+keyword on `create` and `stream`; ignoring it is fine, honoring it means
+failing open.
 
 ### Azure OpenAI
 
@@ -939,6 +984,10 @@ Read the detailed guides:
 - [Extensions](https://github.com/datagol/harness-x/blob/main/doc/extensions.md): when to use an extension, composing middleware
   with tools and hooks, lifecycle callbacks, ownership, persistence, and built-ins.
 
+Hook data is event specific. `LLM_REQUEST` carries `message_count`,
+`tool_count`, and `prefix_key`, the prompt-cache key for that request (`None`
+when caching is disabled). `AGENT_END` carries the final `RunResult`.
+
 Mandatory permissions and effect checks belong in the execution path. Hook
 failures are suppressed, and terminal extension observers are best effort.
 Result middleware can change what the model receives without erasing raw data
@@ -1156,7 +1205,8 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 |---|---|---|
 | `Agent` | `harnessx` | Core agentic loop (`await agent.run(msg)`) |
 | `RunResult` / `RunStream` | `harnessx` | Structured completion and streaming APIs |
-| `AgentConfig` | `harnessx` | Model, provider, limits, prompt |
+| `AgentConfig` | `harnessx` | Model, provider, limits, prompt, retry, prompt caching |
+| `PromptCachePolicy` / `PromptCacheHint` | `harnessx` | Prompt-cache policy on the config; the per-request hint providers receive |
 | `ToolRegistry` | `harnessx` | `register`, `register_with_schema`, `execute` |
 | `SubAgent` | `harnessx` | Declare isolated specialists with `Agent(subagents=[...])` |
 | `PermissionLevel` | `harnessx` | `ALLOW` / `ASK` / `DENY` |

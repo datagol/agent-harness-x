@@ -49,6 +49,7 @@ except ImportError as e:
     ) from e
 
 from ..types import ProviderResponse, StreamChunk
+from ..types import PromptCacheHint
 from .openai import OpenAIProvider
 
 
@@ -59,6 +60,10 @@ class AzureOpenAIProvider(OpenAIProvider):
     streaming. Only client wiring, the deployment-name override, and token
     estimation are specialized here.
     """
+
+    # Azure OpenAI caches prefixes automatically; prompt_cache_key
+    # support depends on the API version, so it is not sent.
+    supports_prompt_cache_key = False
 
     name = "azure"
 
@@ -117,6 +122,7 @@ class AzureOpenAIProvider(OpenAIProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> ProviderResponse:
         return await super().create(
             model=self.azure_deployment or model,
@@ -125,6 +131,7 @@ class AzureOpenAIProvider(OpenAIProvider):
             tools=tools,
             max_tokens=max_tokens,
             temperature=temperature,
+            cache=cache,
         )
 
     async def stream(
@@ -136,6 +143,7 @@ class AzureOpenAIProvider(OpenAIProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> AsyncIterator[StreamChunk]:
         async for chunk in super().stream(
             model=self.azure_deployment or model,
@@ -144,6 +152,7 @@ class AzureOpenAIProvider(OpenAIProvider):
             tools=tools,
             max_tokens=max_tokens,
             temperature=temperature,
+            cache=cache,
         ):
             yield chunk
 

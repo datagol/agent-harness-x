@@ -22,6 +22,7 @@ from .execution import (
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
 from .providers.retry import call_with_retry, stream_with_retry
+from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .types import PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult
 from ._journal import RecordingError, record as journal_record
 
@@ -163,6 +164,9 @@ async def command(agent, state, name, emit, *, record=None):
                     tools=tools,
                     max_tokens=agent.config.max_tokens,
                     temperature=agent.config.temperature,
+                    cache=build_hint(
+                        agent.config.prompt_cache, agent.config.model, system or None, tools, messages
+                    ),
                 )
             ),
             "attempt": 0,
@@ -171,7 +175,15 @@ async def command(agent, state, name, emit, *, record=None):
     if name == "model":
         from .artifacts import materialize
 
-        request = (await materialize(agent, state))["request"]
+        request = dict((await materialize(agent, state))["request"])
+        # The hint is persisted with the request; a state saved before hints
+        # existed simply has none. Providers that predate the contract are
+        # called without it.
+        cache_hint = hint_from_wire(request.pop("cache", None))
+        streaming = state.get("stream", False)
+        provider_call = agent.provider.stream if streaming else agent.provider.create
+        if cache_hint is not None and accepts_cache(provider_call):
+            request["cache"] = cache_hint
         if record:
             await record("model.started", state["request"])
         await emit_hook(
@@ -179,6 +191,7 @@ async def command(agent, state, name, emit, *, record=None):
             HookEvent.LLM_REQUEST,
             message_count=len(request["messages"]),
             tool_count=len(request["tools"]),
+            prefix_key=cache_hint.prefix_key if cache_hint is not None and cache_hint.enabled else None,
         )
         buffered = any(
             type(m).after_llm_call is not Middleware.after_llm_call
@@ -191,7 +204,7 @@ async def command(agent, state, name, emit, *, record=None):
         )
         provider_label = getattr(agent.provider, "name", "") or "provider"
         async with asyncio.timeout(agent.config.model_timeout_seconds):
-            if state.get("stream", False):
+            if streaming:
                 async for chunk in stream_with_retry(
                     lambda: agent.provider.stream(**request),
                     description=f"{provider_label} stream",

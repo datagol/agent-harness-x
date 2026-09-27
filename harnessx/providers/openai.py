@@ -17,6 +17,7 @@ except ImportError as e:
     ) from e
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import PromptCacheHint
 from .base import LLMProvider
 
 
@@ -24,9 +25,20 @@ class OpenAIProvider(LLMProvider):
     """Talks to OpenAI's Chat Completions API and normalizes responses to ProviderResponse."""
 
     name = "openai"
+    # OpenAI caches prompt prefixes automatically; prompt_cache_key only steers
+    # routing so identical prefixes land on the same cache. Gateways that reject
+    # unknown parameters set this to False.
+    supports_prompt_cache_key = True
 
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
         self.client = client or AsyncOpenAI()
+
+    def _apply_prompt_cache(self, kwargs: dict[str, Any], cache: PromptCacheHint | None) -> None:
+        if cache is None or not cache.enabled or not self.supports_prompt_cache_key:
+            return
+        extra = dict(kwargs.get("extra_body") or {})
+        extra["prompt_cache_key"] = cache.prefix_key
+        kwargs["extra_body"] = extra
 
     async def create(
         self,
@@ -37,6 +49,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> ProviderResponse:
         openai_messages = _to_openai_messages(messages, system)
         openai_tools = _to_openai_tools(tools)
@@ -50,6 +63,7 @@ class OpenAIProvider(LLMProvider):
             kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
+        self._apply_prompt_cache(kwargs, cache)
 
         try:
             resp = await self.client.chat.completions.create(**kwargs)
@@ -70,6 +84,7 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]],
         max_tokens: int,
         temperature: float | None = None,
+        cache: PromptCacheHint | None = None,
     ) -> AsyncIterator[StreamChunk]:
         openai_messages = _to_openai_messages(messages, system)
         openai_tools = _to_openai_tools(tools)
@@ -85,6 +100,7 @@ class OpenAIProvider(LLMProvider):
             kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
+        self._apply_prompt_cache(kwargs, cache)
 
         collected_text = ""
         collected_reasoning = ""
