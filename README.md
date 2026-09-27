@@ -1043,26 +1043,28 @@ registry at construction, so MCP tools look exactly like native tools to the
 model; their names are listed on `agent.mcp_tools`.
 
 ```python
-from harnessx import Agent, AgentConfig, MCPManager
+from harnessx import Agent, AgentConfig, MCPManager, MCPServerConfig
 
 async with MCPManager() as mcp:
-    await mcp.connect(
-        "filesystem",
-        command="npx",
-        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    )
-    # or a remote server:
-    # await mcp.connect("remote", url="http://localhost:8000/sse")
+    await mcp.connect(MCPServerConfig.stdio(
+        "files", "npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    ))
+    # or a remote server, streamable HTTP with an SSE fallback:
+    # await mcp.connect(MCPServerConfig.http("remote", "http://localhost:8000/mcp",
+    #                                        headers={"Authorization": "Bearer ..."}))
 
     async with Agent(config=AgentConfig(system_prompt="..."), mcp=mcp) as agent:
-        print(agent.mcp_tools)                 # ('filesystem_read_file', ...)
+        print(agent.mcp_tools)                 # ('files_read_file', ...)
         print((await agent.run("What's in /tmp?")).output)
 # leaving the manager's block disconnects every server
 ```
 
-The manager is caller-owned: closing the agent leaves it connected, and one
-manager can serve several agents. Connecting a server name twice raises
-`ValueError`.
+`MCPServerConfig.stdio(...)` and `.http(...)` pick the transport by
+constructor; each takes `permission=` for the server's tools (default `ASK`).
+`connect()` also accepts a name with `command=` or `url=` keywords. The name is
+yours to choose: it keys the connection and prefixes every bridged tool. The
+manager is caller-owned: closing the agent leaves it connected, and one manager
+can serve several agents. Connecting a server name twice raises `ValueError`.
 
 See `examples/mcp_agent.py` for the interactive version.
 

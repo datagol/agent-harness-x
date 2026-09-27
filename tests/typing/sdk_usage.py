@@ -98,5 +98,9 @@ async def use_0_4_api(agent: Agent, runtime: AgentRuntime) -> None:
 
     async with MCPManager() as mcp:
         assert_type(mcp, MCPManager)
+        from harnessx import MCPServerConfig, MCPToolInfo
+
+        assert_type(await mcp.connect(MCPServerConfig.http("remote", "http://localhost:8000/mcp")), list[MCPToolInfo])
+        assert_type(await mcp.connect("files", command="npx", args=["-y", "server"]), list[MCPToolInfo])
     async with await SQLiteBackend.connect("runtime.db") as backend:
         assert_type(backend, SQLiteBackend)

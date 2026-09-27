@@ -31,7 +31,7 @@ from harnessx import (
     CliPermissionManager,
     Limits,
     MCPManager,
-    PermissionLevel,
+    MCPServerConfig,
 )
 from examples._console import (
     console,
@@ -72,13 +72,14 @@ async def main():
         )
         try:
             server_args = shlex.split(args.args) if args.args else []
-            tools = await mcp.connect(
-                args.server,
-                command=args.command,
-                args=server_args,
-                url=args.url,
-                permission=PermissionLevel(args.permission),
+            server = (
+                MCPServerConfig.stdio(
+                    args.server, args.command, args=server_args, permission=args.permission
+                )
+                if args.command
+                else MCPServerConfig.http(args.server, args.url, permission=args.permission)
             )
+            tools = await mcp.connect(server)
             console.print(f"  [info]Connected! Discovered {len(tools)} tools:[/info]")
             for t in tools:
                 console.print(

@@ -26,6 +26,7 @@ from harnessx import (
     HookManager,
     Limits,
     MCPManager,
+    MCPServerConfig as ExportedMCPServerConfig,
     PermissionLevel,
     ProviderResponse,
     Registration,
@@ -553,6 +554,56 @@ async def test_agent_bridges_mcp_tools_and_leaves_the_manager_open():
     async with manager:
         pass
     assert connection.closed, "leaving the manager's context disconnects its servers"
+
+
+def test_mcp_server_config_is_typed_by_transport():
+    assert ExportedMCPServerConfig is MCPServerConfig
+    files = MCPServerConfig.stdio("files", "npx", args=["-y", "server"], permission="allow")
+    assert files.transport == "stdio" and files.permission is PermissionLevel.ALLOW and files.args == ["-y", "server"]
+    remote = MCPServerConfig.http("remote", "http://localhost:8000/mcp", headers={"Authorization": "Bearer t"})
+    assert remote.transport == "http" and remote.permission is PermissionLevel.ASK and remote.headers["Authorization"]
+    with pytest.raises(ConfigurationError, match="exactly one"):
+        MCPServerConfig("both", command="x", url="http://x")
+    with pytest.raises(ConfigurationError, match="exactly one"):
+        MCPServerConfig("neither")
+    with pytest.raises(ConfigurationError, match="name"):
+        MCPServerConfig.http("", "http://x")
+
+
+@pytest.mark.asyncio
+async def test_manager_connect_accepts_a_typed_config(monkeypatch):
+    seen: list[MCPServerConfig] = []
+
+    class FakeConnection:
+        def __init__(self, config):
+            self.config, self.tools, self.transport = config, [], None
+
+        async def connect(self):
+            seen.append(self.config)
+            self.transport = "stdio" if self.config.command else "sse"
+            self.tools = [MCPToolInfo(self.config.name, "ping", "d", {"type": "object", "properties": {}})]
+            return self.tools
+
+        async def disconnect(self):
+            pass
+
+        @property
+        def is_connected(self):
+            return True
+
+    monkeypatch.setattr("harnessx.mcp.MCPConnection", FakeConnection)
+    async with MCPManager() as mcp:
+        remote = MCPServerConfig.http("remote", "http://localhost:8000/mcp")
+        assert [t.tool_name for t in await mcp.connect(remote)] == ["ping"] and seen == [remote]
+        assert mcp.list_servers()["remote"]["transport"] == "sse"
+        with pytest.raises(TypeError, match="keyword"):
+            await mcp.connect(MCPServerConfig.stdio("files", "npx"), url="http://x")
+        await mcp.connect("files", command="npx")  # the keyword form builds the same config
+        assert seen[-1] == MCPServerConfig.stdio("files", "npx")
+        with pytest.raises(ValueError, match="already connected"):
+            await mcp.connect(remote)
+        registry = ToolRegistry()
+        assert mcp.register_tools(registry) == ["remote_ping", "files_ping"]
 
 
 @pytest.mark.asyncio

@@ -338,7 +338,8 @@ class FakeMCP:
 
     async def connect(self, name, **options):
         self.connected = True
-        self.args = options.get("args", [])
+        # the example passes an MCPServerConfig; the keyword form is still accepted
+        self.args = list(getattr(name, "args", options.get("args", [])))
         return self.list_tools()
 
     async def disconnect_all(self):

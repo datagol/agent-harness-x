@@ -194,6 +194,12 @@ over `Agent.run_stream()` since 0.3. `RunEvent(data=...)` is required (the
   it is caller-owned, like `provider=` and `memory=`.
 - `MCPManager` is an async context manager: `async with MCPManager() as mcp:`
   disconnects every server on exit. Connecting a name twice raises `ValueError`.
+- `MCPServerConfig.stdio(name, command, args=, env=, permission=)` and
+  `MCPServerConfig.http(name, url, headers=, permission=)` describe a server by
+  transport, and `connect()` accepts one directly:
+  `await mcp.connect(MCPServerConfig.http("remote", "http://localhost:8000/mcp"))`.
+  The keyword form `connect(name, command=... | url=...)` is unchanged. A config
+  with both or neither of `command` and `url` raises `ConfigurationError`.
 - `Agent(sandbox=sandbox)` binds the sandbox as the bash built-in's engine:
   `Agent(tools=["bash"], sandbox=sandbox)` runs shell commands inside it. The
   registry exposes it as `agent.tools.sandbox`.

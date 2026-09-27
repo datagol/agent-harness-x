@@ -67,6 +67,10 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 - `Agent(sandbox=)` binds the sandbox as the bash built-in's engine
   (`ToolRegistry(sandbox=)`); `agent.mcp_tools`.
 - `MCPManager` as an async context manager; duplicate `connect` raises.
+- `MCPServerConfig.stdio(...)` and `MCPServerConfig.http(...)` typed server
+  definitions, accepted by `MCPManager.connect()` alongside the keyword form;
+  the config validates that exactly one transport is given, and
+  `list_servers()` reports the negotiated transport.
 - `register_provider()`, `registered_providers()`, `unregister_provider()`;
   `AgentConfig.provider` accepts registered names; the injected-provider check
   only rejects two different built-in names.
