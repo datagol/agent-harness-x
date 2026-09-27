@@ -1,10 +1,12 @@
 """LLM provider abstraction. Lets the agent talk to Anthropic or OpenAI
 through a single interface."""
 
+from .registry import BUILTIN_PROVIDERS, register_provider, registered_providers, unregister_provider  # noqa: F401
 from .base import LLMProvider, ProviderResponse, make_provider
 from .anthropic import AnthropicProvider
 
-__all__ = ["LLMProvider", "ProviderResponse", "AnthropicProvider", "make_provider"]
+__all__ = [
+    "BUILTIN_PROVIDERS", "register_provider", "registered_providers", "unregister_provider", "LLMProvider", "ProviderResponse", "AnthropicProvider", "make_provider"]
 
 # OpenAIProvider is gated on the openai SDK being installed.
 try:

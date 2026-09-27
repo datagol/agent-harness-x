@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .execution import RunStatus
 from .skills import SkillManager
 from .tools import ToolRegistry, normalize_tool_registry
-from .types import AgentConfig, PermissionLevel
+from .types import DEFAULT_TIMEOUT_SECONDS, AgentConfig, PermissionLevel
 
 if TYPE_CHECKING:
     from .core import Agent
@@ -35,7 +35,7 @@ class SubAgent:
     tools: ToolRegistry | list[Any] | None = None
     skills: list[str] | None = None
     permission: PermissionLevel | None = None
-    timeout_seconds: float = 300.0
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         # Keep the generated provider tool name within 64 characters.
@@ -60,7 +60,9 @@ class SubAgent:
 
 def _copy_tools(registry: ToolRegistry) -> ToolRegistry:
     # Copy schemas and metadata, never deepcopy application-owned handlers.
-    return normalize_tool_registry(registry.get_tools())
+    copied = normalize_tool_registry(registry.get_tools())
+    copied._inherited_timeouts = registry._inherited_timeouts & set(copied.list_tools())
+    return copied
 
 
 def prepare_subagents(subagents: list[SubAgent] | None, tools: ToolRegistry) -> tuple[SubAgent, ...]:

@@ -10,12 +10,14 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from ..execution import (
+        model_timeout_from_wire,
         next_command,
         transition,
         result_from_state,
         wire,
         cancel_state,
     )
+    from ..types import DEFAULT_TIMEOUT_SECONDS
     from ..runtime import resolve_entry
 
 
@@ -86,9 +88,9 @@ class AgentSessionWorkflow:
 
     async def step(self, state, name, **extra):
         timeout = (
-            (state or {}).get("config", {}).get("model_timeout_seconds", 300)
+            model_timeout_from_wire((state or {}).get("config"))
             if name == "model"
-            else 300
+            else DEFAULT_TIMEOUT_SECONDS
         )
         handle = workflow.start_activity(
             "harness_step_v1",

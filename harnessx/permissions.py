@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .errors import HarnessError
+
 import asyncio
 import copy
 import inspect
@@ -10,11 +12,11 @@ from typing import Any, Awaitable, Callable
 from .types import PermissionLevel, TokenUsage, ToolCall, ToolDefinition
 
 
-class MaxIterationsError(Exception):
+class MaxIterationsError(HarnessError):
     pass
 
 
-class CostLimitError(Exception):
+class CostLimitError(HarnessError):
     pass
 
 

@@ -205,15 +205,15 @@ class AnthropicProvider(LLMProvider):
         *,
         model: str,
         messages: list[dict[str, Any]],
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
     ) -> int:
         try:
             resp = await self.client.messages.count_tokens(
                 model=model,
-                system=system,
                 tools=tools or [],
                 messages=_messages_for_request(messages),
+                **({"system": system} if system else {}),
             )
             return int(resp.input_tokens)
         except Exception:

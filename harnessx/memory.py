@@ -194,40 +194,27 @@ class ConversationMemory:
 
     async def trim_if_needed(
         self,
-        provider_or_client: Any,
+        provider: Any,
         model: str,
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
     ) -> bool:
         """If token count approaches limit, summarize older messages.
 
-        Accepts either an LLMProvider (preferred) or a raw Anthropic client
-        (back-compat). Returns True if trimming was performed.
+        Uses the provider's count_tokens; falls back to a size heuristic when
+        counting fails. Returns True if trimming was performed.
         """
         if len(self._messages) < 6:
             return False
 
         try:
-            if hasattr(provider_or_client, "count_tokens") and not hasattr(
-                provider_or_client, "messages"
-            ):
-                # LLMProvider path
-                token_count = await provider_or_client.count_tokens(
-                    model=model,
-                    system=system,
-                    tools=tools or [],
-                    messages=self.get_messages(),
-                )
-            else:
-                # Raw Anthropic client path (back-compat)
-                resp = await provider_or_client.messages.count_tokens(
-                    model=model,
-                    system=system,
-                    tools=tools if tools else [],
-                    messages=self.get_messages(),
-                )
-                token_count = resp.input_tokens
+            token_count = await provider.count_tokens(
+                model=model,
+                system=system or None,
+                tools=tools or [],
+                messages=self.get_messages(),
+            )
         except Exception:
             token_count = len(str(self._messages)) // 3
 

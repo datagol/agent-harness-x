@@ -8,7 +8,7 @@ import logging
 import warnings
 
 from ..hooks import HookCallback, HookEvent, HookManager, Middleware, MiddlewarePipeline, Registration
-from ..types import AgentConfig, PermissionLevel
+from ..types import AgentConfig, PermissionLevel, ReplayPolicy
 from ..tools import ToolRegistry
 from ..memory import ConversationMemory
 
@@ -74,8 +74,8 @@ class ExtensionContext:
         input_schema: dict[str, Any] | None = None,
         permission: PermissionLevel | None = None,
         concurrent: bool = True,
-        replay_policy: str = "manual",
-        timeout_seconds: float = 300.0,
+        replay_policy: ReplayPolicy | str = "manual",
+        timeout_seconds: float | None = None,
         replace: bool = False,
     ) -> Registration:
         tool_name = name or handler.__name__

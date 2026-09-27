@@ -68,9 +68,9 @@ def hint_from_wire(value: Any) -> PromptCacheHint | None:
 
 
 def accepts_cache(fn: Any) -> bool:
-    """True when a provider method takes ``cache=`` (explicitly or via **kwargs)."""
+    """True when a provider method declares a ``cache`` parameter."""
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
-    return "cache" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return "cache" in params

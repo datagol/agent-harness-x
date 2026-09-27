@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from .errors import HarnessError
+
 from datetime import datetime, timezone
 import uuid
 
 from .execution import wire
 
 
-class RecordingError(RuntimeError):
+class RecordingError(HarnessError, RuntimeError):
     """A required recording boundary could not be committed."""
 
 

@@ -2,35 +2,39 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 import math
 import warnings
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, TypeVar
+
+from .errors import ConfigurationError
+
+DEFAULT_TIMEOUT_SECONDS = 300.0  # model calls, tool calls, and sub-agent delegation
 
 
-class PermissionLevel(Enum):
+class PermissionLevel(str, Enum):
     ALLOW = "allow"
     ASK = "ask"
     DENY = "deny"
 
 
-class Role(Enum):
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
-    TOOL = "tool"
-
-
 class StopReason(str, Enum):
     END_TURN = "end_turn"
     TOOL_USE = "tool_use"
-    TOOL_CALLS = "tool_use"  # alias
     MAX_TOKENS = "max_tokens"
     STOP_SEQUENCE = "stop_sequence"
     SAFETY = "safety"
     OTHER = "other"
+
+
+class ReplayPolicy(str, Enum):
+    """What durable execution may do with a tool whose outcome was lost."""
+
+    SAFE = "safe"  # repeating the call is harmless
+    IDEMPOTENT = "idempotent"  # the integration itself deduplicates repeats
+    MANUAL = "manual"  # stop and ask; the default
 
 
 @dataclass
@@ -43,12 +47,12 @@ class ToolDefinition:
     handler: Callable[..., Any]
     permission_level: PermissionLevel | None = None
     concurrent: bool = True
-    replay_policy: str = "manual"
-    timeout_seconds: float = 300.0
+    replay_policy: ReplayPolicy | str = "manual"
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not self.name or any(c.isspace() for c in self.name):
-            raise ValueError("Tool name must be nonempty and contain no whitespace")
+            raise ConfigurationError("Tool name must be nonempty and contain no whitespace")
         if not callable(self.handler):
             raise TypeError("Tool handler must be callable")
         if not isinstance(self.description, str) or not isinstance(self.input_schema, dict):
@@ -57,10 +61,12 @@ class ToolDefinition:
             raise TypeError("Tool permission must be a PermissionLevel")
         if not isinstance(self.concurrent, bool):
             raise TypeError("Tool concurrent must be a bool")
-        if self.replay_policy not in ("safe", "idempotent", "manual"):
-            raise ValueError("Invalid tool replay policy")
+        try:
+            self.replay_policy = ReplayPolicy(self.replay_policy).value  # member or string, stored as str
+        except ValueError:
+            raise ConfigurationError("Invalid tool replay policy") from None
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
-            raise ValueError("Tool timeout must be finite and positive")
+            raise ConfigurationError("Tool timeout must be finite and positive")
 
 
 @dataclass
@@ -229,7 +235,7 @@ class PromptCachePolicy:
         if self.ttl_seconds is not None and (
             isinstance(self.ttl_seconds, bool) or type(self.ttl_seconds) is not int or self.ttl_seconds <= 0
         ):
-            raise ValueError("ttl_seconds must be a positive integer or None")
+            raise ConfigurationError("ttl_seconds must be a positive integer or None")
         if not isinstance(self.cache_history, bool):
             raise TypeError("cache_history must be a bool")
         if not isinstance(self.key_salt, str):
@@ -253,54 +259,317 @@ class PromptCacheHint:
     enabled: bool = True
 
 
-@dataclass
-class AgentConfig:
-    """All configuration for an Agent, with sensible defaults."""
+def _nonnegative_or_none(value: Any, name: str) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
+    ):
+        raise ConfigurationError(f"{name} must be finite and nonnegative")
 
-    model: str = "claude-sonnet-4-6"
-    provider: str = "anthropic"  # 'anthropic', 'openai', 'gemini', 'openrouter', or 'azure'
-    max_tokens: int = 8192
-    max_iterations: int = 50
-    system_prompt: str = "You are a helpful assistant."
-    temperature: float | None = None
-    model_timeout_seconds: float = 300.0
-    # Retry transient provider failures (429, 5xx, timeouts). 1 disables it.
-    # A streaming call is only retried before its first chunk, since after
-    # that a retry would duplicate output the caller has already seen.
-    llm_max_attempts: int = 2
-    llm_retry_backoff_seconds: float = 0.5
-    # Prompt caching is on by default; None disables it for every provider.
-    prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)
-    max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
-    max_context_tokens: int = 150_000
+
+@dataclass(frozen=True)
+class Limits:
+    """Budgets the harness enforces: iterations, context size, memory thresholds, and cost."""
+
+    max_iterations: int = 50  # 0 means unlimited
+    max_context_tokens: int = 150_000  # conversation trim threshold
+    max_result_chars: int = 12_000  # tool results above this are spilled to disk (~3K tokens)
     max_cost_dollars: float | None = None
     input_cost_per_m: float | None = None
     output_cost_per_m: float | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in ("anthropic", "openai", "gemini", "openrouter", "azure"):
-            raise ValueError(f"Unknown provider: {self.provider!r}")
+        if type(self.max_iterations) is not int or self.max_iterations < 0:
+            raise ConfigurationError("max_iterations must be nonnegative (0 means unlimited)")
+        _positive(self.max_context_tokens, "max_context_tokens", integer=True)
+        _positive(self.max_result_chars, "max_result_chars", integer=True)
+        for name in ("max_cost_dollars", "input_cost_per_m", "output_cost_per_m"):
+            _nonnegative_or_none(getattr(self, name), name)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Transient-failure handling for one model call (429, 5xx, timeouts, connection loss).
+
+    ``attempts`` is the total number of model calls for one step, so ``1``
+    disables retry. A retried streaming call re-sends text the caller may
+    already have shown; the run stream signals that with ``ATTEMPT_RESET``.
+    """
+
+    attempts: int = 2
+    backoff_seconds: float = 0.5  # base delay, doubled per attempt
+    call_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS  # wall clock around one attempt
+
+    def __post_init__(self) -> None:
+        if type(self.attempts) is not int or self.attempts < 1:
+            raise ConfigurationError("attempts must be a positive integer (1 disables retry)")
+        _nonnegative_or_none(self.backoff_seconds, "backoff_seconds")
+        _positive(self.call_timeout_seconds, "call_timeout_seconds")
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Registry-wide tool options that an Agent applies to the registry it adopts."""
+
+    default_timeout_seconds: float | None = None  # None: the registry's own default, else DEFAULT_TIMEOUT_SECONDS
+    dedupe_calls: bool = False  # identical repeated calls within one run return the first result
+
+    def __post_init__(self) -> None:
+        if self.default_timeout_seconds is not None:
+            _positive(self.default_timeout_seconds, "default_timeout_seconds")
+        if type(self.dedupe_calls) is not bool:
+            raise TypeError("dedupe_calls must be a bool")
+
+
+_LEGACY_FIELDS: dict[str, tuple[str, str]] = {
+    # 0.3 flat name -> (sub-policy field, attribute). The aliases are removed in 0.5.
+    "max_iterations": ("limits", "max_iterations"),
+    "max_context_tokens": ("limits", "max_context_tokens"),
+    "max_result_chars": ("limits", "max_result_chars"),
+    "max_cost_dollars": ("limits", "max_cost_dollars"),
+    "input_cost_per_m": ("limits", "input_cost_per_m"),
+    "output_cost_per_m": ("limits", "output_cost_per_m"),
+    "llm_max_attempts": ("retry", "attempts"),
+    "llm_retry_backoff_seconds": ("retry", "backoff_seconds"),
+    "model_timeout_seconds": ("retry", "call_timeout_seconds"),
+}
+_OMITTED: Any = object()  # "argument not given", where None is itself a legal value
+
+_P = TypeVar("_P", Limits, RetryPolicy, ToolPolicy, PromptCachePolicy)
+
+
+def _coerce(kind: type[_P], value: Any, name: str) -> _P:
+    if value is None:
+        return kind()
+    if isinstance(value, dict):  # restored from a snapshot, session, or run state
+        return kind(**value)
+    if not isinstance(value, kind):
+        raise TypeError(f"{name} must be a {kind.__name__}")
+    return value
+
+
+def _warn_flat(name: str) -> None:
+    group, attr = _LEGACY_FIELDS[name]
+    warnings.warn(
+        f"AgentConfig.{name} is deprecated and will be removed in harnessx 0.5; "
+        f"use AgentConfig.{group}.{attr}",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+@dataclass(init=False)
+class AgentConfig:
+    """All configuration for an Agent, with sensible defaults.
+
+    Budgets live on ``limits``, transient-failure handling on ``retry``, prompt
+    caching on ``prompt_cache``, and registry-wide tool options on ``tools``.
+    The flat 0.3 names (``max_iterations``, ``llm_max_attempts``, ...) still
+    work as keyword arguments and attributes but warn; they go away in 0.5.
+    """
+
+    model: str = "claude-sonnet-4-6"
+    provider: str = "anthropic"  # a built-in name or one passed to register_provider()
+    max_tokens: int = 8192  # per-response output cap, sent with each model request
+    system_prompt: str = "You are a helpful assistant."
+    temperature: float | None = None
+    limits: Limits = field(default_factory=Limits)
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
+    prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)  # None disables caching
+    tools: ToolPolicy = field(default_factory=ToolPolicy)
+
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-6",
+        provider: str = "anthropic",
+        max_tokens: int = 8192,
+        *,
+        system_prompt: str = "You are a helpful assistant.",
+        temperature: float | None = None,
+        limits: Limits | dict[str, Any] | None = None,
+        retry: RetryPolicy | dict[str, Any] | None = None,
+        prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
+        tools: ToolPolicy | dict[str, Any] | None = None,
+        # Deprecated 0.3 flat names. Each overrides the matching sub-policy attribute.
+        max_iterations: int | None = None,
+        max_context_tokens: int | None = None,
+        max_result_chars: int | None = None,
+        max_cost_dollars: float | None = None,
+        input_cost_per_m: float | None = None,
+        output_cost_per_m: float | None = None,
+        llm_max_attempts: int | None = None,
+        llm_retry_backoff_seconds: float | None = None,
+        model_timeout_seconds: float | None = None,
+    ) -> None:
+        self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.system_prompt, self.temperature = system_prompt, temperature
+        self.limits = _coerce(Limits, limits, "limits")
+        self.retry = _coerce(RetryPolicy, retry, "retry")
+        self.tools = _coerce(ToolPolicy, tools, "tools")
+        if prompt_cache is _OMITTED:
+            self.prompt_cache = PromptCachePolicy()
+        elif prompt_cache is None:
+            self.prompt_cache = None
+        else:
+            self.prompt_cache = _coerce(PromptCachePolicy, prompt_cache, "prompt_cache")
+        legacy = {
+            name: value
+            for name, value in (
+                ("max_iterations", max_iterations),
+                ("max_context_tokens", max_context_tokens),
+                ("max_result_chars", max_result_chars),
+                ("max_cost_dollars", max_cost_dollars),
+                ("input_cost_per_m", input_cost_per_m),
+                ("output_cost_per_m", output_cost_per_m),
+                ("llm_max_attempts", llm_max_attempts),
+                ("llm_retry_backoff_seconds", llm_retry_backoff_seconds),
+                ("model_timeout_seconds", model_timeout_seconds),
+            )
+            if value is not None
+        }
+        if legacy:
+            warnings.warn(
+                f"AgentConfig flat fields {sorted(legacy)} are deprecated and will be removed in "
+                "harnessx 0.5; pass limits=Limits(...) and retry=RetryPolicy(...) instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            for name, value in legacy.items():
+                group, attr = _LEGACY_FIELDS[name]
+                setattr(self, group, replace(getattr(self, group), **{attr: value}))
+        self.__post_init__()  # init=False: dataclasses will not call it for us
+
+    def __post_init__(self) -> None:
+        from .providers.registry import is_known_provider
+
+        if not isinstance(self.provider, str) or not is_known_provider(self.provider):
+            raise ConfigurationError(
+                f"Unknown provider: {self.provider!r}; expected a built-in name or one passed to register_provider()"
+            )
         if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("model must be a nonempty string")
+            raise ConfigurationError("model must be a nonempty string")
         if not isinstance(self.system_prompt, str):
             raise TypeError("system_prompt must be a string")
-        for name in ("max_tokens", "max_result_chars", "max_context_tokens"):
-            _positive(getattr(self, name), name, integer=True)
-        if type(self.max_iterations) is not int or self.max_iterations < 0:
-            raise ValueError("max_iterations must be nonnegative (0 means unlimited)")
-        _positive(self.model_timeout_seconds, "model_timeout_seconds")
-        if isinstance(self.prompt_cache, dict):  # restored from a snapshot or session
-            self.prompt_cache = PromptCachePolicy(**self.prompt_cache)
+        _positive(self.max_tokens, "max_tokens", integer=True)
+        _nonnegative_or_none(self.temperature, "temperature")
+        for name, kind in (("limits", Limits), ("retry", RetryPolicy), ("tools", ToolPolicy)):
+            if not isinstance(getattr(self, name), kind):
+                raise TypeError(f"{name} must be a {kind.__name__}")
         if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCachePolicy):
             raise TypeError("prompt_cache must be a PromptCachePolicy or None")
-        if type(self.llm_max_attempts) is not int or self.llm_max_attempts < 1:
-            raise ValueError("llm_max_attempts must be a positive integer (1 disables retry)")
-        if isinstance(self.llm_retry_backoff_seconds, bool) or not math.isfinite(self.llm_retry_backoff_seconds) or self.llm_retry_backoff_seconds < 0:
-            raise ValueError("llm_retry_backoff_seconds must be finite and nonnegative")
-        for name in ("temperature", "max_cost_dollars", "input_cost_per_m", "output_cost_per_m"):
-            value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value < 0):
-                raise ValueError(f"{name} must be finite and nonnegative")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> AgentConfig:
+        """Rebuild from a persisted dict, 0.3 flat or 0.4 nested, without deprecation warnings.
+
+        Flat keys are lifted into their sub-policy and override nested values,
+        matching the constructor's precedence.
+        """
+        payload = dict(data)
+        lifted: dict[str, dict[str, Any]] = {}
+        for name, (group, attr) in _LEGACY_FIELDS.items():
+            if name in payload:
+                lifted.setdefault(group, {})[attr] = payload.pop(name)
+        for group, values in lifted.items():
+            current = payload.get(group)
+            if isinstance(current, dict):
+                base = dict(current)
+            elif current is not None:
+                base = asdict(current)
+            else:
+                base = {}
+            payload[group] = {**base, **values}
+        return cls(**payload)
+
+    # ── Deprecated 0.3 flat aliases; removed in 0.5 ─────────────────────────
+    @property
+    def max_iterations(self) -> int:
+        _warn_flat("max_iterations")
+        return self.limits.max_iterations
+
+    @max_iterations.setter
+    def max_iterations(self, value: int) -> None:
+        _warn_flat("max_iterations")
+        self.limits = replace(self.limits, max_iterations=value)
+
+    @property
+    def max_context_tokens(self) -> int:
+        _warn_flat("max_context_tokens")
+        return self.limits.max_context_tokens
+
+    @max_context_tokens.setter
+    def max_context_tokens(self, value: int) -> None:
+        _warn_flat("max_context_tokens")
+        self.limits = replace(self.limits, max_context_tokens=value)
+
+    @property
+    def max_result_chars(self) -> int:
+        _warn_flat("max_result_chars")
+        return self.limits.max_result_chars
+
+    @max_result_chars.setter
+    def max_result_chars(self, value: int) -> None:
+        _warn_flat("max_result_chars")
+        self.limits = replace(self.limits, max_result_chars=value)
+
+    @property
+    def max_cost_dollars(self) -> float | None:
+        _warn_flat("max_cost_dollars")
+        return self.limits.max_cost_dollars
+
+    @max_cost_dollars.setter
+    def max_cost_dollars(self, value: float | None) -> None:
+        _warn_flat("max_cost_dollars")
+        self.limits = replace(self.limits, max_cost_dollars=value)
+
+    @property
+    def input_cost_per_m(self) -> float | None:
+        _warn_flat("input_cost_per_m")
+        return self.limits.input_cost_per_m
+
+    @input_cost_per_m.setter
+    def input_cost_per_m(self, value: float | None) -> None:
+        _warn_flat("input_cost_per_m")
+        self.limits = replace(self.limits, input_cost_per_m=value)
+
+    @property
+    def output_cost_per_m(self) -> float | None:
+        _warn_flat("output_cost_per_m")
+        return self.limits.output_cost_per_m
+
+    @output_cost_per_m.setter
+    def output_cost_per_m(self, value: float | None) -> None:
+        _warn_flat("output_cost_per_m")
+        self.limits = replace(self.limits, output_cost_per_m=value)
+
+    @property
+    def llm_max_attempts(self) -> int:
+        _warn_flat("llm_max_attempts")
+        return self.retry.attempts
+
+    @llm_max_attempts.setter
+    def llm_max_attempts(self, value: int) -> None:
+        _warn_flat("llm_max_attempts")
+        self.retry = replace(self.retry, attempts=value)
+
+    @property
+    def llm_retry_backoff_seconds(self) -> float:
+        _warn_flat("llm_retry_backoff_seconds")
+        return self.retry.backoff_seconds
+
+    @llm_retry_backoff_seconds.setter
+    def llm_retry_backoff_seconds(self, value: float) -> None:
+        _warn_flat("llm_retry_backoff_seconds")
+        self.retry = replace(self.retry, backoff_seconds=value)
+
+    @property
+    def model_timeout_seconds(self) -> float:
+        _warn_flat("model_timeout_seconds")
+        return self.retry.call_timeout_seconds
+
+    @model_timeout_seconds.setter
+    def model_timeout_seconds(self, value: float) -> None:
+        _warn_flat("model_timeout_seconds")
+        self.retry = replace(self.retry, call_timeout_seconds=value)
 
 
 @dataclass
@@ -333,13 +602,13 @@ class SandboxConfig:
 
     def __post_init__(self) -> None:
         if self.tier not in ("process", "docker", "seatbelt"):
-            raise ValueError(f"Unknown sandbox tier: {self.tier!r}")
+            raise ConfigurationError(f"Unknown sandbox tier: {self.tier!r}")
         for name in ("timeout_seconds", "max_memory_mb", "max_cpu_seconds", "max_file_size_mb"):
             _positive(getattr(self, name), name, integer=True)
         if self.network_enabled is not None and type(self.network_enabled) is not bool:
             raise TypeError("network_enabled must be bool or None")
         if self.tier == "process" and (self.network_enabled is False or self.allowed_paths):
-            raise ValueError("Process execution cannot restrict network or filesystem access; choose docker or seatbelt")
+            raise ConfigurationError("Process execution cannot restrict network or filesystem access; choose docker or seatbelt")
 
 
 @dataclass
@@ -368,22 +637,18 @@ class RuntimeConfig:
     """Configuration for the agent runtime."""
 
     storage_dir: str = ".agent_sessions"
-    checkpoint_interval: int | None = None  # deprecated: execution checkpoints every boundary
-    max_checkpoints: int | None = None  # deprecated: retention belongs to the backend
     max_session_duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.storage_dir, str) or not self.storage_dir:
-            raise ValueError("storage_dir must be nonempty")
+            raise ConfigurationError("storage_dir must be nonempty")
         if self.max_session_duration_seconds is not None:
             _positive(self.max_session_duration_seconds, "max_session_duration_seconds")
-        if self.checkpoint_interval is not None or self.max_checkpoints is not None:
-            warnings.warn("checkpoint_interval/max_checkpoints are deprecated and ignored; durable execution checkpoints every boundary", DeprecationWarning, stacklevel=2)
 
 
 def _positive(value: Any, name: str, *, integer: bool = False) -> None:
     if (integer and type(value) is not int) or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a finite positive {'integer' if integer else 'number'}")
+        raise ConfigurationError(f"{name} must be a finite positive {'integer' if integer else 'number'}")
 
 
 @dataclass
