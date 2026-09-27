@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
-import os
 import datetime
 import uuid
 from types import SimpleNamespace
@@ -15,9 +14,9 @@ from langsmith import evaluate
 from langsmith.schemas import Example, Run
 
 from .datasets.loader import build_example, sync_dataset_to_langsmith
-from .datasets.registry import get_dataset, list_datasets
+from .datasets.registry import get_dataset
 from .evaluators import default_evaluators
-from .target import AgentFactory, AgentOrFactory, AgentTarget
+from .target import AgentOrFactory, AgentTarget
 from ..core import Agent
 
 logger = logging.getLogger(__name__)

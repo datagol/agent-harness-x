@@ -23,7 +23,7 @@ from dataclasses import asdict
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any
 
 import logging
 

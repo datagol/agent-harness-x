@@ -95,6 +95,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install '.[dev,all]'
+      - run: python -m ruff check .
       - run: python -m mypy
       - run: python -m pytest -q
   integration:

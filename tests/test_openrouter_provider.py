@@ -17,8 +17,7 @@ from harnessx.providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterProvider,
 )
-from harnessx import Agent
-from harnessx.types import AgentConfig, StopReason, ToolCall
+from harnessx.types import AgentConfig, StopReason
 
 
 def _run(coro):

@@ -8,23 +8,18 @@ from typing import Any, AsyncIterator
 from unittest.mock import MagicMock
 
 from harnessx import (
-    Agent,
     AgentConfig,
     ConversationMemory,
     Extension,
     ExtensionContext,
-    GuardrailsEngine,
     LLMProvider,
-    MaxIterationsError,
     PermissionLevel,
     ProviderResponse,
-    Role,
     StopReason,
     StreamChunk,
     RunEvent,
     RunEventType,
     Agent,
-    TokenUsage,
     ToolCall,
     ToolResult,
 )
@@ -298,7 +293,7 @@ class TestExtensionAPI(unittest.IsolatedAsyncioTestCase):
 
         # Restore in a fresh agent instance with fresh extension
         ext2 = StatefulExtension()
-        agent2 = await Agent.load_session(
+        await Agent.load_session(
             session_id,
             storage_dir="/tmp/test_agent_sessions",
             provider=MockTestProvider(),

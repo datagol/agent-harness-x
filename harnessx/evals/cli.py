@@ -28,7 +28,6 @@ if not os.getenv("LANGSMITH_API_KEY") and os.getenv("LANGCHAIN_API_KEY"):
 from ..core import Agent
 from ..subagents import SubAgent
 from ..permissions import PermissionLevel
-from ..skills import SkillManager
 from ..types import AgentConfig
 from .datasets.registry import list_datasets
 from .evaluators import default_evaluators, list_evaluator_names, resolve_evaluators

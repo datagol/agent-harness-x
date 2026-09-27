@@ -18,16 +18,14 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-import traceback
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
 from .tools import ToolRegistry
-from .types import PermissionLevel, ToolCall, ToolResult
+from .types import PermissionLevel
 
 logger = logging.getLogger(__name__)
 

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 import unittest
-from unittest.mock import MagicMock, patch
-import uuid
+from unittest.mock import MagicMock
 
 from langsmith.schemas import Example, Run
 
@@ -16,14 +14,11 @@ from harnessx import (
     AgentConfig,
     PermissionLevel,
     TokenUsage,
-    ToolCall,
-    ToolResult,
 )
 from harnessx.evals import (
     AgentTarget,
     build_example,
     contains_evaluator,
-    default_evaluators,
     evaluate_agent,
     exact_match_evaluator,
     get_dataset,
@@ -32,7 +27,6 @@ from harnessx.evals import (
     json_valid_evaluator,
     list_datasets,
     list_evaluator_names,
-    no_agent_errors_evaluator,
     no_tool_errors_evaluator,
     regex_evaluator,
     resolve_evaluators,
@@ -40,7 +34,6 @@ from harnessx.evals import (
     step_sequence_evaluator,
     subagent_delegated_evaluator,
     tool_args_evaluator,
-    tool_call_count_evaluator,
     tool_selection_evaluator,
 )
 from harnessx.providers.base import LLMProvider
@@ -377,7 +370,6 @@ class TestEvalFramework(unittest.IsolatedAsyncioTestCase):
     def test_cli_evaluator_flag_parsing(self):
         """Test that the CLI parser accepts --evaluator flags."""
         from harnessx.evals.cli import main
-        import argparse
 
         # Build parser directly to test argument resolution
         from unittest.mock import patch

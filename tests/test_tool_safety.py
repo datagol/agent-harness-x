@@ -338,7 +338,7 @@ def test_unsupported_signatures_and_annotations_fail_registration():
     def positional(value: str, /): pass
     def variadic(*values: str): pass
     def custom(value: Path): pass
-    def unresolved(value: "MissingToolType"): pass
+    def unresolved(value: "MissingToolType"): pass  # noqa: F821  (deliberately unresolvable)
     for handler in (positional, variadic, custom, unresolved):
         with pytest.raises(TypeError):
             ToolRegistry().register_tool(handler)

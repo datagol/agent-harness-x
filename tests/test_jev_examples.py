@@ -7,7 +7,7 @@ import pytest
 
 from harnessx import Agent, ProviderResponse, RunResult, RunStatus
 from harnessx.decisions import (
-    BooleanAnswer, BooleanQuestion, ChoiceAnswer, ChoiceQuestion, DecisionBatch,
+    BooleanQuestion, ChoiceAnswer, ChoiceQuestion, DecisionBatch,
     DecisionError, DecisionProvider, ScoreQuestion,
 )
 from examples._decision_fixtures import FixedDecisionProvider

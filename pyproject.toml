@@ -60,7 +60,7 @@ gemini = ["google-genai>=1.0.0"]
 mcp = ["mcp[cli]>=1.0.0"]
 docker = ["docker>=7.0.0"]
 server = ["fastapi>=0.110.0", "uvicorn[standard]>=0.27.0", "python-dotenv>=1.0.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "mypy>=1.18", "build>=1.2"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "mypy>=1.18", "build>=1.2", "ruff>=0.14"]
 all = ["harnessx[jev,postgres,temporal,langsmith,openai,azure,gemini,mcp,docker,server]"]
 
 [project.scripts]
@@ -83,6 +83,23 @@ harnessx = ["py.typed"]
 pythonpath = ["."]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["harness-web/node_modules", "harness-web/dist", "dist", "build", "doc"]
+
+[tool.ruff.lint]
+# A deliberately small baseline: syntax, pyflakes, and undefined names.
+# Style rules can be added later once the tree is clean under them.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package roots re-export their public API.
+"__init__.py" = ["F401"]
+# Environment must be prepared before these modules import their dependencies.
+"harnessx/evals/cli.py" = ["E402"]
+"tests/test_jev_decisions.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"

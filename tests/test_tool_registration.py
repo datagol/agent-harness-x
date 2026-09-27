@@ -7,7 +7,6 @@ import tempfile
 import unittest
 
 from harnessx import (
-    Agent,
     AgentConfig,
     PermissionLevel,
     Agent,
@@ -20,11 +19,7 @@ from harnessx.builtin import (
     list_directory,
     read_file,
     recall_memories,
-    register_all_tools,
-    register_bash_tools,
     register_filesystem_tools,
-    register_memory_tools,
-    register_web_tools,
     run_bash,
     save_memory,
     write_file,

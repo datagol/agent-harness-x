@@ -20,7 +20,6 @@ import shutil
 import sys
 import tempfile
 import time
-from pathlib import Path
 from typing import Any
 
 from .types import SandboxConfig, SandboxResult
@@ -252,7 +251,7 @@ class Sandbox:
     async def _execute_docker(self, code: str, language: str) -> SandboxResult:
         """Docker container with resource limits and network isolation."""
         try:
-            import docker
+            import docker  # noqa: F401  (availability probe)
         except ImportError as exc:
             raise RuntimeError("Docker sandbox requires harnessx[docker]; no process fallback is permitted") from exc
 
@@ -282,7 +281,7 @@ class Sandbox:
 
     async def _execute_docker_command(self, command: str) -> SandboxResult:
         try:
-            import docker
+            import docker  # noqa: F401  (availability probe)
         except ImportError as exc:
             raise RuntimeError("Docker sandbox requires harnessx[docker]; no process fallback is permitted") from exc
 
@@ -296,8 +295,7 @@ class Sandbox:
             return SandboxResult(stderr=str(e), exit_code=-1, execution_time_ms=elapsed)
 
     async def _run_docker(self, command, workdir, start):
-        import docker
-
+        import docker  # noqa: F401  (availability probe)
         client = await asyncio.to_thread(docker.from_env)
         container = None
         try:

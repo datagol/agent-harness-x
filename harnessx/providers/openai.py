@@ -5,7 +5,6 @@ and the harness's canonical format. Supports both create and stream.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 try:

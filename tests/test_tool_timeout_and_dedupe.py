@@ -9,7 +9,6 @@ Both default to off, so nothing that exists today changes behaviour.
 
 import asyncio
 
-import pytest
 
 from harnessx.tools import ToolRegistry
 from harnessx.types import PermissionLevel, ToolCall

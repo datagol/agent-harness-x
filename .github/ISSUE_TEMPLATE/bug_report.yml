@@ -1,0 +1,43 @@
+name: Bug report
+description: Something behaves differently from what the documentation says
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: harnessx version
+      description: Output of `uv pip show harnessx` or `pip show harnessx`
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Python version and OS
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options: [anthropic, openai, azure, gemini, openrouter, custom, not provider related]
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest script that shows the problem. Redact keys.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traceback or logs
+      render: text
