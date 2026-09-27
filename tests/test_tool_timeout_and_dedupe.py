@@ -11,8 +11,8 @@ import asyncio
 
 import pytest
 
-from datagol_agent_harness.tools import ToolRegistry
-from datagol_agent_harness.types import PermissionLevel, ToolCall
+from harnessx.tools import ToolRegistry
+from harnessx.types import PermissionLevel, ToolCall
 
 
 def _registry(**kwargs):

@@ -1,4 +1,4 @@
-"""Comprehensive offline unit tests for the DataGOL Agent Harness LangSmith eval framework."""
+"""Comprehensive offline unit tests for the HarnessX LangSmith eval framework."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import uuid
 
 from langsmith.schemas import Example, Run
 
-from datagol_agent_harness import (
+from harnessx import (
     Agent,
     AgentConfig,
     PermissionLevel,
@@ -19,7 +19,7 @@ from datagol_agent_harness import (
     ToolCall,
     ToolResult,
 )
-from datagol_agent_harness.evals import (
+from harnessx.evals import (
     AgentTarget,
     build_example,
     contains_evaluator,
@@ -43,7 +43,7 @@ from datagol_agent_harness.evals import (
     tool_call_count_evaluator,
     tool_selection_evaluator,
 )
-from datagol_agent_harness.providers.base import LLMProvider
+from harnessx.providers.base import LLMProvider
 
 
 # ── Mock Response & Provider ────────────────────────────────────────────────
@@ -376,7 +376,7 @@ class TestEvalFramework(unittest.IsolatedAsyncioTestCase):
 
     def test_cli_evaluator_flag_parsing(self):
         """Test that the CLI parser accepts --evaluator flags."""
-        from datagol_agent_harness.evals.cli import main
+        from harnessx.evals.cli import main
         import argparse
 
         # Build parser directly to test argument resolution
@@ -392,7 +392,7 @@ class TestEvalFramework(unittest.IsolatedAsyncioTestCase):
             "--offline",
         ]
         with patch("sys.argv", test_argv):
-            with patch("datagol_agent_harness.evals.cli.evaluate_agent") as mock_evaluate:
+            with patch("harnessx.evals.cli.evaluate_agent") as mock_evaluate:
                 mock_summary = MagicMock(pass_rate=1.0)
                 mock_evaluate.return_value = mock_summary
                 main()

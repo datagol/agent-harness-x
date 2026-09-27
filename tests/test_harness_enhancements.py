@@ -1,4 +1,4 @@
-"""Comprehensive tests for architecture improvements, bug fixes, and extensions in datagol-agent-harness."""
+"""Comprehensive tests for architecture improvements, bug fixes, and extensions in harnessx."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import unittest
 from typing import Any, AsyncIterator
 from unittest.mock import MagicMock
 
-from datagol_agent_harness import (
+from harnessx import (
     Agent,
     AgentConfig,
     ConversationMemory,
@@ -21,9 +21,9 @@ from datagol_agent_harness import (
     Role,
     StopReason,
     StreamChunk,
-    StreamEvent,
-    StreamEventType,
-    StreamingAgent,
+    RunEvent,
+    RunEventType,
+    Agent,
     TokenUsage,
     ToolCall,
     ToolResult,
@@ -122,7 +122,7 @@ class TestAgentLoopFixes(unittest.IsolatedAsyncioTestCase):
             ProviderResponse(text="Custom stop reached", stop_reason=StopReason.STOP_SEQUENCE)
         ])
         agent = Agent(provider=provider)
-        result = await agent.run("Run custom stop")
+        result = (await agent.run("Run custom stop")).output
         self.assertEqual(result, "Custom stop reached")
         self.assertEqual(len(provider.recorded_calls), 1)
 
@@ -132,7 +132,7 @@ class TestAgentLoopFixes(unittest.IsolatedAsyncioTestCase):
             ProviderResponse(text="I wanted to use tools", tool_calls=[], stop_reason=StopReason.TOOL_USE)
         ])
         agent = Agent(provider=provider)
-        result = await agent.run("Hello")
+        result = (await agent.run("Hello")).output
         self.assertIn("wanted to use tools", result)
         self.assertEqual(len(provider.recorded_calls), 1)
 
@@ -163,10 +163,10 @@ class TestAgentLoopFixes(unittest.IsolatedAsyncioTestCase):
         def dummy() -> str:
             return "done"
 
-        turn1 = await agent.run("First prompt")
+        turn1 = (await agent.run("First prompt")).output
         self.assertEqual(turn1, "Turn complete")
 
-        turn2 = await agent.run("Second prompt")
+        turn2 = (await agent.run("Second prompt")).output
         self.assertEqual(turn2, "Turn complete")
         self.assertEqual(agent.guardrails.lifetime_iterations, 6)
 
@@ -205,7 +205,7 @@ class TestParallelToolExecution(unittest.IsolatedAsyncioTestCase):
         agent.tools.register(name="fetch_a", permission=PermissionLevel.ALLOW, concurrent=True)(fetch_a)
         agent.tools.register(name="fetch_b", permission=PermissionLevel.ALLOW, concurrent=True)(fetch_b)
 
-        result = await agent.run("Fetch both")
+        result = (await agent.run("Fetch both")).output
         self.assertEqual(result, "Both fetched")
 
         # Because they ran concurrently via asyncio.gather, both started before either finished:
@@ -264,7 +264,7 @@ class TestExtensionAPI(unittest.IsolatedAsyncioTestCase):
             extensions=[ext],
         )
 
-        res = await agent.run("Hello")
+        res = (await agent.run("Hello")).output
         self.assertEqual(res, "Understood date")
         # Verify dynamic prompt was passed to provider
         self.assertIn("Dynamic Context: Current Date 2026-09-07", provider.recorded_calls[0]["system"])
@@ -309,22 +309,22 @@ class TestExtensionAPI(unittest.IsolatedAsyncioTestCase):
 
 
 class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
-    """Test StreamingAgent streaming without vendor lock-in."""
+    """Test Agent streaming without vendor lock-in."""
 
     async def test_streaming_agent_with_mock_provider(self):
         provider = MockTestProvider([
             ProviderResponse(text="Streamed response", stop_reason=StopReason.END_TURN)
         ])
-        streaming_agent = StreamingAgent(provider=provider)
+        streaming_agent = Agent(provider=provider)
 
-        events: list[StreamEvent] = []
+        events: list[RunEvent] = []
         async for ev in streaming_agent.run_stream("Stream this"):
             events.append(ev)
 
         event_types = [e.type for e in events]
-        self.assertIn(StreamEventType.TEXT_DELTA, event_types)
-        self.assertIn(StreamEventType.TEXT_COMPLETE, event_types)
-        self.assertIn(StreamEventType.TURN_COMPLETE, event_types)
+        self.assertIn(RunEventType.TEXT_DELTA, event_types)
+        self.assertIn(RunEventType.TEXT_COMPLETE, event_types)
+        self.assertIn(RunEventType.TURN_COMPLETE, event_types)
 
     async def test_streaming_agent_handles_unknown_tool_gracefully(self):
         """Model hallucinating a tool name yields tool_result with is_error=True instead of crashing."""
@@ -336,20 +336,21 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
             ),
             ProviderResponse(text="Recovered from error", stop_reason=StopReason.END_TURN),
         ])
-        streaming_agent = StreamingAgent(provider=provider)
+        streaming_agent = Agent(provider=provider)
 
-        events: list[StreamEvent] = []
+        events: list[RunEvent] = []
         async for ev in streaming_agent.run_stream("Use hallucinated tool"):
             events.append(ev)
 
-        tool_results = [e.data for e in events if e.type == StreamEventType.TOOL_RESULT]
+        tool_results = [e.data for e in events if e.type == RunEventType.TOOL_RESULT]
         self.assertEqual(len(tool_results), 1)
         self.assertTrue(tool_results[0].is_error)
         self.assertIn("not found", tool_results[0].content)
 
     async def test_anthropic_provider_temperature_fallback(self):
         """Verify AnthropicProvider handles SDK versions or models rejecting temperature."""
-        from datagol_agent_harness.providers.anthropic import AnthropicProvider
+        from anthropic.types import TextBlock
+        from harnessx.providers.anthropic import AnthropicProvider
 
         class MockMessages:
             def __init__(self):
@@ -362,7 +363,7 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
                     raise TypeError("AsyncMessages.create() got an unexpected keyword argument 'temperature'")
                 # Return dummy response
                 mock_resp = MagicMock()
-                mock_resp.content = [MagicMock(type="text", text="ok")]
+                mock_resp.content = [TextBlock(type="text", text="ok")]
                 mock_resp.stop_reason = "end_turn"
                 mock_resp.usage = MagicMock(input_tokens=10, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
                 return mock_resp
@@ -383,7 +384,7 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
 
                             async def get_final_message(self):
                                 mock_resp = MagicMock()
-                                mock_resp.content = [MagicMock(type="text", text="streamed text")]
+                                mock_resp.content = [TextBlock(type="text", text="streamed text")]
                                 mock_resp.stop_reason = "end_turn"
                                 mock_resp.usage = MagicMock(input_tokens=10, output_tokens=5, cache_creation_input_tokens=0, cache_read_input_tokens=0)
                                 return mock_resp

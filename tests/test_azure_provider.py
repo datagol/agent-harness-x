@@ -13,12 +13,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from datagol_agent_harness.core import Agent
-from datagol_agent_harness.providers import make_provider
-from datagol_agent_harness.providers.azure_openai import AzureOpenAIProvider
-from datagol_agent_harness.runtime import AgentRuntime
-from datagol_agent_harness.streaming import StreamingAgent
-from datagol_agent_harness.types import (
+from harnessx.core import Agent
+from harnessx.providers import make_provider
+from harnessx.providers.azure_openai import AzureOpenAIProvider
+from harnessx.runtime import AgentRuntime
+from harnessx.types import (
     AgentConfig,
     RuntimeConfig,
     StopReason,
@@ -163,7 +162,7 @@ class TestAzureConstruction(unittest.TestCase):
 
     def test_explicit_args_forwarded_to_sdk(self):
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, {}, clear=True):
@@ -184,7 +183,7 @@ class TestAzureConstruction(unittest.TestCase):
             "OPENAI_API_VERSION": "2024-06-01",
         }
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, env, clear=True):
@@ -201,7 +200,7 @@ class TestAzureConstruction(unittest.TestCase):
             "OPENAI_API_VERSION": "2024-06-01",
         }
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, env, clear=True):
@@ -217,7 +216,7 @@ class TestAzureConstruction(unittest.TestCase):
 
     def test_missing_endpoint_raises_clear_error(self):
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, {"OPENAI_API_VERSION": "2024-10-21"}, clear=True):
@@ -229,7 +228,7 @@ class TestAzureConstruction(unittest.TestCase):
 
     def test_missing_api_version_raises_clear_error(self):
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(
@@ -250,7 +249,7 @@ class TestAzureConstruction(unittest.TestCase):
             return "aad-token"
 
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, {}, clear=True):
@@ -270,7 +269,7 @@ class TestAzureConstruction(unittest.TestCase):
             "OPENAI_API_VERSION": "2024-10-21",
         }
         with patch(
-            "datagol_agent_harness.providers.azure_openai.AsyncAzureOpenAI",
+            "harnessx.providers.azure_openai.AsyncAzureOpenAI",
             RecordingAzureSDK,
         ):
             with patch.dict(os.environ, env, clear=True):
@@ -519,22 +518,23 @@ class TestAzureIntegration(unittest.TestCase):
             provider=provider,
         )
         result = _run(agent.run("Hi"))
-        self.assertEqual(result, "Integrated!")
+        self.assertEqual(result.output, "Integrated!")
 
     def test_streaming_agent_with_azure(self):
         stream = FakeAsyncStream([_text_chunk("Streaming "), _text_chunk("live!", "stop")])
         client = FakeAzureClient([stream])
         provider = AzureOpenAIProvider(client=client)
-        agent = StreamingAgent(
+        agent = Agent(
             config=AgentConfig(provider="azure", model="my-deploy"),
             provider=provider,
         )
 
         async def run_streaming():
             deltas = []
-            async for event in agent.run_stream("Stream test"):
-                if event.type.value == "text_delta":
-                    deltas.append(event.data)
+            async with agent.run_stream("Stream test") as stream:
+                async for event in stream:
+                    if event.type.value == "text_delta":
+                        deltas.append(event.data)
             return deltas
 
         self.assertEqual(_run(run_streaming()), ["Streaming ", "live!"])
@@ -545,16 +545,22 @@ class TestAzureIntegration(unittest.TestCase):
         client = FakeAzureClient([_completion_response()])
         provider = AzureOpenAIProvider(client=client)
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = AgentRuntime(
-                agent_config=AgentConfig(provider="azure", model="my-deploy"),
-                runtime_config=RuntimeConfig(storage_dir=str(tmp)),
+            agent = Agent(
+                config=AgentConfig(provider="azure", model="my-deploy"),
                 provider=provider,
             )
-            _run(runtime.start())
-            try:
-                self.assertIs(runtime._agent.provider, provider)
-            finally:
-                _run(runtime.stop())
+            runtime = AgentRuntime(agent, runtime_config=RuntimeConfig(storage_dir=str(tmp)))
+
+            async def exercise():
+                await runtime.start()
+                try:
+                    self.assertIs(runtime._agent.provider, provider)
+                    result = await runtime.execute("Hi")
+                    self.assertEqual(result.output, "hello")
+                finally:
+                    await runtime.stop()
+
+            _run(exercise())
 
 
 # ── Optional-dependency behavior ─────────────────────────────────────────────
@@ -565,12 +571,12 @@ class TestAzureImportGuard(unittest.TestCase):
         import importlib
         import sys
 
-        import datagol_agent_harness.providers.azure_openai as azure_mod
+        import harnessx.providers.azure_openai as azure_mod
 
         with patch.dict(sys.modules, {"openai": None}):
             with self.assertRaises(ImportError) as ctx:
                 importlib.reload(azure_mod)
-            self.assertIn("datagol-agent-harness[azure]", str(ctx.exception))
+            self.assertIn("harnessx[azure]", str(ctx.exception))
         importlib.reload(azure_mod)
 
 

@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
-from datagol_agent_harness.providers.retry import (
+from harnessx.providers.retry import (
     call_with_retry,
     is_transient,
     stream_with_retry,
 )
-from datagol_agent_harness.types import StreamChunk
+from harnessx.types import StreamChunk
 
 
 class _Status(Exception):

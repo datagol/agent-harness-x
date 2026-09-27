@@ -1,22 +1,26 @@
-# DataGOL Agent Harness
+# HarnessX
 
-[![PyPI version](https://img.shields.io/pypi/v/datagol-agent-harness.svg)](https://pypi.org/project/datagol-agent-harness/)
-[![Python versions](https://img.shields.io/pypi/pyversions/datagol-agent-harness.svg)](https://pypi.org/project/datagol-agent-harness/)
+[![PyPI version](https://img.shields.io/pypi/v/harnessx.svg)](https://pypi.org/project/harnessx/)
+[![Python versions](https://img.shields.io/pypi/pyversions/harnessx.svg)](https://pypi.org/project/harnessx/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 **A provider-agnostic, library-first Python toolkit for building production-grade LLM agents.**
 
-Rather than locking developers into rigid state-machine graphs or opaque persona prompts, `datagol-agent-harness` gives you a composable set of building blocks: real-time streaming, typed tool registration with schema inference, lazy-loaded skills, multi-agent delegation, 4-tier memory, sandboxed code execution, Model Context Protocol (MCP) tool bridges, native LangSmith tracing, and evaluation suites.
+Try [harness-web](https://github.com/datagol/harness-x/blob/main/harness-web/README.md) to launch all examples from a browser,
+review approvals and live output, or use a separate general chat workspace.
 
-### Why DataGOL Agent Harness?
+Rather than locking developers into rigid state-machine graphs or opaque persona prompts, `harnessx` gives you a composable set of building blocks: real-time streaming, typed tool registration with schema inference, lazy-loaded skills, multi-agent delegation, 4-tier memory, sandboxed code execution, Model Context Protocol (MCP) tool bridges, native LangSmith tracing, and evaluation suites.
+
+### Why HarnessX?
 
 - **No Graph Boilerplate:** Write simple async Python functions instead of complex state graphs.
 - **Provider-Agnostic:** First-class support for Anthropic (Claude 3.5/3.7/Sonnet/Opus) and OpenAI (GPT-4o/GPT-5).
 - **Streaming-First:** First-class typed event stream (`run_stream`) for WebSocket and SSE frontends.
 - **Lazy Instruction Packs (Skills):** Load specialized guidelines only when needed via YAML-frontmatter `SKILL.md` packs.
-- **Enterprise Guardrails & Sandboxing:** Execute untrusted code safely via Process, Docker, or macOS Seatbelt isolation with granular budget and iteration caps.
+- **Guardrails & Execution Backends:** Budget and iteration limits, host subprocess execution, and Docker or macOS Seatbelt access isolation.
 - **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote SSE) in 3 lines of code.
 - **Full Observability & Evals:** Zero-overhead lifecycle hooks, middleware transforms, native LangSmith tracing, and benchmark evaluations.
+- **Typed Decisions:** Optional Jev SDK for Choice routing/classification, Score rubrics, and Noul evidence checks. See the [decision SDK guide](https://github.com/datagol/harness-x/blob/main/doc/decisions.md).
 
 ---
 
@@ -39,15 +43,20 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 
 ## Setup
 
+The distribution and Python import are both named `harnessx`:
+`from harnessx import Agent`. Upgrading from `datagol-agent-harness`? See the
+[rename guide](https://github.com/datagol/harness-x/blob/main/doc/harnessx_rename.md) and the [changelog](https://github.com/datagol/harness-x/blob/main/CHANGELOG.md).
+
 ```bash
 # From PyPI
-pip install datagol-agent-harness
+pip install harnessx
 
-# With optional extras (LangSmith, OpenAI, Azure OpenAI, MCP, Docker, or everything)
-pip install "datagol-agent-harness[langsmith]"
-pip install "datagol-agent-harness[openai]"
-pip install "datagol-agent-harness[azure]"
-pip install "datagol-agent-harness[all]"
+# With optional extras (LangSmith, OpenAI, Azure OpenAI, Jev, MCP, Docker, or everything)
+pip install "harnessx[langsmith]"
+pip install "harnessx[openai]"
+pip install "harnessx[azure]"
+pip install "harnessx[jev]"
+pip install "harnessx[all]"
 
 # For local development (editable)
 pip install -e ".[all]"
@@ -67,6 +76,25 @@ Run examples as modules from the repo root (not as plain scripts):
 python -m examples.simple_chat
 ```
 
+See the [examples guide](https://github.com/datagol/harness-x/blob/main/examples/README.md) for every entry point, optional
+dependencies, and service requirements. For a first run without API keys, use
+`python -m examples.skills_demo` or `python -m examples.flight_recorder --output incident.hx`.
+
+`Agent()` and `examples.simple_chat` use Anthropic by default. To choose Anthropic,
+OpenAI, Gemini, or OpenRouter, use [provider chat](https://github.com/datagol/harness-x/blob/main/examples/provider_chat.py):
+`python -m examples.provider_chat --provider openai --model YOUR_MODEL_ID`.
+See the [provider setup guide](https://github.com/datagol/harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
+optional dependencies, and streaming options.
+
+The standalone [decision SDK](https://github.com/datagol/harness-x/blob/main/doc/decisions.md) provides typed Jev assessments
+alongside agents. Try its offline examples with `python -m examples.jev_routing
+--min-confidence 0.8`, `python -m examples.jev_classification`, or
+`python -m examples.jev_answer_review`. Live calls require the `jev` extra,
+`TYPESAFE_API_KEY`, and an explicit `--live` flag.
+
+For 0.3 API changes, see the [migration guide](https://github.com/datagol/harness-x/blob/main/doc/durable_runtime.md) and
+[SDK audit implementation report](https://github.com/datagol/harness-x/blob/main/doc/sdk_audit_fixes_2026-09-18.md).
+
 ---
 
 ## 1. Creating an agent
@@ -76,7 +104,7 @@ until the model stops with `end_turn`.
 
 ```python
 import asyncio
-from datagol_agent_harness import Agent, AgentConfig
+from harnessx import Agent, AgentConfig
 
 agent = Agent(
     config=AgentConfig(
@@ -89,7 +117,14 @@ agent = Agent(
     )
 )
 
-print(asyncio.run(agent.run("What is 17 + 25?")))
+async def main():
+    async with agent:
+        result = await agent.run("What is 17 + 25?")
+        if result.error:
+            raise RuntimeError(result.error["message"])
+        print(result.output)
+
+asyncio.run(main())
 ```
 
 `AgentConfig` fields (all optional, these are the defaults):
@@ -103,10 +138,55 @@ print(asyncio.run(agent.run("What is 17 + 25?")))
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `max_result_chars` | `12000` | Tool-result eviction threshold in memory |
+| `llm_max_attempts` | `2` | Attempts per model call for transient failures (429, 5xx, timeouts); `1` disables retry |
+| `llm_retry_backoff_seconds` | `0.5` | Base delay between attempts, doubled each time |
+| `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
+
+### Prompt caching
+
+Every iteration of the loop resends the system prompt, the tool list, and the
+conversation so far. Caching is on by default: the engine computes a stable
+prefix key and marks where the reusable prefix ends, and each provider
+translates that into its vendor's mechanism. Caching is an optimization, never
+a correctness dependency, so a provider whose vendor rejects the request runs
+it uncached.
+
+```python
+from harnessx import Agent, AgentConfig, PromptCachePolicy
+
+# Default: on, vendor default lifetime, history breakpoint after the last turn.
+agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"))
+
+# Tuned: a one-hour lifetime and per-tenant separation of identical prompts.
+agent = Agent(config=AgentConfig(
+    provider="gemini",
+    model="gemini-3.6-flash",
+    prompt_cache=PromptCachePolicy(ttl_seconds=3600, key_salt="tenant-a"),
+))
+
+# Off, for every provider.
+agent = Agent(config=AgentConfig(prompt_cache=None))
+```
+
+| Provider | What the hint becomes |
+|---|---|
+| `anthropic` | `cache_control` markers after the system prompt, the last tool, and the last message. `ttl_seconds >= 3600` selects the one-hour cache; otherwise the five-minute default applies. Requests are only cached above Anthropic's minimum prefix size |
+| `openai` | Automatic prefix caching, plus `prompt_cache_key` set to the prefix key so identical prefixes route to the same cache |
+| `azure`, `openrouter` | Automatic prefix caching only; no routing key is sent |
+| `gemini` | Implicit caching by default. With `ttl_seconds` set (or the `GEMINI_PROMPT_CACHE_TTL` variable), the system prompt and tools are uploaded once as an explicit cache and referenced per call. A prefix below Gemini's minimum cacheable size runs uncached, and that prefix is not retried for ten minutes |
+
+Cache hits show up in the usual usage fields: `RunResult.usage.cache_read_input_tokens`
+and `cache_creation_input_tokens`. Every `LLM_REQUEST` hook carries
+`data["prefix_key"]`, so an observer can assert that consecutive iterations
+share one key. A prefix that drifts, for example a timestamp in the system
+prompt or tools registered in a different order, silently defeats every
+vendor's cache. Custom providers receive the hint as an optional `cache`
+keyword on `create` and `stream`; ignoring it is fine, honoring it means
+failing open.
 
 ### Azure OpenAI
 
-Install the extra (`pip install "datagol-agent-harness[azure]"`; the `openai`
+Install the extra (`pip install "harnessx[azure]"`; the `openai`
 package covers Azure). Azure reuses the OpenAI translation layer through the
 `AsyncAzureOpenAI` client, so completion **and streaming** both work. On Azure
 the `model` you pass is the **deployment name**, and both an endpoint and an
@@ -118,7 +198,7 @@ is responsible for populating the environment or passing values in code.
 `AZURE_OPENAI_API_KEY`, `OPENAI_API_VERSION`):
 
 ```python
-from datagol_agent_harness import Agent, AgentConfig
+from harnessx import Agent, AgentConfig
 
 # env: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, OPENAI_API_VERSION
 agent = Agent(config=AgentConfig(provider="azure", model="<your-deployment>"))
@@ -128,8 +208,8 @@ agent = Agent(config=AgentConfig(provider="azure", model="<your-deployment>"))
 a fully preconfigured client):
 
 ```python
-from datagol_agent_harness import Agent, AgentConfig
-from datagol_agent_harness.providers.azure_openai import AzureOpenAIProvider
+from harnessx import Agent, AgentConfig
+from harnessx.providers.azure_openai import AzureOpenAIProvider
 
 provider = AzureOpenAIProvider(
     azure_endpoint="https://<resource>.openai.azure.com",
@@ -151,7 +231,7 @@ identify the underlying tokenizer.
 You can also inject your own pieces — everything is a constructor parameter:
 
 ```python
-from datagol_agent_harness import (
+from harnessx import (
     Agent, AgentConfig, ConversationMemory, HookManager,
     MiddlewarePipeline, PermissionManager, ToolRegistry,
 )
@@ -159,6 +239,7 @@ from datagol_agent_harness import (
 agent = Agent(
     config=AgentConfig(system_prompt="..."),
     tools=ToolRegistry(),               # your own registry
+    subagents=[],                      # declarative SubAgent specialists
     memory=ConversationMemory(),        # your own memory
     permissions=PermissionManager(),    # your own permission policy
     hooks=HookManager(),                # lifecycle hooks
@@ -177,136 +258,350 @@ async def chat(agent):
         text = input("You: ").strip()
         if text in ("", "quit"):
             break
-        print("Agent:", await agent.run(text))
+        print("Agent:", (await agent.run(text)).output)
 ```
 
 ---
 
 ## 2. Registering tools
 
-A tool is any Python function. The registry converts its signature, type
-hints, and docstring into a JSON schema for the model, and dispatches calls
-back to the function.
+A tool has two parts: a Python handler that performs an operation, and a registered
+name, description, input schema, and execution policy that the agent uses to call
+it. Registration makes a handler available; it does not execute it.
 
-### Decorator registration
+### Choose a registration style
+
+| Style | Example | Best use |
+| --- | --- | --- |
+| Constructor function | `Agent(tools=[fetch_url])` | A small, explicit list of handlers |
+| Constructor built-in name | `Agent(tools=["fetch_url"])` | Load a shipped tool without importing its handler |
+| Constructor bundle | `Agent(tools=["web"])` | Load a built-in group |
+| Later registration | `agent.tools.register_tool(fetch_url)` | Assemble tools after creating the agent |
+| Decorator | `@agent.tools.register(...)` | Define a custom handler beside its registration |
+| Built-in helper | `register_web_tools(agent.tools, ...)` | Configure and select tools in a bundle |
+| Registry loading | `registry.load_builtin("web", ...)` | The same built-in helper options through one entry point |
+| Tool definition | `Agent(tools=[definition])` | Reuse an explicit schema and execution policy |
+
+All of these inherit the agent's permission policy when permission is omitted.
+A normal `Agent()` defaults to **ALLOW**. A custom manager can instead default to
+ASK or DENY. A preconfigured `ToolDefinition` retains its explicit permission.
+Registration style does not choose the permission default.
+
+Prefer functions for simple registration and helpers for configured capabilities.
+Bundle names currently include `filesystem`, `bash`, `web`, `memory`, and `all`;
+a bundle can contain more tools than one standalone function.
+
+### Constructor registration and registration afterward
 
 ```python
-from datagol_agent_harness import PermissionLevel
+from harnessx import Agent
+from harnessx.builtin.web import fetch_url
 
-@agent.tools.register(permission=PermissionLevel.ALLOW)
-def add(a: int, b: int) -> int:
-    """Add two numbers."""          # becomes the tool description
-    return a + b
-
-@agent.tools.register(permission=PermissionLevel.ASK)
-async def read_file(path: str) -> str:
-    """Read a file from disk.
-
-    Args:
-        path: Absolute path to the file.   # becomes the param description
-    """
-    with open(path) as f:
-        return f.read()
+agent = Agent(tools=[fetch_url])
 ```
 
-Rules of thumb:
-
-- The **first line of the docstring** is the tool description the model sees.
-- An `Args:` section documents parameters.
-- Type hints drive the JSON schema: `str`, `int`, `float`, `bool`, `list[X]`,
-  `dict`. Optional params (with defaults) are not required.
-- **Pitfall:** avoid `list[str] | None` style unions — the schema generator
-  can't express them and will fall back to `"type": "string"`. Give optional
-  params a plain default and type instead, or use `register_with_schema`
-  (below) for exact control.
-- Sync and async handlers both work. Errors never crash the agent — they are
-  returned to the model as `is_error` tool results.
-
-### Explicit schema registration
-
-When you need a schema the signature can't express (nested objects, arrays
-with item types, `oneOf`-style choices):
+The constructor infers the tool name, schema, and description from the function.
+You can also register afterward, before starting the run:
 
 ```python
-async def propose_items(query: str = "", items=None, intro_text: str = "") -> str:
-    if (query and items) or (not query and not items):
-        return "Error: provide exactly one of `query` or `items`."
-    resolved = [query] if query else items
-    return f"Presented {len(resolved)} item(s)."
+from harnessx import Agent
+from harnessx.builtin.web import fetch_url
 
-agent.tools.register_with_schema(
-    name="propose_items",
-    description="Propose items, via query (user's words) or items (your strings).",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "User's words, untouched."},
-            "items": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Item strings you wrote yourself.",
-            },
-            "intro_text": {"type": "string"},
-        },
-    },
-    handler=propose_items,
-    permission=PermissionLevel.ALLOW,
+agent = Agent()
+agent.tools.register_tool(fetch_url)
+```
+
+Both expose `fetch_url` to subsequent model calls. Finish changing bindings before
+starting a run; mutating a registry during execution can invalidate an in-flight
+call. Use `async with agent:` or `await agent.aclose()` to close an agent when done.
+
+A constructor list may mix functions, built-in names, and `ToolDefinition` objects.
+Passing an existing `ToolRegistry` attaches that same registry to an ordinary
+agent; it does not clone the registry. Declare subagent tools separately: each
+specialist task receives a fresh registry with copied schemas and metadata.
+
+### Direct function versus a registration helper
+
+These imports serve different purposes:
+
+```python
+from harnessx.builtin.web import fetch_url           # operation
+from harnessx.builtin.web import register_web_tools  # registration/configuration
+```
+
+`fetch_url` is an async Python function. `register_web_tools` installs the web
+bundle into a supplied registry and returns the list of registered names.
+The web bundle currently contains `fetch_url`.
+
+```python
+from harnessx import Agent
+from harnessx.builtin.web import register_web_tools
+
+agent = Agent()
+registered = register_web_tools(
+    agent.tools,
+    include=["fetch_url"],
+    max_length=20_000,
+)
+assert registered == ["fetch_url"]
+```
+
+This uses the same HTTP-fetch implementation, with configured response truncation.
+With a non-default `max_length`, the helper creates a wrapper whose model input is
+only `url`; the model cannot override that configured limit. Direct `fetch_url`
+registration exposes its `url` and optional `max_length` function parameters.
+With the helper's default `max_length=500_000`, it currently registers the direct
+function, so that parameter remains visible. Truncation limits the returned text,
+not bytes downloaded from the network.
+
+Both approaches inherit permissions. Configuration can still change the handler
+and schema; equivalent permissions do not imply identical capabilities.
+
+Do not pass `register_web_tools` as an agent tool: its argument is a registry, not
+an input for the model. Call the helper during application setup.
+
+### Permission defaults and precedence
+
+| Registration | Ordinary agent | Manager default ASK | Manager default DENY |
+| --- | --- | --- | --- |
+| Function, name, bundle, or helper; permission omitted | ALLOW | ASK | DENY |
+| Explicit `permission=ALLOW` | ALLOW | ALLOW | ALLOW |
+| Explicit `permission=ASK` | ASK | ASK | ASK |
+| Explicit `permission=DENY` | DENY | DENY | DENY |
+
+A **manager override for the tool name takes precedence over every row**. Otherwise,
+an explicit tool permission takes precedence over the manager default. After
+resolving the effective level, DENY blocks execution even if there is a previous
+session grant. A session grant can satisfy ASK without another callback.
+
+For example, register an explicit policy or override it later:
+
+```python
+from harnessx import Agent, PermissionLevel
+from harnessx.builtin.web import fetch_url
+
+agent = Agent()
+agent.tools.register_tool(fetch_url, permission=PermissionLevel.ALLOW)
+agent.permissions.set_permission("fetch_url", PermissionLevel.DENY)
+```
+
+#### ASK needs an approval mechanism
+
+A plain agent does not display a prompt automatically. Direct execution and
+ordinary runs deny ASK calls when no approval callback is provided.
+
+For a terminal application:
+
+```python
+from harnessx import Agent, CliPermissionManager
+from harnessx.builtin.web import fetch_url
+
+agent = Agent(tools=[fetch_url], permissions=CliPermissionManager())
+```
+
+`CliPermissionManager` defaults to ASK. That includes built-in tools registered
+without an explicit policy. Alternatively, supply a synchronous or asynchronous
+callback. This complete callback example approves only one known URL:
+
+```python
+from harnessx import Agent, PermissionLevel, PermissionManager, ToolCall, ToolDefinition
+from harnessx.builtin.web import fetch_url
+
+async def approve(call: ToolCall, definition: ToolDefinition) -> bool:
+    return call.name == "fetch_url" and call.input.get("url") == "https://example.com"
+
+agent = Agent(
+    tools=[fetch_url],
+    permissions=PermissionManager(
+        default_level=PermissionLevel.ASK,
+        approval_callback=approve,
+    ),
 )
 ```
 
-### Built-in tools
+A UI can implement the same callback by awaiting the user's decision. Providing
+only `approval_callback` leaves the default at ALLOW; also select ASK for the
+tools that should request approval. Callbacks must return an actual boolean.
 
-`datagol_agent_harness.builtin` ships ready-made tool sets:
+Durable `AgentRuntime` runs persist ASK requests and return `awaiting_input`.
+Use the returned execution key with `runtime.approve(...)`, then resume the run;
+see the recovery documentation. This persisted approval behavior applies to the
+outer delegation call, not to the non-durable specialist's internal tools.
+MCP tools retain their explicitly configured per-server permission policy.
 
-```python
-from datagol_agent_harness.builtin import register_all_tools
-
-register_all_tools(agent.tools)
-# read_file, write_file, list_directory, run_bash, fetch_url, memory tools...
-```
-
-Or individually: `register_filesystem_tools`, `register_bash_tools`,
-`register_web_tools`, `register_memory_tools`.
-
-### Inspecting and executing
+### Decorators and schema inference
 
 ```python
-agent.tools.list_tools()                 # ['add', 'read_file', ...]
-agent.tools.get_tool_params()            # Anthropic-format tool schemas
-result = await agent.tools.execute(call) # manual dispatch (ToolCall -> ToolResult)
+from harnessx import Agent, PermissionLevel
+
+agent = Agent()
+
+@agent.tools.register(permission=PermissionLevel.ALLOW, replay_policy="safe")
+def calculate(a: int, b: int) -> int:
+    """Multiply two numbers.
+
+    Args:
+        a: First number.
+        b: Second number.
+    """
+    return a * b
 ```
+
+The description before an `Args:` or other recognized section becomes the tool
+description, including multiple lines. An `Args:` section documents parameters.
+Type hints drive JSON Schema: primitive types, nullable unions, `Literal`, nested
+lists, and dictionaries with string keys are supported. Nullable parameters remain
+required unless they have a Python default. Unsupported annotations fail during
+registration; use `register_with_schema` for a custom contract.
+
+Sync and async handlers both work. Synchronous handlers run outside the event
+loop. A timeout stops waiting for a synchronous handler; Python cannot forcibly
+stop its worker thread or reverse an external effect.
+
+### Explicit schemas and reusable definitions
+
+Use a schema when type inference cannot express the input contract:
+
+```python
+from harnessx import Agent, ToolRegistry
+
+async def label(value: str) -> str:
+    return value.upper()
+
+registry = ToolRegistry()
+definition = registry.register_with_schema(
+    name="label",
+    description="Uppercase a short label.",
+    input_schema={
+        "type": "object",
+        "properties": {"value": {"type": "string", "maxLength": 40}},
+        "required": ["value"],
+        "additionalProperties": False,
+    },
+    handler=label,
+)
+agent = Agent(tools=[definition])
+```
+
+Registering a `ToolDefinition` copies its schema and metadata while retaining the
+handler. Registration options override only specified metadata; registering an
+existing definition does not silently reset its permissions or replay policy.
+
+### Configured built-in tools
+
+Helpers support `include`, `exclude`, `permission`, and `replace`, plus options
+specific to the bundle. Unknown names, filters, and unsupported options fail.
+
+For filesystem inspection, configure a root and only the operations you need:
+
+```python
+from pathlib import Path
+from harnessx import Agent
+from harnessx.builtin import register_filesystem_tools
+
+agent = Agent()
+register_filesystem_tools(
+    agent.tools,
+    include=["read_file", "list_directory"],
+    base_path=str(Path.cwd()),
+    max_read_bytes=1_000_000,
+    max_directory_entries=1_000,
+)
+```
+
+The root must exist. Scoped operations reject symlinks in files and parent
+directories using descriptor-relative, no-follow access on POSIX. This is an
+application boundary, not an OS sandbox for arbitrary code: hard links, mounts,
+and other processes relocating directories require stronger isolation. Without
+`base_path`, filesystem tools use host filesystem access under process permissions.
+
+Configured filesystem limits are hidden from model input. Existing files require
+`overwrite=True`; writes publish atomically. Writes and downloadable-file
+creation remain non-concurrent when registered through filesystem helpers,
+regardless of permission. Direct standalone functions use ordinary registration
+metadata, so choose `concurrent=False` explicitly if needed.
+
+Download copies use configured `output_dir`, otherwise `AGENT_OUTPUT_DIR` or
+`./output`. Keep the output directory application-owned. Filesystem reads and
+writes run outside the event loop.
+
+Other options include a sandbox for the bash helper and memory stores for the
+memory helper. Single-tool loading accepts the corresponding bundle options:
+
+```python
+from pathlib import Path
+from harnessx import ToolRegistry
+
+registry = ToolRegistry()
+registry.load_builtin("read_file", base_path=str(Path.cwd()))
+```
+
+### Replacement, timeouts, and replay
+
+Duplicate tool names fail by default. Use `replace=True` to deliberately replace a
+binding during setup. Inspect `get_tool(name)`, `list_tools()`, or
+`get_tool_params()`; the last returns canonical provider-neutral tool schemas.
+
+Ordinary function registrations default to `concurrent=True`, a 300-second timeout,
+and `replay_policy="manual"`. Configure these with `register_tool` or the decorator.
+Built-in helpers do not automatically mark fetching or other operations replay-safe.
+
+Durable execution uses `manual` to stop for recovery when an interrupted operation's
+outcome is unknown. Select `safe` only when repeating an operation is safe, or
+`idempotent` when the integration actually enforces idempotency. Neither setting
+provides exactly-once external effects on its own.
+
+### Calling a function versus executing an agent tool
+
+`await fetch_url(url)` is an ordinary Python call. It bypasses the registry's
+schema validation, permission manager, timeout, and durable execution records.
+
+`await registry.execute(call, permissions=agent.permissions)` validates the input,
+checks permission, and applies the registered timeout. Without a manager it uses
+the ordinary ALLOW default for unspecified policies; explicit ASK without a
+callback and explicit DENY fail. It does not provide durable replay or the agent's
+complete middleware/event pipeline.
+
+`agent.run(...)`, `agent.run_stream(...)`, and `AgentRuntime` use the shared engine
+for model-requested tools. They apply execution checks before dispatch, with
+persisted approvals and recovery when using a durable runtime. Handler exceptions
+usually become error tool results; runtime/storage errors may fail the run.
+
 
 ---
 
 ## 3. Streaming agents
 
-`StreamingAgent` yields typed events as the model generates, instead of
-returning one final string. It mirrors `Agent`'s constructor.
+`Agent.run_stream()` yields typed events and exposes a final `RunResult`.
+Use its async context manager to close or cancel an abandoned stream.
 
 ```python
 import asyncio
-from datagol_agent_harness import AgentConfig, StreamingAgent, StreamEventType
+from harnessx import AgentConfig, Agent, RunEventType
 
-agent = StreamingAgent(config=AgentConfig(system_prompt="You are helpful."))
+agent = Agent(config=AgentConfig(system_prompt="You are helpful."))
 
 async def main():
-    async for event in agent.run_stream("Tell me a story"):
-        if event.type == StreamEventType.TEXT_DELTA:
-            print(event.data, end="", flush=True)
-        elif event.type == StreamEventType.TOOL_CALL_START:
-            print(f"\n> calling {event.data.name}({event.data.input})")
-        elif event.type == StreamEventType.TOOL_RESULT:
-            if event.data.is_error:
-                print(f"  tool error: {event.data.content}")
-        elif event.type == StreamEventType.TURN_COMPLETE:
-            print()
+    async with agent, agent.run_stream("Tell me a story") as stream:
+        async for event in stream:
+            if event.type == RunEventType.TEXT_DELTA:
+                print(event.data, end="", flush=True)
+            elif event.type == RunEventType.TOOL_CALL_START:
+                print(f"\n> calling {event.data.name}({event.data.input})")
+            elif event.type == RunEventType.TOOL_RESULT:
+                if event.data.is_error:
+                    print(f"  tool error: {event.data.content}")
+            elif event.type == RunEventType.TURN_COMPLETE:
+                print()
 
 asyncio.run(main())
 ```
 
-Event types: `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
+Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
 `TOOL_CALL_COMPLETE`, `TOOL_RESULT`, `THINKING_DELTA`, `TURN_COMPLETE`,
-`ERROR`.
+`ERROR`, `ATTEMPT_RESET`, and `RUN_RESULT`. Durable runs also emit approval and
+recovery events. Text deltas are provisional; discard an interrupted attempt's
+text when `ATTEMPT_RESET` arrives.
 
 Usage stats accumulate on the guardrails engine:
 
@@ -319,64 +614,127 @@ agent.guardrails.usage_summary
 
 ## 4. Multi-agent orchestration
 
-There is no special "multi-agent" class — a sub-agent is just an `Agent`
-wrapped in a tool. The orchestrator's LLM decides when to delegate; the tool
-runs the specialist to completion and returns its text as the tool result.
+Declare specialists when creating an orchestrator. HarnessX handles creating,
+running, and closing the specialist for each task; you do not write or register
+delegation wrappers.
 
 ```python
 import asyncio
-from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
-from datagol_agent_harness.builtin.web import register_web_tools
+from harnessx import Agent, AgentConfig, SubAgent
+from harnessx.builtin.web import fetch_url
 
-
-async def run_research_agent(query: str) -> str:
-    """A specialist with its own prompt, tools, and iteration budget."""
-    researcher = Agent(
+async def main():
+    async with Agent(
         config=AgentConfig(
-            system_prompt="You are a research specialist. Cite sources.",
-            max_iterations=10,
-        )
-    )
-    register_web_tools(researcher.tools)
-    researcher.permissions.set_permission("fetch_url", PermissionLevel.ALLOW)
-    return await researcher.run(query)
-
-
-orchestrator = Agent(
-    config=AgentConfig(
-        system_prompt=(
-            "You manage a team of specialists. Delegate research to "
-            "delegate_research; synthesize results for the user."
+            system_prompt="Delegate research when useful, then synthesize the findings.",
         ),
-        max_iterations=20,
-    )
-)
+        subagents=[
+            SubAgent(
+                name="researcher",
+                description="Read public URLs and summarize their evidence.",
+                config=AgentConfig(
+                    system_prompt="Read the supplied URLs and cite your sources.",
+                    max_iterations=5,
+                ),
+                tools=[fetch_url],
+            ),
+        ],
+    ) as orchestrator:
+        result = await orchestrator.run("Read https://example.com and summarize it.")
+        if result.status != "completed":
+            raise RuntimeError(str(result.error or result.pending))
+        print(result.output)
 
-@orchestrator.tools.register(permission=PermissionLevel.ALLOW)
-async def delegate_research(query: str) -> str:
-    """Delegate a research question to the research specialist.
-
-    Args:
-        query: The research question.
-    """
-    return await run_research_agent(query)
-
-
-print(asyncio.run(orchestrator.run("Compare SQLite and DuckDB for analytics.")))
+asyncio.run(main())
 ```
 
-Patterns that work well:
+### Definition and routing
 
-- **Give each specialist a tight system prompt and a small tool set.** The
-  orchestrator's prompt should list its delegation tools and when to use them.
-- **Cap `max_iterations` per specialist** so a runaway sub-agent can't burn
-  the budget.
-- Sub-agents are created per call (stateless). If a specialist needs
-  continuity, keep one instance and reuse it across calls.
-- Sub-agents can themselves delegate — the pattern composes.
+`SubAgent` is a definition, not a running agent. Required fields:
 
-A full working version with three specialists lives in
-`examples/multi_agent.py` (`python -m examples.multi_agent`).
+- `name`: 1–55 letters, digits, underscores, or hyphens, starting with a letter or underscore.
+- `description`: tells the orchestrator when this specialist is useful.
+- `config`: an explicit `AgentConfig`; its system prompt instructs the specialist.
+
+Optional fields:
+
+- `tools`: the same functions, built-in names, definitions, or registry formats accepted by `Agent`.
+- `skills`: a list of skill paths, loaded separately for each task.
+- `permission`: permission to delegate; omitted means inherit the parent's manager.
+- `timeout_seconds`: whole-task timeout, default 300 seconds, including child model and tool calls.
+
+The SDK exposes `delegate_<name>(task: str)` to the model internally. The schema
+and description tell the orchestrator how to request a specialist. Do not also
+register a tool with that name; collisions and duplicate specialist names fail
+during construction. No separate orchestrator class is necessary.
+
+The model decides whether to delegate. Naming specialists does not force a fixed
+sequence; write workflow code when you need a mandatory sequence. Use
+`examples/multi_agent.py` for research, code review, and scoped file analysis.
+
+### Context, resources, and permissions
+
+Each delegated task gets fresh memory, configuration, and a tool registry. It sees
+only its own prompt and the assigned task. Include the code, question, URLs, paths,
+or other context it needs in the task. The child's model/provider comes from its
+explicit config; it does not inherit the parent's model or injected provider.
+
+Handler functions remain shared application objects: separate conversations do
+not isolate files, databases, closures, or arbitrary Python code. Child-owned
+providers and memory close on completion, failure, and cancellation. Skills may
+add their own tool and prompt catalog; do not also register a `Skill` tool.
+
+The parent's permission manager is shared, including its defaults, name overrides,
+session grants, and approval callback. Generated delegation permission is separate
+from each child tool's permission. Approving delegation does not approve its tools.
+The same tool-name override applies in parent and child. An ordinary manager defaults
+to ALLOW; use explicit permissions or another manager to change that policy.
+
+Parent tools, hooks, middleware, extensions, MCP connections, and sandboxes are not
+automatically copied. The generated call uses the parent's normal tool pipeline;
+the child uses its own ordinary engine. Use the supported manual-wrapper pattern
+for advanced child dependencies and their lifecycle management. It remains useful
+for a specialist with custom tracing extensions or an injected provider.
+
+### Results, streaming, and limits
+
+The child returns its completed output to the orchestrator, which continues and
+synthesizes a response. There is no conversation handoff. Non-completed child
+statuses and child failures become delegation errors; partial output is not
+reported as successful specialist work.
+
+Generated delegation tools are non-concurrent and use manual replay policy. The
+current engine serializes a tool batch containing such a delegation. Both
+`run` and `run_stream` support the same behavior. Streaming reports ordinary
+`tool_call_start`, `tool_call_complete`, and `tool_result` events for delegation;
+child text does not appear as parent answer text.
+
+Each specialist has its own iteration and cost limits. Parent `RunResult.usage`
+and guardrail totals remain parent-only, not a combined team budget. Set child
+limits explicitly. A timeout cancels waiting and closes child resources, but
+cannot reverse external effects or forcibly stop a synchronous tool thread.
+
+### Durable execution boundary
+
+`AgentRuntime` persists the outer delegation as an ordinary manual-replay tool
+call. Committed results are reused on recovery. An interrupted delegation with an
+unknown outcome stops for manual recovery rather than automatically starting a
+new specialist. Live model reruns are not deterministic.
+
+The child uses an ordinary, non-durable run. Child progress, internal approvals,
+intermediate artifacts, and conversations are not independently persisted by the
+parent runtime. A child ASK tool uses the approval callback and fails closed
+without one; it does not create a resumable approval in the parent runtime.
+Treat output referring to child-local artifacts accordingly; durable child-artifact
+transfer is not supplied by this API.
+
+Rebind the same `subagents` definitions when restoring sessions or constructing
+versioned runtime factories, just as you rebind tools. Session snapshots do not
+serialize Python handlers. Keep definition changes under the application's normal
+versioned deployment controls.
+
+Independent child recovery, persistent specialist conversations, nested declarative
+teams, handoffs, and child-token streaming are outside this initial API.
 
 ---
 
@@ -408,7 +766,7 @@ A path can be a folder containing `SKILL.md`, or a markdown file directly.
 ### Loading skills into an agent
 
 ```python
-from datagol_agent_harness import Agent, AgentConfig
+from harnessx import Agent, AgentConfig
 
 agent = Agent(
     config=AgentConfig(
@@ -425,7 +783,7 @@ agent = Agent(
 The `skills=` argument accepts a list of paths or a `SkillManager`:
 
 ```python
-from datagol_agent_harness import SkillManager
+from harnessx import SkillManager
 
 manager = SkillManager.from_paths(["./skills/commit-message"])
 agent = Agent(config=AgentConfig(system_prompt="..."), skills=manager)
@@ -439,7 +797,7 @@ for s in agent.skills.list():
 A `SKILL_INVOKED` hook fires when the model loads a skill:
 
 ```python
-from datagol_agent_harness import HookContext, HookEvent
+from harnessx import HookContext, HookEvent
 
 async def on_skill(ctx: HookContext):
     if ctx.data.get("found"):
@@ -474,7 +832,7 @@ agent.memory.set_messages(saved)   # restore
 to the model through tools you write:
 
 ```python
-from datagol_agent_harness import AgentMemory, PermissionLevel
+from harnessx import AgentMemory, PermissionLevel
 
 memory = AgentMemory(storage_dir=".agent_memory/agent")
 
@@ -503,7 +861,7 @@ async def search_memory(query: str = "") -> str:
 `LongTermMemory` stores categorized facts with ids:
 
 ```python
-from datagol_agent_harness import LongTermMemory
+from harnessx import LongTermMemory
 
 long_term = LongTermMemory(storage_dir=".agent_memory/long_term")
 fact_id = long_term.save("User prefers dark mode", category="preference")
@@ -521,11 +879,17 @@ Tell the agent about these tools in the system prompt and when to use them
 
 ### Permission levels
 
-Every tool has a level: `ALLOW` (run silently), `ASK` (prompt the user
-y/n/always), or `DENY` (never run). The default at registration is `ASK`.
+Tools use `ALLOW` (execute), `ASK` (request approval), or `DENY` (reject).
+Omitting the permission inherits the manager's default, which is `ALLOW`.
+This applies to constructor tools, later registrations, and direct
+`ToolRegistry.execute()` calls without a custom manager. Built-in helpers also inherit the manager default; file writes, shell commands,
+and URL fetching use ALLOW under a default agent. Select ASK explicitly when
+approval is required. Explicit MCP server policies remain in effect.
+Per-tool overrides take precedence over explicit registration permissions and
+the manager default. `DENY` also overrides a previous session grant.
 
 ```python
-from datagol_agent_harness import PermissionLevel
+from harnessx import PermissionLevel
 
 # At registration
 @agent.tools.register(permission=PermissionLevel.ALLOW)
@@ -536,68 +900,98 @@ agent.permissions.set_permission("run_bash", PermissionLevel.ASK)
 agent.permissions.grant_session("read_file")   # pre-approve for this session
 ```
 
-`ASK` prompts on stdin in terminal apps. In a server context, register tools
-as `ALLOW` (or build your own `PermissionManager` subclass that asks over
-your transport).
+Direct execution handles `ASK` through a sync or async callback. Without a
+callback it denies the call; the SDK never implicitly reads stdin.
+
+```python
+from harnessx import Agent, PermissionLevel, PermissionManager, ToolCall, ToolDefinition
+
+async def approve(call: ToolCall, definition: ToolDefinition) -> bool:
+    return await approval_ui.request(call.name, call.input)
+
+agent = Agent(permissions=PermissionManager(
+    default_level=PermissionLevel.ASK,
+    approval_callback=approve,
+))
+```
+
+Setting `default_level=PermissionLevel.ASK` requests approval for tools without
+an explicit permission. Supplying only `approval_callback` leaves the default
+at `ALLOW`; the callback handles tools explicitly configured as `ASK`.
+
+Terminal apps can explicitly use `Agent(permissions=CliPermissionManager())`
+with `CliPermissionManager` imported from `harnessx`; this opt-in manager defaults
+to `ASK`. Durable runtimes persist
+approval requests; use `runtime.approve(...)` and `runtime.resume(...)`.
 
 ### Guardrails
 
 ```python
-from datagol_agent_harness import GuardrailsEngine, MaxIterationsError, CostLimitError
+from harnessx import Agent, AgentConfig
 
-agent.guardrails.max_cost_dollars = 0.50   # raises CostLimitError past this
-agent.guardrails.usage_summary             # tokens + estimated cost so far
-agent.guardrails.reset()                   # reset counters
+agent = Agent(config=AgentConfig(
+    max_iterations=20,
+    max_context_tokens=100_000,
+    max_cost_dollars=0.50,
+    input_cost_per_m=3.00,   # application-supplied prices, not a live price lookup
+    output_cost_per_m=15.00,
+))
+agent.guardrails.usage_summary
 ```
 
-`max_iterations` comes from `AgentConfig` and raises `MaxIterationsError`.
+Limits are validated at construction. A reached guardrail returns a failed
+`RunResult` with error details. `max_iterations=0` means unlimited.
 
 ---
 
-## 8. Hooks and middleware
+## 8. Middleware, hooks, and extensions
 
-### Hooks — observe the lifecycle
+| Interface | Use it for |
+| --- | --- |
+| Middleware | Transform model requests/responses or tool calls/results |
+| Hooks | Observe lifecycle events for logging or diagnostics |
+| Extensions | Package middleware, hooks, tools, configuration, state, and cleanup |
 
-```python
-from datagol_agent_harness import HookContext, HookEvent
-
-@agent.hooks.before_tool
-async def log_call(ctx: HookContext):
-    tc = ctx.data["tool_call"]
-    print(f"-> {tc.name}({tc.input})")
-
-@agent.hooks.after_tool
-async def log_result(ctx: HookContext):
-    result = ctx.data["result"]
-    if result.is_error:
-        print(f"tool failed: {result.content}")
-
-agent.hooks.on(HookEvent.LLM_RESPONSE, lambda ctx: print(ctx.data["stop_reason"]))
-```
-
-Events: `AGENT_START`, `AGENT_END`, `LOOP_ITERATION_START`,
-`LOOP_ITERATION_END`, `LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_CALL_START`,
-`TOOL_CALL_END`, `SKILL_INVOKED`, `SANDBOX_EXEC`, `CHECKPOINT`, `ERROR`.
-
-### Middleware — transform requests and results
-
-Subclass `Middleware` to mutate messages, tool calls, or results as they flow:
+An extension can install middleware with `ctx.add_middleware(...)`. Use standalone
+middleware for one focused transformation; use an extension to reuse a complete
+feature or manage its resources and saved state.
 
 ```python
-from datagol_agent_harness import Middleware
+from dataclasses import replace
+from harnessx import Agent, Extension, ExtensionContext, Middleware, ToolCall
 
-class RedactSecrets(Middleware):
-    async def before_tool_execution(self, tool_call):
-        if "api_key" in str(tool_call.input):
-            tool_call.input = {k: ("***" if "key" in k else v)
-                               for k, v in tool_call.input.items()}
-        return tool_call
+class NormalizeSearch(Middleware):
+    async def before_tool_execution(self, call: ToolCall) -> ToolCall:
+        query = call.input.get("query")
+        if call.name == "search" and isinstance(query, str):
+            return replace(call, input={**call.input, "query": query.strip()})
+        return call
 
-agent.middleware.add(RedactSecrets())
+class SearchNormalization(Extension):
+    name = "search_normalization"
+
+    def install(self, ctx: ExtensionContext) -> None:
+        ctx.add_middleware(NormalizeSearch())
+
+agent = Agent(extensions=[SearchNormalization()])
+# Register your search tool separately, then run inside `async with agent:`.
 ```
 
-Overridable stages: `before_llm_call`, `after_llm_call`,
-`before_tool_execution`, `after_tool_execution`.
+Read the detailed guides:
+
+- [Middleware and hooks](https://github.com/datagol/harness-x/blob/main/doc/middleware.md): all four stages, ordering, complete
+  examples, streaming behavior, errors, retries, and observation boundaries.
+- [Extensions](https://github.com/datagol/harness-x/blob/main/doc/extensions.md): when to use an extension, composing middleware
+  with tools and hooks, lifecycle callbacks, ownership, persistence, and built-ins.
+
+Hook data is event specific. `LLM_REQUEST` carries `message_count`,
+`tool_count`, and `prefix_key`, the prompt-cache key for that request (`None`
+when caching is disabled). `AGENT_END` carries the final `RunResult`.
+
+Mandatory permissions and effect checks belong in the execution path. Hook
+failures are suppressed, and terminal extension observers are best effort.
+Result middleware can change what the model receives without erasing raw data
+already retained by durable execution or recording.
 
 ---
 
@@ -608,7 +1002,7 @@ remote SSE) and registers their tools into your agent's registry, so MCP
 tools look exactly like native tools to the model.
 
 ```python
-from datagol_agent_harness import Agent, AgentConfig, MCPManager
+from harnessx import Agent, AgentConfig, MCPManager
 
 mcp = MCPManager()
 await mcp.connect(
@@ -622,7 +1016,7 @@ await mcp.connect(
 agent = Agent(config=AgentConfig(system_prompt="..."), mcp=mcp)
 mcp.register_tools(agent.tools)
 
-print(await agent.run("What's in /tmp?"))
+print((await agent.run("What's in /tmp?")).output)
 await mcp.disconnect_all()
 ```
 
@@ -638,40 +1032,82 @@ Save and restore an agent's conversation:
 session_id = await agent.save_session()            # -> writes .agent_sessions/
 
 # later, or in another process:
-from datagol_agent_harness import Agent
-restored = await Agent.load_session(session_id, config=AgentConfig(system_prompt="..."))
-await restored.run("Where were we?")
+from harnessx import Agent
+async with await Agent.load_session(session_id) as restored:
+    print((await restored.run("Where were we?")).output)
 ```
 
+Snapshots include configuration, messages, usage, metadata, extension state, and
+copied spill artifacts. Supply the same extension names on load; an explicitly
+supplied configuration must match the snapshot. Saving is atomic and rejects
+unsupported values instead of stringifying them. Saved artifacts survive agent
+closure until `PersistentMemory(directory).delete_session(session_id)`.
+
 For managed multi-session services (checkpointing, pause/resume, expiry),
-see `AgentRuntime` in `datagol_agent_harness/runtime.py`.
+see [durable runtimes and the 0.3 migration guide](https://github.com/datagol/harness-x/blob/main/doc/durable_runtime.md).
+
+The default backend is SQLite. PostgreSQL automatically provisions its schema from
+a connection string; Temporal adds distributed workflow recovery and Redis events.
+For PostgreSQL, pass your configured agent directly:
+`runtime = AgentRuntime(agent, backend=backend)`. In a replacement process,
+construct a fresh compatible `Agent` and call `await runtime.resume(session_id)`.
+No agent registry is needed for this pattern. `AgentRef` and `AgentRegistry` remain
+available for named definitions and Temporal workers.
+
+Try the [PostgreSQL crash-and-resume walkthrough](https://github.com/datagol/harness-x/blob/main/doc/postgres_durability.md): write
+a report, let the process exit abruptly, and finish the same run in another process
+with the tool invocation count still at one. It uses scripted model responses,
+so only PostgreSQL and the `postgres` extra are required, not a model API key.
+Connection details can come from `DATABASE_URL` or `--config
+examples/postgres.config.json`; the [config template](https://github.com/datagol/harness-x/blob/main/examples/postgres.config.example.json)
+supports automatic password URL encoding. Use the `check` command to connect and
+prepare the runtime schema before starting a run.
+
+For incident debugging, opt in with `AgentRuntime(..., recording=True)`. The
+[flight recorder](https://github.com/datagol/harness-x/blob/main/doc/flight_recorder.md) preserves model/tool attempt boundaries,
+exports portable incident bundles, and verifies/plays them back offline. Export
+payloads and artifacts are opt-in. SQLite is locally tested; PostgreSQL requires
+service qualification, and Temporal recording is not implemented. Try
+`python -m examples.flight_recorder --output /tmp/invoice-incident.hx` without an API key.
 
 ---
 
 ## 11. Shipping a web app
 
-The harness is transport-agnostic. The reference implementation in
+The harness is transport-agnostic. The trusted local, single-conversation example in
 `examples/web_app` demonstrates:
 
 1. **Streaming agent execution** translated to Server-Sent Events (SSE) or WebSockets:
 
 ```python
+import asyncio
+import json
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from datagol_agent_harness import AgentConfig, StreamingAgent, StreamEventType
-import json
+from harnessx import Agent, RunEventType
 
-app = FastAPI()
-agent = StreamingAgent(config=AgentConfig(system_prompt="You are helpful."))
+@asynccontextmanager
+async def lifespan(app):
+    async with Agent() as agent:
+        app.state.agent = agent
+        app.state.lock = asyncio.Lock()  # One shared conversation in this demo.
+        yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/api/stream")
 async def stream(req: dict):
     async def event_generator():
-        async for event in agent.run_stream(req["message"]):
-            if event.type == StreamEventType.TEXT_DELTA:
-                yield f"data: {json.dumps({'type': 'text_delta', 'content': event.data})}\n\n"
-            elif event.type == StreamEventType.TOOL_CALL_START:
-                yield f"data: {json.dumps({'type': 'tool_call', 'name': event.data.name})}\n\n"
+        async with app.state.lock:
+            async with app.state.agent.run_stream(req["message"]) as events:
+                async for event in events:
+                    if event.type == RunEventType.TEXT_DELTA:
+                        yield f"data: {json.dumps({'type': 'text_delta', 'content': event.data})}\n\n"
+                    elif event.type == RunEventType.ATTEMPT_RESET:
+                        yield 'data: {"type": "attempt_reset"}\n\n'
+                    elif event.type == RunEventType.ERROR:
+                        yield f"data: {json.dumps({'type': 'error', 'content': str(event.data)})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -683,7 +1119,7 @@ async def stream(req: dict):
 Run the full example from the repo root:
 
 ```bash
-uvicorn examples.web_app.server:app --port 8000 --reload
+uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000 --reload
 # open http://localhost:8000
 ```
 
@@ -694,13 +1130,16 @@ uvicorn examples.web_app.server:app --port 8000 --reload
 The harness includes first-class evaluation capabilities powered by the
 **LangSmith evaluation framework** (`evaluate` / `aevaluate`). You can benchmark
 tool selection, skill routing, multi-agent delegation, and guardrails either
-locally (offline, zero-cost) or in the LangSmith Web UI.
+locally without uploading results or in the LangSmith Web UI. Local evaluation
+still invokes the supplied agent and may incur model/tool costs. The scripted
+`python -m examples.run_evals --offline` example needs no model API key.
 
 ### Running an evaluation
 
 ```python
-from datagol_agent_harness import Agent, AgentConfig, PermissionLevel
-from datagol_agent_harness.evals import (
+from harnessx import Agent, AgentConfig, PermissionLevel
+from examples._calculator import calculate  # Shared helper when running from a checkout.
+from harnessx.evals import (
     build_example,
     default_evaluators,
     evaluate_agent,
@@ -711,9 +1150,7 @@ from datagol_agent_harness.evals import (
 # 1. Define your agent factory or instance
 def make_agent(inputs):
     agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"))
-    @agent.tools.register(permission=PermissionLevel.ALLOW)
-    def calculate(expression: str) -> str:
-        return str(eval(expression, {"__builtins__": None}, {}))
+    agent.tools.register_tool(calculate, permission=PermissionLevel.ALLOW, replay_policy="safe")
     return agent
 
 # 2. Define test cases or use built-in suites ("tool_calling", "skills", "all")
@@ -728,13 +1165,13 @@ dataset = [
     )
 ]
 
-# 3. Evaluate (offline for fast CI/CD tests, or live to sync to LangSmith)
+# 3. Evaluate against the live model, keeping results local.
 summary = evaluate_agent(
     agent=make_agent,
     dataset=dataset,
     evaluators=[tool_selection_evaluator, contains_evaluator],
     experiment_prefix="math-agent-benchmark",
-    offline=True,   # set False or omit when LANGSMITH_API_KEY is present
+    offline=True,   # Disables LangSmith upload; the agent still calls its model.
 )
 
 print(f"Pass rate: {summary.pass_rate * 100:.1f}%")
@@ -743,15 +1180,18 @@ print(f"Pass rate: {summary.pass_rate * 100:.1f}%")
 ### Running evals from the CLI
 
 ```bash
-# Run tool calling benchmarks offline (no API keys required)
-python -m datagol_agent_harness.evals.cli --suite tool_calling --offline
+# Scripted integration demonstration (langsmith extra, no API keys required)
+python -m examples.run_evals --offline
+
+# Run live model benchmarks without upload (model API key required)
+python -m harnessx.evals.cli --suite tool_calling --offline
 
 # Run against Anthropic and upload results + traces to LangSmith
 export LANGSMITH_API_KEY="lsv2_pt_..."
-python -m datagol_agent_harness.evals.cli --suite skills --model claude-sonnet-4-6 --upload
+python -m harnessx.evals.cli --suite skills --model claude-sonnet-4-6 --upload
 
 # Run all benchmark suites with concurrency
-python -m datagol_agent_harness.evals.cli --suite all --concurrency 2
+python -m harnessx.evals.cli --suite all --concurrency 2
 ```
 
 When uploaded, the CLI prints a clickable LangSmith URL to inspect row-level scores,
@@ -763,39 +1203,51 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 
 | Class / function | Module | Purpose |
 |---|---|---|
-| `Agent` | `datagol_agent_harness` | Core agentic loop (`await agent.run(msg)`) |
-| `StreamingAgent` | `datagol_agent_harness` | Event-streaming variant (`run_stream`) |
-| `AgentConfig` | `datagol_agent_harness` | Model, provider, limits, prompt |
-| `ToolRegistry` | `datagol_agent_harness` | `register`, `register_with_schema`, `execute` |
-| `PermissionLevel` | `datagol_agent_harness` | `ALLOW` / `ASK` / `DENY` |
-| `PermissionManager` | `datagol_agent_harness` | Per-tool overrides, session grants |
-| `GuardrailsEngine` | `datagol_agent_harness` | Iteration/cost limits, usage stats |
-| `ConversationMemory` | `datagol_agent_harness` | Message list with auto-trimming |
-| `AgentMemory` / `LongTermMemory` | `datagol_agent_harness` | Disk-backed notes / facts |
-| `PersistentMemory` | `datagol_agent_harness` | Session save/load |
-| `HookManager` / `HookEvent` | `datagol_agent_harness` | Lifecycle hooks |
-| `Middleware` / `MiddlewarePipeline` | `datagol_agent_harness` | Request/result transforms |
-| `SkillManager` | `datagol_agent_harness` | Lazy skill loading |
-| `MCPManager` | `datagol_agent_harness` | MCP server connections |
-| `Sandbox` | `datagol_agent_harness` | Sandboxed code execution |
-| `AgentRuntime` | `datagol_agent_harness` | Managed sessions, checkpoints |
-| `Extension` / `LangSmithExtension` | `datagol_agent_harness` | Pluggable runtime extensions / LangSmith tracing |
-| `evaluate_agent` | `datagol_agent_harness.evals` | LangSmith evaluation runner |
-| `AgentTarget` | `datagol_agent_harness.evals` | Target adapter with telemetry & trace linking |
-| `default_evaluators` | `datagol_agent_harness.evals` | Standard suite of evaluators |
-| `register_all_tools` | `datagol_agent_harness.builtin` | Filesystem, bash, web, memory tools |
+| `Agent` | `harnessx` | Core agentic loop (`await agent.run(msg)`) |
+| `RunResult` / `RunStream` | `harnessx` | Structured completion and streaming APIs |
+| `AgentConfig` | `harnessx` | Model, provider, limits, prompt, retry, prompt caching |
+| `PromptCachePolicy` / `PromptCacheHint` | `harnessx` | Prompt-cache policy on the config; the per-request hint providers receive |
+| `ToolRegistry` | `harnessx` | `register`, `register_with_schema`, `execute` |
+| `SubAgent` | `harnessx` | Declare isolated specialists with `Agent(subagents=[...])` |
+| `PermissionLevel` | `harnessx` | `ALLOW` / `ASK` / `DENY` |
+| `PermissionManager` | `harnessx` | Per-tool overrides, session grants |
+| `CliPermissionManager` | `harnessx` | Explicit terminal approval prompts |
+| `Message` / `ContentBlock` | `harnessx` | Validated conversation representation |
+| `GuardrailsEngine` | `harnessx` | Iteration/cost limits, usage stats |
+| `ConversationMemory` | `harnessx` | Message list with auto-trimming |
+| `AgentMemory` / `LongTermMemory` | `harnessx` | Disk-backed notes / facts |
+| `PersistentMemory` | `harnessx` | Session save/load |
+| `HookManager` / `HookEvent` | `harnessx` | Lifecycle hooks |
+| `Middleware` / `MiddlewarePipeline` | `harnessx` | Request/result transforms |
+| `SkillManager` | `harnessx` | Lazy skill loading |
+| `MCPManager` | `harnessx` | MCP server connections |
+| `Sandbox` | `harnessx` | Sandboxed code execution |
+| `AgentRuntime` | `harnessx` | Managed sessions, checkpoints |
+| `IncidentRecorder` / `ExportPolicy` | `harnessx` | Offline incident playback, verification, and export disclosure |
+| `Extension` / `LangSmithExtension` | `harnessx` | Pluggable runtime extensions / LangSmith tracing |
+| `evaluate_agent` | `harnessx.evals` | LangSmith evaluation runner |
+| `AgentTarget` | `harnessx.evals` | Target adapter with telemetry & trace linking |
+| `default_evaluators` | `harnessx.evals` | Standard suite of evaluators |
+| `register_all_tools` | `harnessx.builtin` | Filesystem, bash, web, memory tools |
 
 ## Runnable examples
+
+Prerequisites and local verification coverage are listed in [examples/README.md](https://github.com/datagol/harness-x/blob/main/examples/README.md).
 
 | Example | Shows |
 |---|---|
 | `python -m examples.simple_chat` | Streaming interactive chat + basic tools |
 | `python -m examples.multi_agent` | Orchestrator + specialist agents |
 | `python -m examples.langsmith_tracing` | LangSmith lifecycle tracing + multi-agent nesting |
-| `python -m examples.run_evals` | Agent evaluation suite with LangSmith |
+| `python -m examples.run_evals --offline` | Scripted evaluations with no live model or uploads |
 | `python -m examples.skills_agent` | Lazy skill loading |
+| `python -m examples.skills_demo` | Scripted skill loading without API keys |
 | `python -m examples.memory_agent` | Two-layer persistent memory |
-| `python -m examples.mcp_agent` | MCP tool integration |
+| `python -m examples.mcp_agent --help` | MCP connection options and tool integration |
 | `python -m examples.coding_agent` | Full coding assistant |
-| `python -m examples.sandboxed_coder` | Sandboxed execution |
-| `uvicorn examples.web_app.server:app --port 8000` | Web app with streaming UI, MCP, and skills |
+| `python -m examples.sandboxed_coder` | Process resource limits and temporary workspace |
+| `python -m examples.runtime_approvals` | SQLite approval/resume with a scripted model |
+| `python -m examples.postgres_runtime` | PostgreSQL runtime with a live model |
+| `python -m examples.postgres_runtime crash` / `status` / `resume` | PostgreSQL process-crash recovery with a scripted model |
+| `python -m examples.flight_recorder --output incident.hx` | Portable recording, verification, and offline playback |
+| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Trusted local web demo with streaming UI, MCP, and skills |
