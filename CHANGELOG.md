@@ -53,5 +53,5 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[0.3.0]: https://github.com/datagol/harness-x/compare/c382675...v0.3.0
+[0.3.0]: https://github.com/datagol/agent-harness-x/compare/c382675...v0.3.0
 [0.2.1]: https://pypi.org/project/datagol-agent-harness/0.2.1/

@@ -6,7 +6,7 @@
 
 **A provider-agnostic, library-first Python toolkit for building production-grade LLM agents.**
 
-Try [harness-web](https://github.com/datagol/harness-x/blob/main/harness-web/README.md) to launch all examples from a browser,
+Try [harness-web](https://github.com/datagol/agent-harness-x/blob/main/harness-web/README.md) to launch all examples from a browser,
 review approvals and live output, or use a separate general chat workspace.
 
 Rather than locking developers into rigid state-machine graphs or opaque persona prompts, `harnessx` gives you a composable set of building blocks: real-time streaming, typed tool registration with schema inference, lazy-loaded skills, multi-agent delegation, 4-tier memory, sandboxed code execution, Model Context Protocol (MCP) tool bridges, native LangSmith tracing, and evaluation suites.
@@ -45,7 +45,7 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 
 The distribution and Python import are both named `harnessx`:
 `from harnessx import Agent`. Upgrading from `datagol-agent-harness`? Update the import
-to `harnessx` (there is no compatibility alias) and see the [changelog](https://github.com/datagol/harness-x/blob/main/CHANGELOG.md).
+to `harnessx` (there is no compatibility alias) and see the [changelog](https://github.com/datagol/agent-harness-x/blob/main/CHANGELOG.md).
 
 ```bash
 # From PyPI
@@ -76,14 +76,14 @@ Run examples as modules from the repo root (not as plain scripts):
 python -m examples.simple_chat
 ```
 
-See the [examples guide](https://github.com/datagol/harness-x/blob/main/examples/README.md) for every entry point, optional
+See the [examples guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md) for every entry point, optional
 dependencies, and service requirements. For a first run without API keys, use
 `python -m examples.skills_demo` or `python -m examples.flight_recorder --output incident.hx`.
 
 `Agent()` and `examples.simple_chat` use Anthropic by default. To choose Anthropic,
-OpenAI, Gemini, or OpenRouter, use [provider chat](https://github.com/datagol/harness-x/blob/main/examples/provider_chat.py):
+OpenAI, Gemini, or OpenRouter, use [provider chat](https://github.com/datagol/agent-harness-x/blob/main/examples/provider_chat.py):
 `python -m examples.provider_chat --provider openai --model YOUR_MODEL_ID`.
-See the [provider setup guide](https://github.com/datagol/harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
+See the [provider setup guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
 optional dependencies, and streaming options.
 
 The standalone [decision SDK](https://harnessx-site.vercel.app/docs/decisions/) provides typed Jev assessments
@@ -1058,7 +1058,7 @@ a report, let the process exit abruptly, and finish the same run in another proc
 with the tool invocation count still at one. It uses scripted model responses,
 so only PostgreSQL and the `postgres` extra are required, not a model API key.
 Connection details can come from `DATABASE_URL` or `--config
-examples/postgres.config.json`; the [config template](https://github.com/datagol/harness-x/blob/main/examples/postgres.config.example.json)
+examples/postgres.config.json`; the [config template](https://github.com/datagol/agent-harness-x/blob/main/examples/postgres.config.example.json)
 supports automatic password URL encoding. Use the `check` command to connect and
 prepare the runtime schema before starting a run.
 
@@ -1231,7 +1231,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 
 ## Runnable examples
 
-Prerequisites and local verification coverage are listed in [examples/README.md](https://github.com/datagol/harness-x/blob/main/examples/README.md).
+Prerequisites and local verification coverage are listed in [examples/README.md](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md).
 
 | Example | Shows |
 |---|---|

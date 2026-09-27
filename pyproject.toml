@@ -67,10 +67,10 @@ all = ["harnessx[jev,postgres,temporal,langsmith,openai,azure,gemini,mcp,docker,
 harnessx-evals = "harnessx.evals.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/datagol/harness-x"
-Repository = "https://github.com/datagol/harness-x"
-Issues = "https://github.com/datagol/harness-x/issues"
-Documentation = "https://github.com/datagol/harness-x#readme"
+Homepage = "https://github.com/datagol/agent-harness-x"
+Repository = "https://github.com/datagol/agent-harness-x"
+Issues = "https://github.com/datagol/agent-harness-x/issues"
+Documentation = "https://github.com/datagol/agent-harness-x#readme"
 
 [tool.setuptools.packages.find]
 include = ["harnessx*"]
