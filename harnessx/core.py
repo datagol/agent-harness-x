@@ -63,7 +63,7 @@ class Agent:
         if client is not None and config is not None and config.provider != "anthropic":
             raise ValueError("The legacy client argument requires the anthropic provider")
         provider_name = getattr(provider, "name", "")
-        if provider_name in ("anthropic", "openai", "gemini", "openrouter"):
+        if provider_name in ("anthropic", "openai", "gemini", "openrouter", "azure"):
             if config is None and provider_name != "anthropic":
                 raise ValueError("An injected non-Anthropic provider requires AgentConfig with its provider and model")
             if config is not None and config.provider != provider_name:

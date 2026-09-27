@@ -21,6 +21,7 @@ from .execution import (
 )
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
+from .providers.retry import call_with_retry, stream_with_retry
 from .types import PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult
 from ._journal import RecordingError, record as journal_record
 
@@ -184,9 +185,18 @@ async def command(agent, state, name, emit, *, record=None):
             for m in agent.middleware._middleware
         )
         response = None
+        retry = dict(
+            attempts=agent.config.llm_max_attempts,
+            backoff_seconds=agent.config.llm_retry_backoff_seconds,
+        )
+        provider_label = getattr(agent.provider, "name", "") or "provider"
         async with asyncio.timeout(agent.config.model_timeout_seconds):
             if state.get("stream", False):
-                async for chunk in agent.provider.stream(**request):
+                async for chunk in stream_with_retry(
+                    lambda: agent.provider.stream(**request),
+                    description=f"{provider_label} stream",
+                    **retry,
+                ):
                     if chunk.kind == "response":
                         response = chunk.data
                     elif not buffered and chunk.kind in (
@@ -199,7 +209,11 @@ async def command(agent, state, name, emit, *, record=None):
                         "Provider stream ended without a completed response"
                     )
             else:
-                response = await agent.provider.create(**request)
+                response = await call_with_retry(
+                    lambda: agent.provider.create(**request),
+                    description=f"{provider_label} create",
+                    **retry,
+                )
         if record:
             # Copy before middleware can mutate the same ProviderResponse in place.
             await record("model.response", response_payload(response))

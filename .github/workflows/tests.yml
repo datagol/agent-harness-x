@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        extras: ['', '[jev]', '[all]', '[openai,gemini,langsmith,mcp]', '[jev,postgres,temporal,docker]']
+        extras: ['', '[jev]', '[all]', '[openai,azure,gemini,langsmith,mcp]', '[jev,postgres,temporal,docker]']
     env:
       HARNESS_SMOKE_EXTRAS: ${{ matrix.extras }}
     steps:
@@ -77,6 +77,7 @@ jobs:
                   raise AssertionError('Jev must remain an optional dependency')
           if 'openai' in extras or extras == '[all]':
               import openai, google.genai, langsmith, mcp
+              from harnessx.providers import AzureOpenAIProvider
           if 'postgres' in extras or extras == '[all]':
               import psycopg, psycopg_pool, temporalio, redis, docker
           PY

@@ -4,6 +4,7 @@ import pytest
 
 from harnessx import (
     Agent,
+    AgentConfig,
     AgentRegistry,
     AgentRuntime,
     SQLiteBackend,
@@ -489,7 +490,8 @@ async def test_fresh_created_run_is_discoverable_before_first_snapshot(tmp_path)
 @pytest.mark.asyncio
 async def test_retry_model_marks_usage_incomplete():
     provider = Provider([ConnectionError("interrupted"), ProviderResponse(text="done")])
-    agent = Agent(provider=provider)
+    # Provider-level retry would absorb the failure; this test covers the runtime layer.
+    agent = Agent(config=AgentConfig(llm_max_attempts=1), provider=provider)
     async with agent.run_stream("go") as stream:
         events = [e async for e in stream]
         result = await stream.result()

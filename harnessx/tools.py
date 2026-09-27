@@ -169,8 +169,42 @@ class ToolNotFoundError(Exception):
 class ToolRegistry:
     """Registry for tools. Handles registration, schema generation, and execution."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        default_timeout_seconds: float | None = None,
+        dedupe_calls: bool = False,
+    ) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        # Applied to any tool that does not set its own timeout_seconds.
+        self._default_timeout_seconds = default_timeout_seconds
+        # When on, an identical repeated call (same name AND same arguments)
+        # returns the first result instead of running again. A model that
+        # re-emits a call would otherwise do the work twice - two identical
+        # side effects and double the cost. Off by default: a caller whose
+        # tools are meant to be called repeatedly with the same arguments
+        # must opt in, not be surprised.
+        self._dedupe_calls = dedupe_calls
+        self._call_results: dict[str, ToolResult] = {}
+
+    def _resolve_timeout(self, timeout_seconds: float | None) -> float:
+        """A tool's own timeout, else the registry default, else 300 seconds."""
+        if timeout_seconds is not None:
+            return timeout_seconds
+        if self._default_timeout_seconds is not None:
+            return self._default_timeout_seconds
+        return 300.0
+
+    def reset_call_cache(self) -> None:
+        """Forget deduped results. Call between turns; results are per-turn."""
+        self._call_results.clear()
+
+    @staticmethod
+    def _call_key(tool_call: ToolCall) -> str | None:
+        try:
+            return f"{tool_call.name}:{json.dumps(tool_call.input, sort_keys=True, default=str)}"
+        except Exception:
+            return None  # unserialisable arguments: never dedupe
 
     def _store(self, definition: ToolDefinition, *, replace: bool = False) -> ToolDefinition:
         if definition.name in self._tools and not replace:
@@ -188,7 +222,7 @@ class ToolRegistry:
         permission: PermissionLevel | None = None,
         concurrent: bool = True,
         replay_policy: str = "manual",
-        timeout_seconds: float = 300.0,
+        timeout_seconds: float | None = None,
         replace: bool = False,
     ) -> Callable:
         """Decorator to register a function as a tool.
@@ -198,6 +232,7 @@ class ToolRegistry:
 
         if replay_policy not in ("safe", "idempotent", "manual"):
             raise ValueError("Invalid tool replay policy")
+        timeout_seconds = self._resolve_timeout(timeout_seconds)
         if timeout_seconds <= 0:
             raise ValueError("Tool timeout must be positive")
 
@@ -248,7 +283,7 @@ class ToolRegistry:
             permission=permission,
             concurrent=True if concurrent is None else concurrent,
             replay_policy="manual" if replay_policy is None else replay_policy,
-            timeout_seconds=300.0 if timeout_seconds is None else timeout_seconds,
+            timeout_seconds=timeout_seconds,
             replace=replace,
         )
         decorator(tool)
@@ -263,7 +298,7 @@ class ToolRegistry:
         permission: PermissionLevel | None = None,
         concurrent: bool = True,
         replay_policy: str = "manual",
-        timeout_seconds: float = 300.0,
+        timeout_seconds: float | None = None,
         *,
         replace: bool = False,
     ) -> ToolDefinition:
@@ -276,7 +311,7 @@ class ToolRegistry:
             permission_level=permission,
             concurrent=concurrent,
             replay_policy=replay_policy,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=self._resolve_timeout(timeout_seconds),
         ), replace=replace)
 
     def load_builtin(
@@ -398,13 +433,33 @@ class ToolRegistry:
             allowed = await policy.check_permission(call, definition)
             if not allowed:
                 return ToolResult(call.id, "Permission denied or approval required", True)
-            async with asyncio.timeout(definition.timeout_seconds):
-                return await self._dispatch(call, definition)
+            try:
+                async with asyncio.timeout(definition.timeout_seconds):
+                    return await self._dispatch(call, definition)
+            except TimeoutError:
+                # The model needs to know this tool is unavailable so it can
+                # move on; a turn that hangs on one slow tool helps nobody.
+                return ToolResult(
+                    call.id,
+                    f"TimeoutError: Tool '{call.name}' timed out after {definition.timeout_seconds}s.",
+                    True,
+                )
         except Exception as exc:
             return ToolResult(call.id, f"{type(exc).__name__}: {exc}", True)
 
     async def _dispatch(self, tool_call: ToolCall, definition: ToolDefinition | None = None) -> ToolResult:
         """Internal dispatch after the caller has enforced approval and timeout."""
+        cache_key = self._call_key(tool_call) if self._dedupe_calls else None
+        if cache_key is not None and cache_key in self._call_results:
+            cached = self._call_results[cache_key]
+            # Same result, this call's own id.
+            return replace_definition(cached, tool_call_id=tool_call.id, tool_use_id=tool_call.id)
+        outcome = await self._run_handler(tool_call, definition)
+        if cache_key is not None:
+            self._call_results[cache_key] = outcome
+        return outcome
+
+    async def _run_handler(self, tool_call: ToolCall, definition: ToolDefinition | None) -> ToolResult:
         try:
             tool_def = definition or self.get_tool(tool_call.name)
             if not isinstance(tool_call.input, dict):
@@ -413,14 +468,15 @@ class ToolRegistry:
             handler = tool_def.handler
             args = tool_call.input
             if inspect.iscoroutinefunction(handler):
-                result = await handler(**args)
+                call = handler(**args)
             else:
                 loop = asyncio.get_running_loop()
                 import contextvars
                 context = contextvars.copy_context()
-                result = await loop.run_in_executor(None, lambda: context.run(handler, **args))
-                if inspect.isawaitable(result):
-                    result = await result
+                call = loop.run_in_executor(None, lambda: context.run(handler, **args))
+            result = await call
+            if inspect.isawaitable(result):
+                result = await result
 
             if isinstance(result, ToolResult):
                 return replace_definition(result, tool_call_id=tool_call.id, tool_use_id=tool_call.id)

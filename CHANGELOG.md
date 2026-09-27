@@ -20,6 +20,17 @@ never published; this release supersedes it.
 
 ### Added
 
+- Azure OpenAI provider (`provider="azure"`, new `azure` extra) with deployment
+  routing and token-based auth passthrough.
+- Retry for transient provider failures (429, 5xx, timeouts), on by default via
+  `AgentConfig.llm_max_attempts` and `llm_retry_backoff_seconds`. Streams are
+  only retried before their first chunk.
+- `TokenUsage.thinking_tokens` carries reasoning tokens reported by Gemini and
+  OpenAI.
+- Per-tool timeouts with a `ToolRegistry(default_timeout_seconds=...)` fallback,
+  and opt-in `ToolRegistry(dedupe_calls=True)` so an identical repeated call
+  returns the first result.
+- Opt-in explicit prompt caching for the Gemini provider.
 - Durable runtime (`AgentRuntime`, `RunHandle`) with SQLite, PostgreSQL, and
   Temporal backends, S3 artifact storage, and run recovery.
 - Flight recorder: incident export, offline playback, and integrity verification.

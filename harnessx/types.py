@@ -106,6 +106,12 @@ class TokenUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Reasoning/thinking tokens, where the provider reports them separately
+    # (Gemini's thoughts_token_count, OpenAI's reasoning_tokens). They are
+    # billed at the OUTPUT rate, so anything estimating cost from
+    # input+output alone under-reports by the most expensive component.
+    # 0 when the provider does not report them.
+    thinking_tokens: int = 0
 
 
 @dataclass(init=False)
@@ -211,12 +217,17 @@ class AgentConfig:
     """All configuration for an Agent, with sensible defaults."""
 
     model: str = "claude-sonnet-4-6"
-    provider: str = "anthropic"  # 'anthropic', 'openai', 'gemini', or 'openrouter'
+    provider: str = "anthropic"  # 'anthropic', 'openai', 'gemini', 'openrouter', or 'azure'
     max_tokens: int = 8192
     max_iterations: int = 50
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
     model_timeout_seconds: float = 300.0
+    # Retry transient provider failures (429, 5xx, timeouts). 1 disables it.
+    # A streaming call is only retried before its first chunk, since after
+    # that a retry would duplicate output the caller has already seen.
+    llm_max_attempts: int = 2
+    llm_retry_backoff_seconds: float = 0.5
     max_result_chars: int = 12_000  # eviction threshold for tool results (~3K tokens)
     max_context_tokens: int = 150_000
     max_cost_dollars: float | None = None
@@ -224,7 +235,7 @@ class AgentConfig:
     output_cost_per_m: float | None = None
 
     def __post_init__(self) -> None:
-        if self.provider not in ("anthropic", "openai", "gemini", "openrouter"):
+        if self.provider not in ("anthropic", "openai", "gemini", "openrouter", "azure"):
             raise ValueError(f"Unknown provider: {self.provider!r}")
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("model must be a nonempty string")
@@ -235,6 +246,10 @@ class AgentConfig:
         if type(self.max_iterations) is not int or self.max_iterations < 0:
             raise ValueError("max_iterations must be nonnegative (0 means unlimited)")
         _positive(self.model_timeout_seconds, "model_timeout_seconds")
+        if type(self.llm_max_attempts) is not int or self.llm_max_attempts < 1:
+            raise ValueError("llm_max_attempts must be a positive integer (1 disables retry)")
+        if isinstance(self.llm_retry_backoff_seconds, bool) or not math.isfinite(self.llm_retry_backoff_seconds) or self.llm_retry_backoff_seconds < 0:
+            raise ValueError("llm_retry_backoff_seconds must be finite and nonnegative")
         for name in ("temperature", "max_cost_dollars", "input_cost_per_m", "output_cost_per_m"):
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value < 0):

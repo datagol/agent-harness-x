@@ -16,6 +16,7 @@ import pytest
 
 from harnessx import (
     Agent,
+    AgentConfig,
     AgentRef,
     AgentRuntime,
     BundleLimits,
@@ -62,9 +63,9 @@ def call(name="effect", inputs=None):
 
 @asynccontextmanager
 async def session(
-    tmp_path, *, provider=None, configure=None, recording=True, extensions=None
+    tmp_path, *, provider=None, configure=None, recording=True, extensions=None, config=None
 ):
-    agent = Agent(provider=provider or Provider(), extensions=extensions)
+    agent = Agent(config=config, provider=provider or Provider(), extensions=extensions)
     if configure:
         configure(agent)
     store = SQLiteBackend(tmp_path / "runtime.db")
@@ -170,7 +171,10 @@ async def test_retry_retains_distinct_model_attempts(tmp_path):
     provider = Provider(
         [ConnectionError("lost response"), ProviderResponse(text="recovered")]
     )
-    async with session(tmp_path, provider=provider) as (runtime, _):
+    # Provider-level retry is off so the failure reaches the durable attempt journal.
+    async with session(
+        tmp_path, provider=provider, config=AgentConfig(llm_max_attempts=1)
+    ) as (runtime, _):
         result = await runtime.execute("hello")
         bundle = await export(runtime, result, tmp_path)
     playback = await IncidentRecorder().playback(bundle)

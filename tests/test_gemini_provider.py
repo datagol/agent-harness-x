@@ -59,11 +59,16 @@ class FakeAioModels:
 
     async def generate_content(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
-        return self.responses.pop(0)
+        resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
 
     async def generate_content_stream(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
 
         async def gen():
             # Emit each part as its own chunk, like the real stream.
@@ -85,10 +90,27 @@ class FakeAioModels:
         return SimpleNamespace(total_tokens=42)
 
 
+class FakeAioCaches:
+    def __init__(self, fail: Exception | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.fail = fail
+        self._n = 0
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if self.fail is not None:
+            raise self.fail
+        self._n += 1
+        return SimpleNamespace(name=f"cachedContents/fake-{self._n}")
+
+
 class FakeClient:
-    def __init__(self, responses: list[Any]) -> None:
+    def __init__(
+        self, responses: list[Any], caches: FakeAioCaches | None = None
+    ) -> None:
         self.models = FakeAioModels(responses)
-        self.aio = SimpleNamespace(models=self.models)
+        self.caches = caches or FakeAioCaches()
+        self.aio = SimpleNamespace(models=self.models, caches=self.caches)
 
 
 def _run(coro):
@@ -370,6 +392,188 @@ class TestGeminiMisc(unittest.TestCase):
                 importlib.reload(gemini_mod)
             self.assertIn("harnessx[gemini]", str(ctx.exception))
         importlib.reload(gemini_mod)
+
+
+class TestGeminiPromptCache(unittest.TestCase):
+    def _create(self, provider, **overrides):
+        kwargs = dict(
+            model="gemini-test",
+            messages=[{"role": "user", "content": "Hi"}],
+            system="Long static system prompt",
+            tools=TOOLS,
+            max_tokens=64,
+        )
+        kwargs.update(overrides)
+        return _run(provider.create(**kwargs))
+
+    def test_disabled_by_default_no_caches_calls(self):
+        client = FakeClient([_response([_text_part("ok")])])
+        provider = GeminiProvider(client=client)
+        self._create(provider)
+        self.assertEqual(client.caches.calls, [])
+        config = client.models.calls[0]["config"]
+        self.assertIn("system_instruction", config)
+        self.assertNotIn("cached_content", config)
+
+    def test_enabled_creates_cache_once_and_reuses(self):
+        client = FakeClient(
+            [_response([_text_part("one")]), _response([_text_part("two")])]
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        self._create(provider)
+        self._create(provider)
+
+        # caches.create awaited exactly once across the two calls
+        self.assertEqual(len(client.caches.calls), 1)
+        cache_call = client.caches.calls[0]
+        self.assertEqual(cache_call["model"], "gemini-test")
+        self.assertEqual(
+            cache_call["config"]["system_instruction"], "Long static system prompt"
+        )
+        self.assertEqual(cache_call["config"]["ttl"], "3600s")
+        self.assertIn("tools", cache_call["config"])
+
+        for call in client.models.calls:
+            config = call["config"]
+            self.assertEqual(config["cached_content"], "cachedContents/fake-1")
+            # Gemini requires exclusivity: no system/tools alongside the cache
+            self.assertNotIn("system_instruction", config)
+            self.assertNotIn("tools", config)
+            self.assertEqual(config["max_output_tokens"], 64)
+
+    def test_cached_config_keeps_thinking_config(self):
+        client = FakeClient([_response([_text_part("ok")])])
+        provider = GeminiProvider(
+            client=client, prompt_cache_ttl=3600, thinking_level="low"
+        )
+        self._create(provider)
+        config = client.models.calls[0]["config"]
+        self.assertEqual(config["thinking_config"], {"thinking_level": "low"})
+        self.assertIn("cached_content", config)
+
+    def test_env_var_enables_caching(self):
+        import unittest.mock as mock
+
+        client = FakeClient([_response([_text_part("ok")])])
+        with mock.patch.dict("os.environ", {"GEMINI_PROMPT_CACHE_TTL": "120"}):
+            provider = GeminiProvider(client=client)
+        self.assertEqual(provider.prompt_cache_ttl, 120)
+        self._create(provider)
+        self.assertEqual(client.caches.calls[0]["config"]["ttl"], "120s")
+
+    def test_create_failure_falls_back_uncached(self):
+        client = FakeClient(
+            [_response([_text_part("ok")])],
+            caches=FakeAioCaches(fail=RuntimeError("Cached content is too small")),
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        resp = self._create(provider)
+        self.assertEqual(resp.text, "ok")
+        config = client.models.calls[0]["config"]
+        self.assertNotIn("cached_content", config)
+        self.assertEqual(config["system_instruction"], "Long static system prompt")
+
+    def test_stale_cache_error_drops_entry_and_retries_uncached(self):
+        client = FakeClient(
+            [
+                RuntimeError("403 CachedContent not found: cachedContents/fake-1"),
+                _response([_text_part("recovered")]),
+            ]
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        resp = self._create(provider)
+        self.assertEqual(resp.text, "recovered")
+        self.assertEqual(len(client.models.calls), 2)
+        self.assertIn("cached_content", client.models.calls[0]["config"])
+        retry_config = client.models.calls[1]["config"]
+        self.assertNotIn("cached_content", retry_config)
+        self.assertIn("system_instruction", retry_config)
+        self.assertEqual(provider._prompt_caches, {})
+
+    def test_unrelated_error_propagates(self):
+        client = FakeClient([RuntimeError("429 rate limited")])
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        with self.assertRaises(RuntimeError):
+            self._create(provider)
+        self.assertEqual(len(client.models.calls), 1)
+
+    def test_ttl_expiry_recreates_cache(self):
+        import unittest.mock as mock
+
+        client = FakeClient(
+            [_response([_text_part("one")]), _response([_text_part("two")])]
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        self._create(provider)
+        # Jump past expires_at (ttl minus the 60s safety margin)
+        key, (_, expires_at) = next(iter(provider._prompt_caches.items()))
+        with mock.patch(
+            "harnessx.providers.gemini.time.monotonic",
+            return_value=expires_at + 1,
+        ):
+            self._create(provider)
+        self.assertEqual(len(client.caches.calls), 2)
+        self.assertEqual(
+            client.models.calls[1]["config"]["cached_content"],
+            "cachedContents/fake-2",
+        )
+
+    def test_stream_uses_cached_config(self):
+        client = FakeClient(
+            [_response([_text_part("hi")]), _response([_text_part("again")])]
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+
+        async def collect():
+            return [
+                c
+                async for c in provider.stream(
+                    model="gemini-test",
+                    messages=[{"role": "user", "content": "Hi"}],
+                    system="Long static system prompt",
+                    tools=TOOLS,
+                    max_tokens=64,
+                )
+            ]
+
+        _run(collect())
+        _run(collect())
+        self.assertEqual(len(client.caches.calls), 1)
+        for call in client.models.calls:
+            self.assertIn("cached_content", call["config"])
+            self.assertNotIn("system_instruction", call["config"])
+
+    def test_stream_stale_cache_retries_uncached(self):
+        client = FakeClient(
+            [
+                RuntimeError("CachedContent not found"),
+                _response([_text_part("recovered")]),
+            ]
+        )
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+
+        async def collect():
+            return [
+                c
+                async for c in provider.stream(
+                    model="gemini-test",
+                    messages=[{"role": "user", "content": "Hi"}],
+                    system="Long static system prompt",
+                    tools=TOOLS,
+                    max_tokens=64,
+                )
+            ]
+
+        chunks = _run(collect())
+        self.assertEqual(chunks[-1].data.text, "recovered")
+        self.assertEqual(len(client.models.calls), 2)
+        self.assertNotIn("cached_content", client.models.calls[1]["config"])
+
+    def test_no_cache_when_nothing_to_cache(self):
+        client = FakeClient([_response([_text_part("ok")])])
+        provider = GeminiProvider(client=client, prompt_cache_ttl=3600)
+        self._create(provider, system=None, tools=[])
+        self.assertEqual(client.caches.calls, [])
 
 
 if __name__ == "__main__":

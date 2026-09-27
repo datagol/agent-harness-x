@@ -315,16 +315,25 @@ def _extract_token_usage(raw_usage: Any) -> TokenUsage:
             if isinstance(p_details, dict)
             else getattr(p_details, "cached_tokens", 0) or 0
         )
+        c_details = raw_usage.get("completion_tokens_details") or {}
         return TokenUsage(
             input_tokens=raw_usage.get("prompt_tokens", 0) or 0,
             output_tokens=raw_usage.get("completion_tokens", 0) or 0,
             cache_creation_input_tokens=0,
             cache_read_input_tokens=cached,
+            thinking_tokens=(
+                c_details.get("reasoning_tokens", 0) or 0
+                if isinstance(c_details, dict)
+                else getattr(c_details, "reasoning_tokens", 0) or 0
+            ),
         )
     return TokenUsage(
         input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
         output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
         cache_creation_input_tokens=0,
+        thinking_tokens=getattr(
+            getattr(raw_usage, "completion_tokens_details", None), "reasoning_tokens", 0
+        ) or 0,
         cache_read_input_tokens=getattr(
             getattr(raw_usage, "prompt_tokens_details", None), "cached_tokens", 0
         ) or 0,

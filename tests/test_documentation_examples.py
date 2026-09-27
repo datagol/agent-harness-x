@@ -54,7 +54,9 @@ async def test_documented_postgres_start_and_resume_with_fresh_agent(monkeypatch
     class RecoveringProvider(ScriptedProvider):
         async def create(self, **kwargs):
             requests.append(kwargs["messages"])
-            if len(requests) == 1:
+            # Down for the whole first process: the default in-process retry
+            # (two attempts) is exhausted, so the run fails and must be resumed.
+            if len(requests) <= 2:
                 raise RuntimeError("Model temporarily unavailable")
             return await super().create(**kwargs)
 
@@ -81,7 +83,8 @@ async def test_documented_postgres_start_and_resume_with_fresh_agent(monkeypatch
     assert interrupted.status == "failed"
     recovered = await namespace["resume_session"](dsn, session_id)
     assert recovered.status == "completed" and recovered.output == "Recovered answer"
-    assert recovered.run_id == interrupted.run_id and requests[1] == requests[0]
+    assert recovered.run_id == interrupted.run_id
+    assert len(requests) == 3 and requests[1] == requests[0] and requests[2] == requests[0]
     assert await namespace["resume_session"](dsn, session_id) is None
     assert len(created) == len(providers) == len(stores) == 3
     assert len({id(agent) for agent in created}) == 3
