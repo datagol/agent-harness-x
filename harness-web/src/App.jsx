@@ -1769,11 +1769,9 @@ export default function App() {
         <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
       )}
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
-        <a className="brand" href="#examples">
-          <Mark />
-          <div>
-            harness-web<span>BY DATAGOL</span>
-          </div>
+        <a className="brand" href="#examples" aria-label="harness-web home">
+          <img className="brand-logo" src="/harnessx-logo.svg" width="148" height="42" alt="Harness-X" />
+          <span className="brand-caption">harness-web · by DataGOL</span>
         </a>
         <div className="workspace-label">
           <span className="live-dot" /> Local workspace{" "}
