@@ -119,7 +119,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
         # The span records the request as sent, not just the messages.
         self.assertEqual(llm_run.inputs["system"], agent._build_system_prompt())
         self.assertEqual(llm_run.inputs["messages"][0]["role"], "user")
-        self.assertEqual(len(llm_run.inputs["tools"]), 0)
+        self.assertEqual([t["name"] for t in llm_run.inputs["tools"]], ["read_tool_result"])
         self.assertEqual(llm_run.extra["metadata"]["ls_model_name"], "claude-sonnet-4-6")
         self.assertEqual(llm_run.extra["metadata"]["ls_provider"], "anthropic")
         self.assertIn("prefix_key", llm_run.extra["metadata"])

@@ -268,7 +268,7 @@ async def test_extension_priority_and_disposable_registrations():
     assert ("late", RunStatus.COMPLETED) in log
     await agent.aclose()
     assert log[-2:] == [("late", "close"), ("early", "close")]
-    assert not agent.tools.list_tools() and not agent.middleware._middleware and not agent.prompt_providers
+    assert agent.tools.list_tools() == ["read_tool_result"] and not agent.middleware._middleware and not agent.prompt_providers
     assert not agent.hooks._hooks[HookEvent.AGENT_START]
 
 
@@ -348,7 +348,7 @@ async def test_teardown_failure_does_not_skip_owned_provider_cleanup():
     agent = owned_agent(extensions=[Broken("broken", [])])
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
-    assert agent.provider.closed == 1 and not agent.tools.list_tools()
+    assert agent.provider.closed == 1 and agent.tools.list_tools() == ["read_tool_result"]
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
     assert agent.provider.closed == 1

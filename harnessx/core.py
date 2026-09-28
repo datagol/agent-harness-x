@@ -16,6 +16,7 @@ from .execution import RunResult, RunStream
 from .hooks import HookManager, MiddlewarePipeline
 from .memory import ConversationMemory, PersistentMemory
 from .permissions import GuardrailsEngine, PermissionManager
+from .types import PermissionLevel
 from .extensions.base import Extension, close_extensions, install_extensions, validate_extensions
 from .mcp import MCPManager
 from .providers import LLMProvider, make_provider
@@ -87,6 +88,7 @@ class Agent:
         self.provider = provider if provider is not None else make_provider(self.config.provider)
         self._owns_memory = memory is None
         self.memory = memory or ConversationMemory(max_result_chars=self.config.limits.max_result_chars)
+        self._register_result_reader()
         self.permissions = permissions or PermissionManager()
         self.hooks = hooks or HookManager()
         self.middleware = middleware or MiddlewarePipeline()
@@ -113,6 +115,32 @@ class Agent:
         # existing (and on skill bodies having been appended to the system
         # prompt). Stored for later teardown via aclose().
         self.extensions = install_extensions(self, extensions)
+
+    def _register_result_reader(self) -> None:
+        """Give the model a way back into tool results that were too large for the context.
+
+        Each Agent binds the tool to its own memory (a copied registry may carry
+        a parent's); a tool of the same name registered by the application wins.
+        """
+        existing = self.tools.get_tool("read_tool_result") if self.tools.has_tool("read_tool_result") else None
+        if existing is not None and not getattr(existing.handler, "__harnessx_builtin__", False):
+            return
+        memory = self.memory
+
+        async def read_tool_result(result_id: str, offset: int = 0, limit: int = 200) -> str:
+            """Read part of a tool result that was too large for the conversation.
+
+            Args:
+                result_id: The tool-use id named in the "[Tool result too large ...]" notice.
+                offset: First line to return, counting from 0.
+                limit: Number of lines to return, at most 2000.
+            """
+            return await asyncio.to_thread(memory.read_evicted, result_id, offset, limit)
+
+        read_tool_result.__harnessx_builtin__ = True  # type: ignore[attr-defined]
+        self.tools.register_tool(
+            read_tool_result, permission=PermissionLevel.ALLOW, replay_policy="safe", replace=existing is not None,
+        )
 
     async def aclose(self) -> None:
         if self._close_task is None:

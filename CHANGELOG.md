@@ -107,6 +107,12 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 
 ### Fixed
 
+- Oversized tool results are read back through a built-in `read_tool_result`
+  tool, registered on every agent, instead of a `read_file` call on a temp
+  path that a sandboxed registry could not open. The eviction notice names
+  the tool-use id to pass, and the reader survives session save and load.
+- Tool errors reach the model as one line (`Tool execution error:
+  PermissionError: ...`); the traceback goes to the log instead of the context.
 - The tool dedupe cache is cleared at the start of every run; it used to leak
   results across turns.
 - An unknown execution key passed to `approve`/`resolve_tool` raises

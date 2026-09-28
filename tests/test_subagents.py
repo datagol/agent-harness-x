@@ -87,7 +87,7 @@ async def test_delegation_isolated_and_serial_with_cleanup(monkeypatch, streamin
             assert task in str(request["messages"])
             assert "Private parent context" not in str(request)
             assert "Parent-only prompt" not in str(request)
-            assert not request["tools"]
+            assert [t["name"] for t in request["tools"]] == ["read_tool_result"]  # only the built-in reader
         assert [outcome["content"] for outcome in outcomes(parent)] == ["Review finding"] * 2
         assert "Review finding" in str(parent_provider.requests[-1]["messages"])
         if streaming:
@@ -215,7 +215,7 @@ async def test_bindings_and_skills_do_not_mutate_definitions(monkeypatch, tmp_pa
             assert not (await parent.tools.execute(delegate())).is_error
     assert not tools.has_tool("Skill")
     for child in children:
-        assert {t["name"] for t in child.requests[0]["tools"]} == {"sample", "Skill"}
+        assert {t["name"] for t in child.requests[0]["tools"]} == {"sample", "Skill", "read_tool_result"}
         assert "changed after registration" not in str(child.requests)
         assert child.closed
 

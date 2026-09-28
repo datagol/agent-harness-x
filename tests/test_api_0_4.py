@@ -677,7 +677,7 @@ async def test_llm_request_hook_carries_the_request_as_sent():
     payload = seen[0]
     assert payload["system"].startswith("Be terse.") and payload["model"] == config.model
     assert (payload["max_tokens"], payload["temperature"], payload["stream"]) == (99, 0.2, False)
-    assert payload["message_count"] == 1 and payload["tool_count"] == 0 and isinstance(payload["prefix_key"], str)
+    assert payload["message_count"] == 1 and payload["tool_count"] == 1 and isinstance(payload["prefix_key"], str)  # the built-in reader
 
 
 @pytest.mark.asyncio
@@ -760,3 +760,49 @@ def test_removed_names_are_gone_and_new_ones_resolve():
         assert getattr(durable, name) is not None, name
     assert durable.AgentRuntime is AgentRuntime and durable.PendingTool is PendingTool
     assert harnessx.evaluate_agent_async is harnessx.evals.evaluate_agent_async
+
+
+@pytest.mark.asyncio
+async def test_large_tool_results_are_read_back_through_read_tool_result(tmp_path):
+    big = "\n".join(f"row {i}" for i in range(2000))  # ~18 KB, above the default 12,000 chars
+    provider = Scripted([*tool_call_then_text("dump", "summarised")])
+    agent = Agent(provider=provider, config=AgentConfig(system_prompt="", limits=Limits(max_result_chars=1000)))
+
+    @agent.tools.register(permission=PermissionLevel.ALLOW)
+    def dump() -> str:
+        return big
+
+    async with agent:
+        assert "read_tool_result" in agent.tools.list_tools()
+        assert (await agent.run("go")).ok
+        block = next(b for m in agent.memory.get_messages() if isinstance(m["content"], list)
+                     for b in m["content"] if b.get("type") == "tool_result")
+        notice = block["content"]
+        assert "read_tool_result(result_id=\"c1\"" in notice and "read_file cannot open" in notice
+        assert "row 1999" in notice and "row 1000" not in notice, "head and tail preview, middle omitted"
+
+        first = await agent.tools.execute(ToolCall("r1", "read_tool_result", {"result_id": "c1", "offset": 0, "limit": 3}))
+        assert not first.is_error and first.content.splitlines()[1:] == ["row 0", "row 1", "row 2"]
+        assert "[next: offset=3]" in first.content
+        last = await agent.tools.execute(ToolCall("r2", "read_tool_result", {"result_id": "c1", "offset": 1998, "limit": 50}))
+        assert last.content.splitlines()[1:] == ["row 1998", "row 1999"] and "next:" not in last.content
+        missing = await agent.tools.execute(ToolCall("r3", "read_tool_result", {"result_id": "nope"}))
+        assert missing.is_error and "Tool execution error: LookupError:" in missing.content
+        assert "Traceback" not in missing.content, "tool errors are one line; the traceback is logged"
+
+    async with Agent(provider=Scripted()) as other:
+        # A child or copied registry binds the reader to its own memory.
+        handler = other.tools.get_tool("read_tool_result").handler
+        assert handler is not agent.tools.get_tool("read_tool_result").handler
+
+
+@pytest.mark.asyncio
+async def test_application_read_tool_result_is_not_replaced():
+    registry = ToolRegistry()
+
+    @registry.register(name="read_tool_result", permission=PermissionLevel.ALLOW)
+    def mine(result_id: str) -> str:
+        return "custom"
+
+    async with Agent(provider=Scripted(), tools=registry) as agent:
+        assert agent.tools.get_tool("read_tool_result").handler is mine

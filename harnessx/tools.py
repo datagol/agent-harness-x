@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import re
+import logging
 import traceback
 import types
 from copy import deepcopy
@@ -162,6 +163,9 @@ def _generate_input_schema(func: Callable) -> tuple[dict[str, Any], list[str]]:
         schema["required"] = required
 
     return schema, required
+
+
+logger = logging.getLogger(__name__)
 
 
 class ToolNotFoundError(HarnessError, LookupError):
@@ -518,10 +522,12 @@ class ToolRegistry:
                 tool_call_id=tool_call.id,
                 content=json.dumps(result, ensure_ascii=False, allow_nan=False) if isinstance(result, (dict, list)) else str(result),
             )
-        except Exception:
+        except Exception as exc:
+            # The model gets one line it can act on; the traceback is for the operator.
+            logger.warning("Tool %s failed: %s", tool_call.name, traceback.format_exc())
             return ToolResult(
                 tool_call_id=tool_call.id,
-                content=f"Tool execution error:\n{traceback.format_exc()}",
+                content=f"Tool execution error: {type(exc).__name__}: {exc}",
                 is_error=True,
             )
 
