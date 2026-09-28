@@ -60,7 +60,6 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.run_evals --offline` | Three scripted math/selection evaluations | `langsmith` extra; no keys or uploads |
 | `python -m examples.run_evals` | The same cases against a live model | `langsmith` extra, Anthropic key; upload enabled when a LangSmith key exists |
 | `python -m examples.mcp_agent --server NAME --command COMMAND` | Local MCP tools alongside native tools | `mcp` extra, Anthropic key, an installed MCP server |
-| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Web chat, SSE, MCP management, snapshot save/load | `server` extra, Anthropic key; `mcp` extra if connecting servers |
 
 The files `_console.py`, `_calculator.py`, `_fixtures.py`, and `_decision_fixtures.py` are shared helpers.
 The `.md` files under `skills/` are sample skill inputs.

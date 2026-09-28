@@ -1,6 +1,6 @@
 # harness-web
 
-A local workspace for **all 15 HarnessX example entry points**, plus a separate
+A local workspace for **every HarnessX example entry point**, plus a separate
 general chat interface. It runs the repository's real examples, streams their
 output, presents terminal input and approvals in the browser, and makes generated
 files available to download.
@@ -56,7 +56,6 @@ Try `What is 48 * 12?`.
 | LangSmith tracing | `examples.langsmith_tracing` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
 | PostgreSQL runtime | `examples.postgres_runtime` | `postgres` extra, `DATABASE_URL`, Anthropic key |
 | MCP agent | `examples.mcp_agent` | `mcp` extra, Anthropic key, stdio command or SSE URL |
-| Original web demo | `examples.web_app.server` | Anthropic; starts the original app on its own loopback port |
 
 Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool

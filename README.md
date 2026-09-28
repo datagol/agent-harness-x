@@ -1141,10 +1141,11 @@ service qualification, and Temporal recording is not implemented. Try
 
 ## 11. Shipping a web app
 
-The harness is transport-agnostic. The trusted local, single-conversation example in
-`examples/web_app` demonstrates:
+The harness is transport-agnostic: a web server runs the same `Agent` and
+translates its run events to whatever the browser speaks. The pattern is
 
-1. **Streaming agent execution** translated to Server-Sent Events (SSE) or WebSockets:
+1. **Stream the run** with `agent.run_stream()` and forward each event as a
+   Server-Sent Event or WebSocket frame:
 
 ```python
 import asyncio
@@ -1158,7 +1159,7 @@ from harnessx import Agent, RunEventType
 async def lifespan(app):
     async with Agent() as agent:
         app.state.agent = agent
-        app.state.lock = asyncio.Lock()  # One shared conversation in this demo.
+        app.state.lock = asyncio.Lock()  # one agent, one active run at a time
         yield
 
 app = FastAPI(lifespan=lifespan)
@@ -1180,14 +1181,21 @@ async def stream(req: dict):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 ```
 
-2. **Register tools as `PermissionLevel.ALLOW`** — in a server context, tools should be pre-approved or gated via an authorization middleware rather than interactive stdin prompts.
-3. **Built-in UI and MCP integrations** — the web app serves a complete browser UI that displays tool calls, token usage, MCP servers, and dynamic skills.
+2. **Decide permissions server-side.** Pre-approve tools with
+   `PermissionLevel.ALLOW`, or give the `PermissionManager` an approval
+   callback that asks the browser; never fall back to stdin prompts.
+3. **One agent per conversation.** An `Agent` runs one turn at a time, so a
+   multi-user service keeps a distinct agent, or a durable `AgentRuntime`
+   session, per conversation.
 
-Run the full example from the repo root:
+The repository's complete web application is [harness-web](https://github.com/datagol/agent-harness-x/tree/main/harness-web):
+a FastAPI backend and a Vite frontend that run every example in this
+repository, stream their output, present approvals in the browser, and host a
+general chat with per-conversation skills and MCP servers. From the checkout:
 
 ```bash
-uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000 --reload
-# open http://localhost:8000
+npm --prefix harness-web ci && npm --prefix harness-web run build
+uv run python harness-web/run.py        # http://127.0.0.1:8765
 ```
 
 ---
@@ -1335,4 +1343,4 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `examples.langsmith_tracing` | LangSmith lifecycle tracing with a nested specialist span | `langsmith` extra, Anthropic and LangSmith keys |
 | `examples.run_evals --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
 | `examples.mcp_agent --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
-| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Single-agent web chat with SSE streaming, MCP management, and snapshots | `server` extra, Anthropic key |
+| `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

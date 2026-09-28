@@ -80,7 +80,7 @@ def test_catalog_covers_every_example_entry_point(tmp_path):
         for path in (ROOT / "examples").glob("*.py")
         if not path.name.startswith("_")
     }
-    assert set(CATALOG) == expected | {"web_app"}
+    assert set(CATALOG) == expected
     for item in CATALOG.values():
         assert importlib.util.find_spec(item.module)
         config = {

@@ -24,9 +24,7 @@ class Example:
 
     @property
     def module(self):
-        return (
-            f"examples.{self.id}" if self.id != "web_app" else "examples.web_app.server"
-        )
+        return f"examples.{self.id}"
 
 
 EXAMPLES = [
@@ -201,15 +199,6 @@ EXAMPLES = [
         extra="mcp",
         prompt="List the tools available to you.",
         detail="Configure a stdio command or an SSE URL below. Tool calls keep terminal approvals, presented in the browser.",
-    ),
-    Example(
-        "web_app",
-        "Original web demo",
-        "Launch the existing web chat with its skills, MCP settings, and snapshots.",
-        "Integrations",
-        "globe",
-        extra="uvicorn",
-        detail="Opens the original examples.web_app UI on a separate loopback port. It retains automatic tool permissions; use it as a trusted local demo.",
     ),
 ]
 CATALOG = {example.id: example for example in EXAMPLES}
