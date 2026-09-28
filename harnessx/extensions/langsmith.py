@@ -54,6 +54,9 @@ _agent_stack: contextvars.ContextVar[tuple[Any, ...]] = contextvars.ContextVar(
 )
 
 # Currently executing tool run (if a tool invokes a sub-agent, the sub-agent nests here)
+_llm_run_posted: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "langsmith_llm_run_posted", default=True
+)
 _current_tool_run: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
     "langsmith_current_tool_run", default=None
 )
@@ -67,6 +70,31 @@ _active_tool_runs: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextV
 _active_llm_run: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
     "langsmith_active_llm_run", default=None
 )
+
+
+def _usage_metadata(usage: Any) -> dict[str, Any] | None:
+    """LangSmith's usage shape: totals plus cache and reasoning sub-counts.
+
+    ``TokenUsage.input_tokens`` already counts cached tokens, so the totals are
+    the billed prompt size and the details say how much of it was cached.
+    """
+    if not usage:
+        return None
+    in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+    out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    reasoning = int(getattr(usage, "thinking_tokens", 0) or 0)
+    result: dict[str, Any] = {
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "total_tokens": in_tok + out_tok,
+    }
+    if cache_read or cache_creation:
+        result["input_token_details"] = {"cache_read": cache_read, "cache_creation": cache_creation}
+    if reasoning:
+        result["output_token_details"] = {"reasoning": reasoning}
+    return result
 
 
 def _safe_post(run: Any) -> None:
@@ -180,6 +208,7 @@ class LangSmithExtension(Extension):
 
         # Register lifecycle hooks for Agent start, end, and error
         context.on_hook(HookEvent.AGENT_START, self._on_agent_start)
+        context.on_hook(HookEvent.LLM_REQUEST, self._on_llm_request)
         context.on_hook(HookEvent.AGENT_END, self._on_agent_end)
         context.on_hook(HookEvent.ERROR, self._on_agent_error)
 
@@ -265,6 +294,26 @@ class LangSmithExtension(Extension):
         if _active_tool_runs.get() is None:
             _active_tool_runs.set({})
 
+    async def _on_llm_request(self, ctx: HookContext) -> None:
+        """Complete the model span with the request the engine actually sends.
+
+        The middleware only sees messages and tools; the system prompt and the
+        sampling parameters travel beside them, so they are picked up here and
+        the span is posted once it is whole.
+        """
+        llm_run = _active_llm_run.get()
+        if llm_run is None or not self.enabled:
+            return
+        data = ctx.data
+        llm_run.inputs = {"system": data.get("system"), **(llm_run.inputs or {})}
+        params = llm_run.extra.setdefault("invocation_params", {})
+        for key in ("model", "max_tokens", "temperature", "stream"):
+            if key in data:
+                params[key] = data[key]
+        llm_run.extra.setdefault("metadata", {})["prefix_key"] = data.get("prefix_key")
+        _safe_post(llm_run)
+        _llm_run_posted.set(True)
+
     async def _on_agent_end(self, ctx: HookContext) -> None:
         if not self.enabled:
             return
@@ -336,6 +385,7 @@ class _LangSmithMiddleware(Middleware):
             provider_name = getattr(self._agent.config, "provider", "")
             llm_name = f"{provider_name}:{model_name}" if provider_name else model_name
 
+            config = self._agent.config
             llm_run = parent.create_child(
                 name=llm_name,
                 run_type="llm",
@@ -344,11 +394,21 @@ class _LangSmithMiddleware(Middleware):
                     "metadata": {
                         "model": model_name,
                         "provider": provider_name,
-                    }
+                        # the keys LangSmith reads to price a run
+                        "ls_model_name": model_name,
+                        "ls_provider": provider_name,
+                    },
+                    "invocation_params": {
+                        "model": model_name,
+                        "max_tokens": getattr(config, "max_tokens", None),
+                        "temperature": getattr(config, "temperature", None),
+                    },
                 },
             )
-            _safe_post(llm_run)
+            # Posted by the LLM_REQUEST hook once the system prompt is known;
+            # after_llm_call posts it first if that hook never fired.
             _active_llm_run.set(llm_run)
+            _llm_run_posted.set(False)
 
         return messages, tools
 
@@ -359,19 +419,11 @@ class _LangSmithMiddleware(Middleware):
         llm_run = _active_llm_run.get()
         if llm_run is not None:
             _active_llm_run.set(None)
+            if not _llm_run_posted.get():
+                _safe_post(llm_run)
+                _llm_run_posted.set(True)
 
-            usage_dict = None
-            if hasattr(response, "usage") and response.usage:
-                in_tok = getattr(response.usage, "input_tokens", 0) or 0
-                out_tok = getattr(response.usage, "output_tokens", 0) or 0
-                tot_tok = getattr(response.usage, "total_tokens", None)
-                if tot_tok is None:
-                    tot_tok = in_tok + out_tok
-                usage_dict = {
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "total_tokens": tot_tok,
-                }
+            usage_dict = _usage_metadata(getattr(response, "usage", None))
 
             content = getattr(response, "content", "")
             outputs = {

@@ -116,6 +116,18 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(llm_run.run_type, "llm")
         self.assertEqual(llm_run.parent_run_id, root_run.id)
+        # The span records the request as sent, not just the messages.
+        self.assertEqual(llm_run.inputs["system"], agent._build_system_prompt())
+        self.assertEqual(llm_run.inputs["messages"][0]["role"], "user")
+        self.assertEqual(len(llm_run.inputs["tools"]), 0)
+        self.assertEqual(llm_run.extra["metadata"]["ls_model_name"], "claude-sonnet-4-6")
+        self.assertEqual(llm_run.extra["metadata"]["ls_provider"], "anthropic")
+        self.assertIn("prefix_key", llm_run.extra["metadata"])
+        params = llm_run.extra["invocation_params"]
+        self.assertEqual((params["model"], params["max_tokens"], params["temperature"], params["stream"]),
+                         ("claude-sonnet-4-6", 8192, None, False))
+        self.assertEqual(llm_run.extra["metadata"]["usage_metadata"],
+                         {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
 
         # Verify patched (completed) runs
         self.assertEqual(len(patched_runs), 2)
@@ -123,6 +135,27 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(patched_runs[0].id, llm_run.id)
         self.assertEqual(patched_runs[1].id, root_run.id)
         self.assertEqual(root_run.outputs, {"output": "42"})
+
+    async def test_usage_details_include_cache_and_reasoning_tokens(self):
+        """Cached and reasoning tokens reach LangSmith in its token-details shape."""
+        posted_runs: list[Any] = []
+        patched_runs: list[Any] = []
+        usage = TokenUsage(input_tokens=1000, output_tokens=60, cache_read_input_tokens=900,
+                           cache_creation_input_tokens=50, thinking_tokens=20)
+        provider = MockProvider([MockResponse(content=[MockTextBlock(text="ok")], usage=usage)])
+
+        with patch("harnessx.extensions.langsmith._safe_post", side_effect=posted_runs.append), \
+             patch("harnessx.extensions.langsmith._safe_patch", side_effect=patched_runs.append):
+            agent = Agent(config=AgentConfig(model="m"), provider=provider,
+                          extensions=[LangSmithExtension(project_name="p")])
+            await agent.run("hi")
+
+        llm_run = next(run for run in posted_runs if run.run_type == "llm")
+        self.assertEqual(llm_run.extra["metadata"]["usage_metadata"], {
+            "input_tokens": 1000, "output_tokens": 60, "total_tokens": 1060,
+            "input_token_details": {"cache_read": 900, "cache_creation": 50},
+            "output_token_details": {"reasoning": 20},
+        })
 
     async def test_trace_tool_execution(self):
         """Verify tool calls create child spans with inputs, outputs, and errors."""

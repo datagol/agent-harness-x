@@ -192,6 +192,11 @@ async def command(agent, state, name, emit, *, record=None):
         await emit_hook(
             agent,
             HookEvent.LLM_REQUEST,
+            system=request.get("system"),
+            model=request["model"],
+            max_tokens=request.get("max_tokens"),
+            temperature=request.get("temperature"),
+            stream=streaming,
             message_count=len(request["messages"]),
             tool_count=len(request["tools"]),
             prefix_key=cache_hint.prefix_key if cache_hint is not None and cache_hint.enabled else None,

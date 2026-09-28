@@ -45,6 +45,11 @@ class LoopIterationData(TypedDict):
 
 
 class LLMRequestData(TypedDict):
+    system: str | None  # the rendered system prompt sent beside the messages
+    model: str
+    max_tokens: int | None
+    temperature: float | None
+    stream: bool
     message_count: int
     tool_count: int
     prefix_key: str | None  # prompt-cache key; None when caching is disabled

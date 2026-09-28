@@ -106,7 +106,12 @@ class ToolResult:
 
 @dataclass
 class TokenUsage:
-    """Accumulated token counts for cost tracking."""
+    """Accumulated token counts for cost tracking.
+
+    ``input_tokens`` counts every prompt token, cached or not. The two cache
+    counters are the portions of it served from, or written to, the vendor's
+    cache; providers that report input net of cache activity are normalized.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0

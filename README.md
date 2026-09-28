@@ -186,7 +186,8 @@ agent = Agent(config=AgentConfig(prompt_cache=None))
 | `gemini` | Implicit caching by default. With `ttl_seconds` set (or the `GEMINI_PROMPT_CACHE_TTL` variable), the system prompt and tools are uploaded once as an explicit cache and referenced per call. A prefix below Gemini's minimum cacheable size runs uncached, and that prefix is not retried for ten minutes |
 
 Cache hits show up in the usual usage fields: `RunResult.usage.cache_read_input_tokens`
-and `cache_creation_input_tokens`. Every `LLM_REQUEST` hook carries
+and `cache_creation_input_tokens`, both counted inside `input_tokens`, which is
+the full prompt size on every provider. Every `LLM_REQUEST` hook carries
 `data["prefix_key"]`, so an observer can assert that consecutive iterations
 share one key. A prefix that drifts, for example a timestamp in the system
 prompt or tools registered in a different order, silently defeats every
@@ -1021,9 +1022,10 @@ Read the detailed guides:
 
 Hook data is event specific, and the keys each built-in event carries are
 declared as TypedDicts in `harnessx.hooks` (`HOOK_PAYLOADS` maps an event to
-its shape). `LLM_REQUEST` carries `message_count`, `tool_count`, and
-`prefix_key`, the prompt-cache key for that request (`None` when caching is
-disabled). `AGENT_END` carries the final `RunResult`; `SANDBOX_EXEC` reports
+its shape). `LLM_REQUEST` carries the request as sent: the rendered `system`
+prompt, `model`, `max_tokens`, `temperature`, `stream`, `message_count`,
+`tool_count`, and `prefix_key`, the prompt-cache key for that request (`None`
+when caching is disabled). `AGENT_END` carries the final `RunResult`; `SANDBOX_EXEC` reports
 every sandbox execution; `CHECKPOINT` marks every persisted phase of a durable
 run. `hooks.on(...)`, `before_tool(...)`, `after_tool(...)`, and `on_error(...)`
 return a `Registration` whose `remove()` unhooks the callback.

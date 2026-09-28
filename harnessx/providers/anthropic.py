@@ -252,11 +252,16 @@ def _from_anthropic_response(resp: Any) -> ProviderResponse:
     stop_reason = stop_map.get(raw_stop, StopReason.OTHER if raw_stop else StopReason.END_TURN)
 
     raw_usage = getattr(resp, "usage", None)
+    cache_creation = int(getattr(raw_usage, "cache_creation_input_tokens", 0) or 0)
+    cache_read = int(getattr(raw_usage, "cache_read_input_tokens", 0) or 0)
     usage = TokenUsage(
-        input_tokens=getattr(raw_usage, "input_tokens", 0) or 0,
-        output_tokens=getattr(raw_usage, "output_tokens", 0) or 0,
-        cache_creation_input_tokens=getattr(raw_usage, "cache_creation_input_tokens", 0) or 0,
-        cache_read_input_tokens=getattr(raw_usage, "cache_read_input_tokens", 0) or 0,
+        # Anthropic reports input_tokens net of cache activity; TokenUsage counts
+        # every prompt token, with the cache counters as sub-counts, like the
+        # OpenAI and Gemini providers do.
+        input_tokens=int(getattr(raw_usage, "input_tokens", 0) or 0) + cache_creation + cache_read,
+        output_tokens=int(getattr(raw_usage, "output_tokens", 0) or 0),
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
     )
 
     return ProviderResponse(

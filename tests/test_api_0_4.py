@@ -650,6 +650,37 @@ def test_provider_registry_and_relaxed_cross_check():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_input_tokens_include_cached_tokens():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from harnessx import AnthropicProvider
+
+    message = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="hi")], stop_reason="end_turn", model="m",
+        usage=SimpleNamespace(input_tokens=3, output_tokens=7, cache_read_input_tokens=900, cache_creation_input_tokens=100),
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock(return_value=message)))
+    response = await AnthropicProvider(client=client).create(model="m", messages=[{"role": "user", "content": "x"}], system=None, tools=[], max_tokens=10)
+    assert response.usage.input_tokens == 1003, "the full prompt, not the uncached remainder"
+    assert response.usage.cache_read_input_tokens == 900 and response.usage.cache_creation_input_tokens == 100
+
+
+@pytest.mark.asyncio
+async def test_llm_request_hook_carries_the_request_as_sent():
+    seen: list[dict[str, Any]] = []
+    hooks = HookManager()
+    hooks.on(HookEvent.LLM_REQUEST, lambda ctx: seen.append(ctx.data))
+    config = AgentConfig(system_prompt="Be terse.", max_tokens=99, temperature=0.2)
+    async with Agent(provider=Scripted(), config=config, hooks=hooks) as agent:
+        await agent.run("hi")
+    payload = seen[0]
+    assert payload["system"].startswith("Be terse.") and payload["model"] == config.model
+    assert (payload["max_tokens"], payload["temperature"], payload["stream"]) == (99, 0.2, False)
+    assert payload["message_count"] == 1 and payload["tool_count"] == 0 and isinstance(payload["prefix_key"], str)
+
+
+@pytest.mark.asyncio
 async def test_memory_trim_passes_a_nullable_system_prompt():
     class Counting(Scripted):
         async def count_tokens(self, **kwargs):

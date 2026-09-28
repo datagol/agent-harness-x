@@ -81,6 +81,11 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 - `evaluate_agent_async()`; eval defaults renamed to `harnessx-eval`,
   `harnessx-` dataset prefix, `harnessx-agents` project.
 - `harnessx.durable` groups the runtime, backends, recorder, and their errors.
+- `LLM_REQUEST` hooks carry the request as sent: the rendered `system` prompt,
+  `model`, `max_tokens`, `temperature`, and `stream`, beside the counts and
+  `prefix_key`. LangSmith model spans record all of it, plus `ls_model_name`
+  and `ls_provider` so LangSmith can price the run, and usage with cache-read,
+  cache-creation, and reasoning token details.
 - `examples/prompt_caching.py`, a self-contained example showing the stable
   prefix key, the cache hint a provider receives, and cache counters.
 - `GuardrailsEngine.usage_summary` now includes `cache_creation_input_tokens`,
@@ -89,6 +94,9 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 
 ### Changed
 
+- `TokenUsage.input_tokens` counts every prompt token on every provider. The
+  Anthropic provider reported it net of cache reads and writes, so a cached
+  prompt showed up as a handful of input tokens in `usage_summary` and traces.
 - `RunEvent(data=...)` is required.
 - `register_with_schema` takes its metadata (`permission`, `concurrent`,
   `replay_policy`, `timeout_seconds`, `replace`) as keyword arguments.
