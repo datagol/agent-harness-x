@@ -120,7 +120,7 @@ agent = Agent(
         model="claude-sonnet-4-6",      # or "gpt-4o", "anthropic/claude-3.7-sonnet"
         provider="anthropic",            # "anthropic", "openai", "gemini", "openrouter", or "azure"
         system_prompt="You are a helpful assistant.",
-        max_tokens=8192,
+        max_tokens=None,                 # provider default for the model
         limits=Limits(max_iterations=50),  # loop guardrail
         temperature=None,                # omitted by default for safety
     )
@@ -980,7 +980,7 @@ busy agent raises `RuntimeStateError` (a `RuntimeError`); an unknown execution
 key raises `UnknownExecutionKey` (a `KeyError`). Runs report their outcome as
 data: `result.ok`, `result.failed`, and `result.needs_input` inspect the
 status, and `result.raise_for_status()` turns a run that did not complete into
-`RunFailed`, `RunAwaitingInput`, or `RunCancelled`, each carrying `.result`.
+`RunFailed`, `RunAwaitingInput`, `RunTruncated`, or `RunCancelled`, each carrying `.result`.
 `PermissionLevel`, like every other enum here, is a `str` enum.
 
 ---
@@ -1292,7 +1292,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `PendingTool` | `harnessx` | A tool the run stopped on: `execution_key`, `call`, `status` |
 | `AgentConfig` | `harnessx` | Model, provider, prompt, plus the `limits`, `retry`, `prompt_cache`, and `tools` sub-policies |
 | `Limits` / `RetryPolicy` / `ToolPolicy` | `harnessx` | Budgets, transient-failure handling, registry-wide tool options |
-| `HarnessError` and subclasses | `harnessx` | `ConfigurationError`, `RuntimeStateError`, `UnknownExecutionKey`, `RunFailed`, `RunAwaitingInput`, ... |
+| `HarnessError` and subclasses | `harnessx` | `ConfigurationError`, `RuntimeStateError`, `UnknownExecutionKey`, `RunFailed`, `RunAwaitingInput`, `RunTruncated`, ... |
 | `register_provider` | `harnessx` | Add a provider name that `AgentConfig` accepts |
 | `PromptCachePolicy` / `PromptCacheHint` | `harnessx` | Prompt-cache policy on the config; the per-request hint providers receive |
 | `ToolRegistry` | `harnessx` | `register`, `register_with_schema`, `execute` |

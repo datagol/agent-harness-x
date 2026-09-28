@@ -93,7 +93,7 @@ if result.ok: ...            # status is COMPLETED
 if result.failed: ...        # status is FAILED; result.error has type and message
 if result.needs_input: ...   # status is AWAITING_INPUT; result.pending lists the tools
 
-result.raise_for_status()    # returns result, or raises RunFailed / RunAwaitingInput / RunCancelled
+result.raise_for_status()    # returns result, or raises RunFailed / RunAwaitingInput / RunTruncated / RunCancelled
 ```
 
 `result.pending` holds `PendingTool` objects instead of dicts. Read attributes:
@@ -139,7 +139,7 @@ Every exception the SDK raises now derives from `harnessx.HarnessError`:
 | `RuntimeStateError` | `RuntimeError` | closed or busy agent, runtime not started, run not awaiting a resolution |
 | `ResolutionError` | `ValueError` | an approval or recovery decision that does not fit the tool's state |
 | `UnknownExecutionKey` | `KeyError` | `approve`/`resolve_tool` with a key the run does not have |
-| `RunError`, `RunFailed`, `RunAwaitingInput`, `RunCancelled` | | `raise_for_status()` and `stream_text()`; carry `.result` |
+| `RunError`, `RunFailed`, `RunAwaitingInput`, `RunTruncated`, `RunCancelled` | | `raise_for_status()` and `stream_text()`; carry `.result` |
 | `StorageError` and subclasses, `IncidentError`, `RecordingError`, `MaxIterationsError`, `CostLimitError`, `ToolNotFoundError`, `ToolApprovalRequired` | their 0.3 bases | unchanged sites |
 
 Code that caught `ValueError` or `RuntimeError` keeps working; the old bases are
@@ -262,6 +262,24 @@ over `Agent.run_stream()` since 0.3. `RunEvent(data=...)` is required (the
 `Limits`, `RetryPolicy`, `ToolPolicy`, `DEFAULT_TIMEOUT_SECONDS`, `HarnessError`,
 `ConfigurationError`, `RuntimeStateError`, `ResolutionError`,
 `UnknownExecutionKey`, `RunError`, `RunFailed`, `RunAwaitingInput`,
-`RunCancelled`, `ToolApprovalRequired`, `ToolExecutionContext`, `Registration`,
+`RunTruncated`, `RunCancelled`, `ToolApprovalRequired`, `ToolExecutionContext`, `Registration`,
 `register_provider`, `evaluate_agent_async`, and `harnessx.durable`, a module
 that groups the runtime, backends, recorder, and their errors under one import.
+
+## 0.4.1
+
+Long replies. Nothing here breaks 0.4.0 code, but two defaults changed meaning:
+
+- `AgentConfig.max_tokens` defaults to `None`: the provider picks a budget for
+  the model (20,000 on Claude 4 models, 8,192 elsewhere). An explicit value
+  applies as before. Code that read `config.max_tokens` and expected `8192`
+  now sees `None`; the resolved budget is on the `LLM_REQUEST` hook payload.
+- `RetryPolicy.call_timeout_seconds` defaults to `None`: the timeout for one
+  model call is sized to the reply budget, never below 300 seconds. Use
+  `retry.effective_call_timeout(max_tokens)` for the number in force.
+- `RunResult.ok` is false when the model stopped at the token budget;
+  `result.truncated` says so, and `raise_for_status()` raises `RunTruncated`.
+- The Anthropic provider streams a request itself when the SDK refuses it as
+  too long for a non-streaming call, so budgets above roughly 21,000 tokens
+  work with `agent.run()`.
+- `read_tool_result` takes `max_chars` and `char_offset` to page long lines.
