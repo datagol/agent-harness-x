@@ -1,6 +1,7 @@
 """Independent chat sessions over the same HarnessX streaming engine."""
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 import re
 from typing import Any
@@ -85,6 +86,10 @@ class _DownloadLinks(Middleware):
             )
             return ToolResult(result.tool_call_id, content, result.is_error)
         return result
+
+
+def today_line() -> str:
+    return f"Today's date is {date.today():%A, %B %-d, %Y}. Treat it as the present when reasoning about recent events or dates."
 
 
 def workspace_relative(chat: "Chat", path: str) -> str | None:
@@ -252,6 +257,9 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
     agent.middleware.add(_DownloadLinks(chat))
+    # The model has no clock. Day granularity keeps the cached prompt prefix
+    # stable within a day while stopping searches for last year's news.
+    agent.prompt_providers.append(today_line)
     # Agent(mcp=chat.mcp) already bridged the connected servers' tools. Record
     # the full catalog, then take the switched-off ones away from the model.
     chat.tool_catalog = catalog_tools(chat, agent)

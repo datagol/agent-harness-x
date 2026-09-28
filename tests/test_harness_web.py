@@ -487,6 +487,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
             }
         ]
         assert "<available-skills>" in chat.agent.config.system_prompt
+        assert "Today's date is" in chat.agent._build_system_prompt(), "the model is told the current date"
         duplicate = await client.post(
             f"/api/chats/{chat_id}/skills",
             json={"name": "same-name.md", "content": skill},
