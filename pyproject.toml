@@ -46,6 +46,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "jsonschema>=4.20",
+    "pyyaml>=6.0",
+    "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -103,7 +105,7 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["harnessx/types.py", "harnessx/errors.py", "harnessx/durable.py", "harnessx/providers/registry.py", "harnessx/providers/retry.py", "harnessx/providers/fallback.py", "harnessx/messages.py", "harnessx/execution.py", "harnessx/subagents.py", "harnessx/recorder.py", "harnessx/_journal.py", "harnessx/decisions", "tests/typing/sdk_usage.py", "tests/typing/decision_usage.py", "examples", "harness-web/harness_web", "harness-web/run.py"]
+files = ["harnessx/types.py", "harnessx/errors.py", "harnessx/durable.py", "harnessx/providers/registry.py", "harnessx/providers/retry.py", "harnessx/providers/fallback.py", "harnessx/messages.py", "harnessx/execution.py", "harnessx/subagents.py", "harnessx/recorder.py", "harnessx/_journal.py", "harnessx/decisions", "tests/typing/sdk_usage.py", "tests/typing/decision_usage.py", "examples", "harness-web/harness_web", "harness-web/run.py", "harnessx/knowledge.py"]
 follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true

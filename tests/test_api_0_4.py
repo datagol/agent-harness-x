@@ -496,11 +496,11 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
         assert (await runtime.run("go")).ok
         assert (await runtime.run("fail")).failed
 
-    # These need conditions a plain run does not meet: a skill, a transient
-    # failure, an overflowing history. Each has its own test.
+    # These need conditions a plain run does not meet: a skill, a knowledge
+    # bundle, a transient failure, an overflowing history. Each has its own test.
     missing = set(HOOK_PAYLOADS) - set(observed) - {
-        HookEvent.SKILL_INVOKED, HookEvent.RETRY, HookEvent.CONTEXT_CONDENSED,
-        HookEvent.REPETITION,
+        HookEvent.SKILL_INVOKED, HookEvent.KNOWLEDGE_ACCESSED, HookEvent.RETRY,
+        HookEvent.CONTEXT_CONDENSED, HookEvent.REPETITION,
     }
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():

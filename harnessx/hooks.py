@@ -27,6 +27,7 @@ class HookEvent(Enum):
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_END = "tool_call_end"
     SKILL_INVOKED = "skill_invoked"
+    KNOWLEDGE_ACCESSED = "knowledge_accessed"
     SANDBOX_EXEC = "sandbox_exec"
     CHECKPOINT = "checkpoint"
     RETRY = "retry"
@@ -112,6 +113,16 @@ class SkillInvokedData(TypedDict, total=False):
     body_chars: int
 
 
+class KnowledgeAccessedData(TypedDict, total=False):
+    tool: str          # search_concepts | read_concept | get_neighbors
+    bundle: str        # bundle name the call resolved to ("" when unresolved)
+    query: str         # search_concepts
+    path: str          # read_concept / get_neighbors, normalized with a leading slash
+    hits: int          # search_concepts: result count; get_neighbors: outbound + backlinks
+    found: bool        # bundle and concept resolved
+    body_chars: int    # read_concept: characters returned after truncation
+
+
 class SandboxExecData(TypedDict):
     kind: str  # "code" or "command"
     tier: str
@@ -132,8 +143,8 @@ class CheckpointEventData(TypedDict):
 # typed access: ``payload = cast(ToolCallStartData, ctx.data)``.
 HookData = Union[
     AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
-    ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, SandboxExecData,
-    CheckpointEventData, RetryData, ContextCondensedData, RepetitionData,
+    ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, KnowledgeAccessedData,
+    SandboxExecData, CheckpointEventData, RetryData, ContextCondensedData, RepetitionData,
 ]
 
 HOOK_PAYLOADS: dict[HookEvent, type] = {
@@ -147,6 +158,7 @@ HOOK_PAYLOADS: dict[HookEvent, type] = {
     HookEvent.TOOL_CALL_END: ToolCallEndData,
     HookEvent.ERROR: ErrorData,
     HookEvent.SKILL_INVOKED: SkillInvokedData,
+    HookEvent.KNOWLEDGE_ACCESSED: KnowledgeAccessedData,
     HookEvent.SANDBOX_EXEC: SandboxExecData,
     HookEvent.CHECKPOINT: CheckpointEventData,
     HookEvent.RETRY: RetryData,
