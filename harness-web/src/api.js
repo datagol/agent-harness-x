@@ -22,7 +22,10 @@ export const initialFeed = () => ({
   run: null,
   text: "",
   tools: [],
+  segments: [],
   files: [],
+  phase: null,
+  phaseAt: 0,
   error: "",
   notice: "",
   usage: null,
@@ -39,23 +42,48 @@ export function reduceFeed(state, data) {
   if (data.type === "error") next.error = data.content;
   if (data.type === "gap") next.notice = data.content;
   if (data.type === "chat_files") next.files = data.files || [];
+  if (data.type === "phase") {
+    next.phase = data.phase;
+    next.phaseAt = Date.now();
+  }
   if (data.type === "chat_result") {
     next.text = data.message.content;
     next.tools = data.message.tools;
+    next.segments = data.message.segments || state.segments;
     next.files = data.message.files || state.files;
     next.usage = data.usage;
+    next.phase = null;
     if (data.message.error) next.error = data.message.error;
   }
   if (data.type === "agent") {
     const { type, data: payload } = data.event;
-    if (type === "text_delta") next.text += payload;
-    if (type === "attempt_reset") next.text = "";
+    if (type === "text_delta") {
+      next.text += payload;
+      const last = state.segments[state.segments.length - 1];
+      next.segments =
+        last && last.type === "text"
+          ? [...state.segments.slice(0, -1), { ...last, content: last.content + payload }]
+          : [...state.segments, { type: "text", content: payload }];
+      if (state.phase !== "text") {
+        next.phase = "text";
+        next.phaseAt = Date.now();
+      }
+    }
+    if (type === "attempt_reset") {
+      next.text = "";
+      const last = state.segments[state.segments.length - 1];
+      next.segments = last && last.type === "text" ? state.segments.slice(0, -1) : state.segments;
+    }
     if (type === "error") next.error = payload;
-    if (type === "tool_call_start")
+    if (type === "tool_call_start") {
       next.tools = [
         ...state.tools.filter((t) => t.id !== payload.id),
         { ...payload, status: "running" },
       ];
+      next.phase = `tool:${payload.name}`;
+      next.phaseAt = Date.now();
+      next.segments = [...state.segments, { type: "tool", id: payload.id }];
+    }
     if (type === "tool_result")
       next.tools = state.tools.map((t) =>
         t.id === payload.tool_call_id
@@ -69,6 +97,7 @@ export function reduceFeed(state, data) {
     if (type === "run_result") {
       if (payload.output) next.text = payload.output;
       next.usage = payload.usage;
+      next.phase = null;
     }
   }
   return next;

@@ -9,6 +9,7 @@ import uuid
 from harnessx import (
     Agent,
     AgentConfig,
+    HookEvent,
     Limits,
     Middleware,
     PermissionLevel,
@@ -303,9 +304,17 @@ async def run_chat(chat, run, message):
         "content": "",
         "tools": [],
         "files": [],
+        "segments": [],  # text and tool calls in the order they happened
         "run_id": run.id,
         "status": "running",
     }
+
+    def append_text(delta: str) -> None:
+        segments = assistant["segments"]
+        if segments and segments[-1]["type"] == "text":
+            segments[-1]["content"] += delta
+        else:
+            segments.append({"type": "text", "content": delta})
 
     def record_file(entry: dict[str, Any]) -> bool:
         if any(item["url"] == entry["url"] for item in assistant["files"]):
@@ -314,15 +323,33 @@ async def run_chat(chat, run, message):
         return True
     chat.messages.extend([{"role": "user", "content": message}, assistant])
     chat.title = message[:65]
+    assert chat.agent is not None
+    agent = chat.agent
+
+    # The browser shows what the turn is doing between visible events: a model
+    # call can stream a long tool argument with nothing else to display.
+    async def model_started(ctx):
+        await run.emit("phase", phase="model", message_count=ctx.data.get("message_count"))
+
+    async def model_finished(ctx):
+        await run.emit("phase", phase="waiting")
+
+    registrations = [
+        agent.hooks.on(HookEvent.LLM_REQUEST, model_started),
+        agent.hooks.on(HookEvent.LLM_RESPONSE, model_finished),
+    ]
     try:
         await run.state("running")
-        assert chat.agent is not None
         async with chat.agent.run_stream(message) as stream:
             async for event in stream:
                 if event.type == RunEventType.TEXT_DELTA:
                     assistant["content"] += event.data
+                    append_text(event.data)
                 elif event.type == RunEventType.ATTEMPT_RESET:
                     assistant["content"] = ""
+                    # A retried model call restarts its answer: drop the provisional text.
+                    if assistant["segments"] and assistant["segments"][-1]["type"] == "text":
+                        assistant["segments"].pop()
                 elif event.type == RunEventType.TOOL_CALL_START:
                     assistant["tools"].append(
                         {
@@ -332,6 +359,7 @@ async def run_chat(chat, run, message):
                             "status": "running",
                         }
                     )
+                    assistant["segments"].append({"type": "tool", "id": event.data.id})
                 elif event.type == RunEventType.TOOL_RESULT:
                     for tool in assistant["tools"]:
                         if tool["id"] == event.data.tool_call_id:
@@ -373,4 +401,6 @@ async def run_chat(chat, run, message):
         await run.emit("error", content=str(exc))
         await run.state("failed")
     finally:
+        for registration in registrations:
+            registration.close()
         run.pending = None

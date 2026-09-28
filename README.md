@@ -1028,7 +1028,7 @@ prompt, `model`, `max_tokens`, `temperature`, `stream`, `message_count`,
 when caching is disabled). `AGENT_END` carries the final `RunResult`; `SANDBOX_EXEC` reports
 every sandbox execution; `CHECKPOINT` marks every persisted phase of a durable
 run. `hooks.on(...)`, `before_tool(...)`, `after_tool(...)`, and `on_error(...)`
-return a `Registration` whose `remove()` unhooks the callback.
+return a `Registration` whose `close()` unhooks the callback.
 
 Mandatory permissions and effect checks belong in the execution path. Hook
 failures are suppressed, and terminal extension observers are best effort.

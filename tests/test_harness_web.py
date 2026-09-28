@@ -296,6 +296,7 @@ async def test_demo_chat_tools_history_and_session_isolation(tmp_path):
         await asyncio.wait_for(run.task, 5)
         chat = (await client.get(f"/api/chats/{first['id']}")).json()
         assert chat["messages"][-1]["tools"][0]["content"] == "576"
+        assert [s["type"] for s in chat["messages"][-1]["segments"]] == ["tool", "text"], "shown in the order it happened"
         assert "576" in chat["messages"][-1]["content"]
         assert "no model calls" in chat["messages"][-1]["content"]
         assert (await client.get(f"/api/chats/{second['id']}")).json()["messages"] == []

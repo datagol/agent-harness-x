@@ -918,6 +918,32 @@ function MessageContent({ content }) {
   );
 }
 
+function TurnActivity({ phase, since }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
+  let label = "Thinking";
+  if (phase === "model" || phase === "text") label = "Working on the reply";
+  else if (phase?.startsWith("tool:")) label = `Running ${phase.slice(5)}`;
+  else if (phase === "waiting") label = "Reading the tool result";
+  return (
+    <div className="activity" role="status" aria-live="polite">
+      <div className="thinking">
+        <span />
+        <span />
+        <span />
+      </div>
+      <span>
+        {label}
+        {seconds >= 3 ? ` · ${seconds}s` : ""}
+      </span>
+    </div>
+  );
+}
+
 function FileLinks({ files = [] }) {
   if (!files.length) return null;
   return (
@@ -1517,7 +1543,10 @@ function ChatView({ id, providers, refresh, onNew }) {
           ...message,
           content: feed.text,
           tools: feed.tools,
+          segments: feed.segments?.length ? feed.segments : message.segments,
           files: feed.files?.length ? feed.files : message.files,
+          phase: feed.phase,
+          phaseAt: feed.phaseAt,
           error: feed.error,
           status: feed.run?.status,
         }
@@ -1694,18 +1723,29 @@ function ChatView({ id, providers, refresh, onNew }) {
                     {message.role === "assistant" &&
                       message.status === "cancelled" && <span>Stopped</span>}
                   </div>
-                  <MessageContent content={message.content || ""} />
-                  <ToolList tools={message.tools} />
+                  {message.segments?.length ? (
+                    message.segments.map((segment, at) =>
+                      segment.type === "text" ? (
+                        <MessageContent key={`t${at}`} content={segment.content || ""} />
+                      ) : (
+                        <ToolList
+                          key={`c${segment.id}`}
+                          tools={(message.tools || []).filter((tool) => tool.id === segment.id)}
+                        />
+                      ),
+                    )
+                  ) : (
+                    <>
+                      <MessageContent content={message.content || ""} />
+                      <ToolList tools={message.tools} />
+                    </>
+                  )}
                   <FileLinks files={message.files} />
                   {message.role === "assistant" &&
-                    !message.content &&
                     active &&
-                    message.run_id === runId && (
-                      <div className="thinking">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
+                    message.run_id === runId &&
+                    message.status !== "cancelled" && (
+                      <TurnActivity phase={message.phase} since={message.phaseAt} />
                     )}
                   {message.error && <ErrorNotice message={message.error} />}
                 </div>
