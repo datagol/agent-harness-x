@@ -1383,6 +1383,44 @@ kbd {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+  margin-left: auto;
+}
+.prompt-box.approval .prompt-title {
+  flex-wrap: wrap;
+}
+.approval-what {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+.approval-args {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.approval-args > div {
+  display: contents;
+}
+.approval-args dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-2);
+}
+.approval-args dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-1);
+}
+.approval-full summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.approval-full pre {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .chat-page {
   height: calc(100dvh - 76px);

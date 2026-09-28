@@ -34,7 +34,16 @@ export const initialFeed = () => ({
 export function reduceFeed(state, data) {
   if (data.seq <= state.seq) return state;
   let next = { ...state, seq: data.seq };
-  if (data.type === "state") next.run = data;
+  if (data.type === "state") {
+    next.run = data;
+    if (data.pending && state.phase !== "approval") {
+      next.phase = "approval";
+      next.phaseAt = Date.now();
+    } else if (!data.pending && state.phase === "approval") {
+      next.phase = "waiting";
+      next.phaseAt = Date.now();
+    }
+  }
   if (data.type === "output")
     next.log = (state.log + data.content).slice(-200000);
   if (data.type === "input_sent")

@@ -27,6 +27,14 @@ test("text and tool calls keep the order they happened in", () => {
   );
 });
 
+test("an approval wait is its own phase", () => {
+  let feed = reduceFeed(initialFeed(), { seq: 1, type: "phase", phase: "waiting" });
+  feed = reduceFeed(feed, { seq: 2, type: "state", status: "waiting", pending: { id: "p", kind: "approval" } });
+  assert.equal(feed.phase, "approval");
+  feed = reduceFeed(feed, { seq: 3, type: "state", status: "running", pending: null });
+  assert.equal(feed.phase, "waiting");
+});
+
 test("the feed tracks what the turn is doing between visible events", () => {
   const agent = (seq, type, data) => ({ seq, type: "agent", event: { type, data } });
   let feed = reduceFeed(initialFeed(), { seq: 1, type: "phase", phase: "model" });

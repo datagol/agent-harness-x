@@ -587,6 +587,22 @@ function Library({ examples, loading, onSelect }) {
   );
 }
 
+function summarizeInput(input) {
+  // Long strings (file contents, HTML) become a length; the full input stays one click away.
+  return Object.entries(input || {}).map(([key, value]) => {
+    if (typeof value === "string") {
+      const oneLine = value.replace(/\s+/g, " ").trim();
+      return [
+        key,
+        oneLine.length > 140
+          ? `${oneLine.slice(0, 140)}… (${value.length.toLocaleString()} characters)`
+          : oneLine,
+      ];
+    }
+    return [key, JSON.stringify(value)];
+  });
+}
+
 function Prompt({ run, onReply }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -612,6 +628,8 @@ function Prompt({ run, onReply }) {
     }
   }
   const approval = run.pending.kind === "approval";
+  const tool = run.pending.tool;
+  const summary = tool ? summarizeInput(tool.input) : [];
   return (
     <div className={`prompt-box ${approval ? "approval" : ""}`}>
       <div className="prompt-title">
@@ -619,30 +637,43 @@ function Prompt({ run, onReply }) {
         <strong>
           {approval ? "Your approval is needed" : "Continue the conversation"}
         </strong>
-      </div>
-      {approval ? (
-        <>
-          <pre>
-            {run.pending.tool
-              ? JSON.stringify(run.pending.tool, null, 2)
-              : run.pending.prompt}
-          </pre>
+        {approval && (
           <div className="approval-actions">
-            <button
-              className="button"
-              disabled={busy}
-              onClick={() => send("n")}
-            >
+            <button className="button" disabled={busy} onClick={() => send("n")}>
               Deny
             </button>
-            <button
-              className="button primary"
-              disabled={busy}
-              onClick={() => send("y")}
-            >
+            <button className="button primary" disabled={busy} onClick={() => send("y")}>
               {busy && <LoaderCircle size={15} className="spin" />}Allow once
             </button>
           </div>
+        )}
+      </div>
+      {approval ? (
+        <>
+          {tool ? (
+            <>
+              <p className="approval-what">
+                The agent wants to run <code>{tool.name}</code>
+                {summary.length ? " with:" : "."}
+              </p>
+              {summary.length ? (
+                <dl className="approval-args">
+                  {summary.map(([key, shown]) => (
+                    <div key={key}>
+                      <dt>{key}</dt>
+                      <dd>{shown}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : null}
+              <details className="approval-full">
+                <summary>Full input</summary>
+                <pre>{JSON.stringify(tool.input, null, 2)}</pre>
+              </details>
+            </>
+          ) : (
+            <pre>{run.pending.prompt}</pre>
+          )}
         </>
       ) : (
         <form
@@ -926,7 +957,8 @@ function TurnActivity({ phase, since }) {
   }, []);
   const seconds = since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
   let label = "Thinking";
-  if (phase === "model" || phase === "text") label = "Working on the reply";
+  if (phase === "approval") label = "Waiting for your approval";
+  else if (phase === "model" || phase === "text") label = "Working on the reply";
   else if (phase?.startsWith("tool:")) label = `Running ${phase.slice(5)}`;
   else if (phase === "waiting") label = "Reading the tool result";
   return (
