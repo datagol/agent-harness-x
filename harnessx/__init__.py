@@ -14,7 +14,7 @@ from .errors import (
     HarnessError,
     ResolutionError,
     RunAwaitingInput,
-    RunCancelled,
+    RunCancelled, RunTruncated,
     RunError,
     RunFailed,
     RuntimeStateError,
@@ -86,7 +86,7 @@ __all__ = [
     "RunEvent", "RunEventType", "RunResult", "RunStatus", "RunStream", "RunFailure", "PendingTool", "TokenUsage",
     # Errors
     "HarnessError", "ConfigurationError", "RuntimeStateError", "ResolutionError", "UnknownExecutionKey",
-    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled",
+    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled", "RunTruncated",
     "MaxIterationsError", "CostLimitError",
     # Memory and sessions
     "ConversationMemory", "Message", "ContentBlock", "PersistentMemory", "LongTermMemory", "AgentMemory",

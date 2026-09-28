@@ -302,13 +302,30 @@ class RetryPolicy:
 
     attempts: int = 2
     backoff_seconds: float = 0.5  # base delay, doubled per attempt
-    call_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS  # wall clock around one attempt
+    # Wall clock around one attempt. None derives it from the reply budget, so a
+    # long reply is not cut off by a timeout sized for short ones.
+    call_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or self.attempts < 1:
             raise ConfigurationError("attempts must be a positive integer (1 disables retry)")
         _nonnegative_or_none(self.backoff_seconds, "backoff_seconds")
-        _positive(self.call_timeout_seconds, "call_timeout_seconds")
+        if self.call_timeout_seconds is not None:
+            _positive(self.call_timeout_seconds, "call_timeout_seconds")
+
+    def effective_call_timeout(self, max_tokens: int | None) -> float:
+        """The timeout for one model call: the explicit value, or one sized for ``max_tokens``."""
+        if self.call_timeout_seconds is not None:
+            return float(self.call_timeout_seconds)
+        return call_timeout_for(max_tokens)
+
+
+def call_timeout_for(max_tokens: int | None) -> float:
+    """A timeout that fits a reply of ``max_tokens``: never below the default,
+    and at the Anthropic SDK's planning rate (128K tokens per hour) plus a minute."""
+    if not max_tokens:
+        return DEFAULT_TIMEOUT_SECONDS
+    return max(DEFAULT_TIMEOUT_SECONDS, max_tokens * 3600 / 128_000 + 60)
 
 
 @dataclass(frozen=True)
@@ -374,7 +391,7 @@ class AgentConfig:
 
     model: str = "claude-sonnet-4-6"
     provider: str = "anthropic"  # a built-in name or one passed to register_provider()
-    max_tokens: int = 8192  # per-response output cap, sent with each model request
+    max_tokens: int | None = None  # reply token budget; None lets the provider choose for the model
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
     limits: Limits = field(default_factory=Limits)
@@ -386,7 +403,7 @@ class AgentConfig:
         self,
         model: str = "claude-sonnet-4-6",
         provider: str = "anthropic",
-        max_tokens: int = 8192,
+        max_tokens: int | None = None,
         *,
         system_prompt: str = "You are a helpful assistant.",
         temperature: float | None = None,
@@ -454,7 +471,8 @@ class AgentConfig:
             raise ConfigurationError("model must be a nonempty string")
         if not isinstance(self.system_prompt, str):
             raise TypeError("system_prompt must be a string")
-        _positive(self.max_tokens, "max_tokens", integer=True)
+        if self.max_tokens is not None:
+            _positive(self.max_tokens, "max_tokens", integer=True)
         _nonnegative_or_none(self.temperature, "temperature")
         for name, kind in (("limits", Limits), ("retry", RetryPolicy), ("tools", ToolPolicy)):
             if not isinstance(getattr(self, name), kind):
@@ -567,12 +585,12 @@ class AgentConfig:
         self.retry = replace(self.retry, backoff_seconds=value)
 
     @property
-    def model_timeout_seconds(self) -> float:
+    def model_timeout_seconds(self) -> float | None:
         _warn_flat("model_timeout_seconds")
         return self.retry.call_timeout_seconds
 
     @model_timeout_seconds.setter
-    def model_timeout_seconds(self, value: float) -> None:
+    def model_timeout_seconds(self, value: float | None) -> None:
         _warn_flat("model_timeout_seconds")
         self.retry = replace(self.retry, call_timeout_seconds=value)
 

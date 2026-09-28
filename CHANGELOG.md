@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-28
+
+Long replies. An agent that writes whole files hits the reply token budget,
+and 0.4.0 handled that badly: the default budget was small, a truncated turn
+reported `completed`, a bigger budget tripped the Anthropic SDK's guard on
+non-streaming calls, and the per-call timeout was sized for short replies.
+
+### Changed
+
+- `AgentConfig.max_tokens` defaults to `None`, meaning the provider chooses a
+  budget for the model: 20,000 tokens for Claude 4 models, 8,192 elsewhere
+  (`LLMProvider.default_max_tokens(model)`, overridable). An explicit value
+  still applies as before. The resolved budget is what `LLM_REQUEST` hooks and
+  LangSmith spans record.
+- `RetryPolicy.call_timeout_seconds` defaults to `None`, meaning the timeout
+  for one model call is sized for the reply budget (`call_timeout_for`), never
+  below the previous 300 seconds. An explicit value still applies as before.
+- `RunResult.ok` is false when the model stopped at the token budget.
+
+### Added
+
+- `RunResult.truncated` and `RunTruncated`, raised by `raise_for_status()` and
+  `stream_text()` when a reply or a tool call was cut off at `max_tokens`.
+- The Anthropic provider streams a non-streaming request itself when the SDK
+  refuses it as too long, instead of surfacing "Streaming is required".
+- `read_tool_result` caps each read at `max_chars` (default 6,000) and pages a
+  single long line with `char_offset`, so a minified JSON result cannot flood
+  the context in one call.
+
 ## [0.4.0] - 2026-09-27
 
 An API refinement release. The engine is unchanged; the public surface gets one
@@ -171,6 +200,7 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
+[0.4.1]: https://github.com/datagol/agent-harness-x/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/datagol/agent-harness-x/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/datagol/agent-harness-x/compare/c382675...v0.3.0
 [0.2.1]: https://pypi.org/project/datagol-agent-harness/0.2.1/

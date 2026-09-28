@@ -27,6 +27,19 @@ from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, T
 from ._journal import RecordingError, record as journal_record
 
 
+def default_max_tokens(provider, model: str) -> int:
+    """The provider's reply budget for the model; duck-typed providers get the conservative default."""
+    chooser = getattr(provider, "default_max_tokens", None)
+    if callable(chooser):
+        try:
+            return int(chooser(model))
+        except Exception:
+            pass
+    from .providers.base import DEFAULT_MAX_TOKENS
+
+    return DEFAULT_MAX_TOKENS
+
+
 async def emit_hook(agent, event, **data):
     await agent.hooks.emit(event, HookContext(event=event, agent=agent, data=data))
 
@@ -165,7 +178,7 @@ async def command(agent, state, name, emit, *, record=None):
                     messages=messages,
                     system=system or None,
                     tools=tools,
-                    max_tokens=agent.config.max_tokens,
+                    max_tokens=agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model),
                     temperature=agent.config.temperature,
                     cache=build_hint(
                         agent.config.prompt_cache, agent.config.model, system or None, tools, messages
@@ -208,7 +221,7 @@ async def command(agent, state, name, emit, *, record=None):
         response = None
         # Retries live in the driver (one policy, journaled per attempt);
         # this command makes exactly one provider call.
-        async with asyncio.timeout(agent.config.retry.call_timeout_seconds):
+        async with asyncio.timeout(agent.config.retry.effective_call_timeout(request.get("max_tokens"))):
             if streaming:
                 async for chunk in agent.provider.stream(**request):
                     if chunk.kind == "response":

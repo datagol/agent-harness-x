@@ -65,5 +65,16 @@ class RunAwaitingInput(RunError):
         self.pending = list(result.pending)
 
 
+class RunTruncated(RunError):
+    """The model stopped at the reply token budget (``max_tokens``) before it was done."""
+
+    def __init__(self, result: RunResult) -> None:
+        super().__init__(
+            result,
+            f"Run {result.run_id} was cut off at the reply token budget; raise AgentConfig.max_tokens "
+            "or ask for shorter output",
+        )
+
+
 class RunCancelled(RunError):
     """The run was cancelled before it completed."""

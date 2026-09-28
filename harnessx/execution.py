@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Ty
 import math
 import uuid
 
-from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed
+from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed, RunTruncated
 from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult
 
 
@@ -150,8 +150,15 @@ class RunResult:
 
     @property
     def ok(self) -> bool:
-        """True when the run completed. Failures, pauses, and cancellations are not ok."""
-        return self.status is RunStatus.COMPLETED
+        """True when the run completed with a whole reply. Failures, pauses,
+        cancellations, and replies cut off at the token budget are not ok."""
+        return self.status is RunStatus.COMPLETED and not self.truncated
+
+    @property
+    def truncated(self) -> bool:
+        """True when the model stopped at ``max_tokens``: the reply, or a tool call it
+        was making, is incomplete even though the run ended normally."""
+        return self.status is RunStatus.COMPLETED and self.stop_reason == "max_tokens"
 
     @property
     def failed(self) -> bool:
@@ -165,6 +172,8 @@ class RunResult:
     def raise_for_status(self) -> RunResult:
         """Return the result if it completed; otherwise raise a RunError describing why."""
         if self.status is RunStatus.COMPLETED:
+            if self.truncated:
+                raise RunTruncated(self)
             return self
         if self.status is RunStatus.FAILED:
             raise RunFailed(self)
@@ -415,7 +424,11 @@ def model_timeout_from_wire(config: Mapping[str, Any] | None) -> float:
     retry = config.get("retry")
     if isinstance(retry, dict) and retry.get("call_timeout_seconds") is not None:
         return float(retry["call_timeout_seconds"])
-    return float(config.get("model_timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+    if config.get("model_timeout_seconds") is not None:
+        return float(config["model_timeout_seconds"])
+    from .types import call_timeout_for
+
+    return call_timeout_for(config.get("max_tokens"))
 
 
 def cancel_state(state: dict) -> dict:

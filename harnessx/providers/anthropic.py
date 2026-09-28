@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import inspect
 from copy import deepcopy
 from typing import Any, AsyncIterator
@@ -10,7 +12,7 @@ from anthropic import AsyncAnthropic
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
-from .base import LLMProvider
+from .base import LLMProvider, DEFAULT_MAX_TOKENS
 
 
 def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -101,6 +103,9 @@ def _rejected_cache_control(exc: BaseException) -> bool:
     return "cache_control" in str(exc)
 
 
+_CLAUDE_4 = re.compile(r"claude-(?:opus|sonnet|haiku)-4")
+
+
 class AnthropicProvider(LLMProvider):
     """Talks to Anthropic's Messages API and normalizes responses to ProviderResponse."""
 
@@ -108,6 +113,26 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, client: AsyncAnthropic | None = None) -> None:
         self.client = client or AsyncAnthropic()
+
+    def default_max_tokens(self, model: str) -> int:
+        """Claude 4 models get a budget large enough for a file-sized reply but under the
+        SDK's threshold for non-streaming calls; older families keep the conservative default."""
+        return 20_000 if _CLAUDE_4.search(model or "") else DEFAULT_MAX_TOKENS
+
+    async def _create_via_stream(self, kwargs: dict[str, Any]) -> Any:
+        """The SDK refuses a non-streaming call that could run past ten minutes;
+        stream it and return the assembled message instead."""
+        stream_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
+        async with self.client.messages.stream(**stream_kwargs) as stream:
+            return await stream.get_final_message()
+
+    async def _create(self, kwargs: dict[str, Any]) -> Any:
+        try:
+            return await self.client.messages.create(**kwargs)
+        except ValueError as exc:
+            if "Streaming is required" in str(exc):
+                return await self._create_via_stream(kwargs)
+            raise
 
     async def create(
         self,
@@ -135,17 +160,17 @@ class AnthropicProvider(LLMProvider):
         uncached = _filter_kwargs(self.client.messages.create, kwargs)
         filtered_kwargs = _filter_kwargs(self.client.messages.create, _apply_prompt_cache(kwargs, cache))
         try:
-            resp = await self.client.messages.create(**filtered_kwargs)
+            resp = await self._create(filtered_kwargs)
         except TypeError as exc:
             if "temperature" in str(exc) and "temperature" in filtered_kwargs:
                 filtered_kwargs.pop("temperature", None)
-                resp = await self.client.messages.create(**filtered_kwargs)
+                resp = await self._create(filtered_kwargs)
             else:
                 raise
         except Exception as exc:
             # Caching is an optimization: a rejected marker runs the call uncached.
             if filtered_kwargs is not uncached and filtered_kwargs != uncached and _rejected_cache_control(exc):
-                resp = await self.client.messages.create(**uncached)
+                resp = await self._create(uncached)
             else:
                 raise
         return _from_anthropic_response(resp)

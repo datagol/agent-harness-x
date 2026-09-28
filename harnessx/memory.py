@@ -169,16 +169,22 @@ class ConversationMemory:
             f"{preview}"
         )
 
-    def read_evicted(self, tool_use_id: str, offset: int = 0, limit: int = 200) -> str:
+    def read_evicted(
+        self, tool_use_id: str, offset: int = 0, limit: int = 200, *, max_chars: int = 6_000, char_offset: int = 0,
+    ) -> str:
         """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
 
-        The result is found by the tool-use id of the call that produced it,
-        so it survives session save and load, where the file moves.
+        A section is also capped at ``max_chars`` characters, so a single very
+        long line (minified JSON, a CSV row) is paged with ``char_offset``. The
+        result is found by the tool-use id of the call that produced it, so it
+        survives session save and load, where the file moves.
         """
         if not isinstance(tool_use_id, str) or not tool_use_id:
             raise ValueError("result_id must be the tool-use id of the evicted result")
         offset = max(int(offset), 0)
         limit = max(min(int(limit), 2_000), 1)
+        max_chars = max(min(int(max_chars), 50_000), 200)
+        char_offset = max(int(char_offset), 0)
         path = None
         for message in self._messages:
             if message.role != "user" or not isinstance(message.content, list):
@@ -195,10 +201,19 @@ class ConversationMemory:
             lines = handle.read().splitlines()
         section = lines[offset:offset + limit]
         end = offset + len(section)
+        text = "\n".join(section)
         header = f"[{tool_use_id}: lines {offset + 1}-{end} of {len(lines)}]"
+        if char_offset or len(text) > max_chars:
+            window = text[char_offset:char_offset + max_chars]
+            header += f" [characters {char_offset + 1}-{char_offset + len(window)} of {len(text)} in this section]"
+            if char_offset + len(window) < len(text):
+                header += f" [next: offset={offset}, limit={limit}, char_offset={char_offset + len(window)}]"
+            elif end < len(lines):
+                header += f" [next: offset={end}]"
+            return header + "\n" + window
         if end < len(lines):
             header += f" [next: offset={end}]"
-        return header + "\n" + "\n".join(section)
+        return header + "\n" + text
 
     def get_messages(self) -> list[dict[str, Any]]:
         return [message.to_dict() for message in self._messages]
