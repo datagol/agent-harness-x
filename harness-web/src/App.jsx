@@ -27,6 +27,7 @@ import {
   Radio,
   Search,
   Settings2,
+  Wrench,
   ShieldCheck,
   Sparkles,
   Square,
@@ -911,6 +912,75 @@ function ToolList({ tools = [] }) {
   ));
 }
 
+const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP" };
+
+function groupTools(tools = []) {
+  const groups = [];
+  for (const tool of tools) {
+    const key = tool.source === "mcp" ? `mcp:${tool.server || ""}` : tool.source;
+    let group = groups.find((g) => g.key === key);
+    if (!group) {
+      group = {
+        key,
+        source: tool.source,
+        title:
+          tool.source === "mcp"
+            ? `${tool.server || "MCP"} · MCP server`
+            : SOURCE_LABEL[tool.source] || tool.source,
+        tools: [],
+      };
+      groups.push(group);
+    }
+    group.tools.push(tool);
+  }
+  return groups;
+}
+
+function ToolChips({ tools = [], showServer = false }) {
+  return (
+    <div className="tool-chips">
+      {tools.map((tool) => (
+        <span
+          key={tool.name}
+          className={`tool-chip ${tool.source || ""} ${tool.permission || ""}`}
+          title={`${tool.description || tool.name}\nPermission: ${tool.permission}`}
+        >
+          {showServer && tool.server ? <em>{tool.server}/</em> : null}
+          {tool.tool || tool.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ToolCatalog({ tools = [] }) {
+  const groups = groupTools(tools);
+  if (!groups.length) return <p className="setup-empty">No tools registered.</p>;
+  return (
+    <div className="tool-catalog">
+      {groups.map((group) => (
+        <section key={group.key} className="tool-group">
+          <header>
+            <strong>{group.title}</strong>
+            <span>{group.tools.length} tools</span>
+          </header>
+          <ul>
+            {group.tools.map((tool) => (
+              <li key={tool.name}>
+                <div>
+                  <code>{tool.name}</code>
+                  <span className={`perm ${tool.permission}`}>{tool.permission}</span>
+                </div>
+                <p>{tool.description || "No description provided."}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function ConversationSetup({ chat, onClose, onUpdated }) {
   const [systemPrompt, setSystemPrompt] = useState(chat.system_prompt);
   const [transport, setTransport] = useState("command");
@@ -1024,6 +1094,21 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
       <section className="setup-section">
         <div className="setup-section-title">
           <div>
+            <Wrench size={17} />
+            <strong>Tools</strong>
+            <span className="count">{(chat.tools || []).length}</span>
+          </div>
+        </div>
+        <p className="detail-copy">
+          Everything the model can call in this conversation, with the
+          permission that applies when it does. MCP tools are listed under the
+          server that provides them.
+        </p>
+        <ToolCatalog tools={chat.tools} />
+      </section>
+      <section className="setup-section">
+        <div className="setup-section-title">
+          <div>
             <Sparkles size={17} />
             <strong>Skills</strong>
           </div>
@@ -1097,9 +1182,15 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
                   <span>
                     {serverInfo.transport} · {serverInfo.tools.length} tools
                   </span>
-                  <small>
-                    {serverInfo.tools.join(", ") || "No tools discovered"}
-                  </small>
+                  {serverInfo.tools.length ? (
+                    <ToolChips
+                      tools={(chat.tools || []).filter(
+                        (tool) => tool.source === "mcp" && tool.server === name,
+                      )}
+                    />
+                  ) : (
+                    <small>No tools discovered</small>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -1372,6 +1463,21 @@ function ChatView({ id, providers, refresh, onNew }) {
           {(chat?.provider || selectedProvider) === "demo" && (
             <span className="mode-label offline">Local fixture</span>
           )}
+          {chat?.tools?.length ? (
+            <button
+              type="button"
+              className="toolbar-chip"
+              title="Show the tools this conversation can use"
+              disabled={!!provider?.missing.length || !model.trim() || active}
+              onClick={openSetup}
+            >
+              <Wrench size={13} />
+              {chat.tools.length} tools
+              {chat.tools.some((tool) => tool.source === "mcp")
+                ? ` · ${chat.tools.filter((tool) => tool.source === "mcp").length} via MCP`
+                : ""}
+            </button>
+          ) : null}
         </div>
         <div>
           {fileRun && (
@@ -1484,6 +1590,20 @@ function ChatView({ id, providers, refresh, onNew }) {
                   </button>
                 ))}
               </div>
+              {chat?.tools?.length ? (
+                <div className="toolbox">
+                  <div className="toolbox-title">
+                    <Wrench size={13} /> Available tools
+                    <span>
+                      {chat.tools.length}
+                      {chat.tools.some((tool) => tool.source === "mcp")
+                        ? ` · ${Object.keys(chat.mcp_servers || {}).length} MCP server${Object.keys(chat.mcp_servers || {}).length === 1 ? "" : "s"}`
+                        : ""}
+                    </span>
+                  </div>
+                  <ToolChips tools={chat.tools} showServer />
+                </div>
+              ) : null}
             </div>
           ) : (
             visibleMessages.map((message, index) => (

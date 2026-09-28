@@ -422,9 +422,9 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             await chat.mcp.disconnect(body.name)
             raise HTTPException(422, f"Could not connect MCP server: {exc}") from exc
         return {
-            **chat.public(),
+            **chat.public(),  # includes "tools", every tool the agent can now call
             "connected": body.name,
-            "tools": [
+            "discovered": [
                 {"name": tool.tool_name, "description": tool.description}
                 for tool in tools
             ],

@@ -91,6 +91,7 @@ class Chat:
             "system_prompt": self.system_prompt,
             "skills": skill_records(self),
             "mcp_servers": self.mcp.list_servers(),
+            "tools": tool_records(self),
         }
         if include_messages:
             result["messages"] = self.messages
@@ -106,6 +107,40 @@ def _skill_paths(chat: Chat) -> list[Path]:
         for path in sorted(folder.glob("*.md"))
         if path.is_file() and not path.is_symlink() and not path.name.startswith(".")
     ]
+
+
+_SOURCE_ORDER = {"builtin": 0, "skill": 1, "mcp": 2}
+
+
+def tool_records(chat: Chat) -> list[dict[str, Any]]:
+    """Every tool the conversation's agent can call, with where it came from."""
+    agent = chat.agent
+    assert agent is not None
+    bridged = set(getattr(agent, "mcp_tools", ()) or ())
+    servers = list(chat.mcp.list_servers())
+    records = []
+    for definition in agent.tools.get_tools():
+        name = definition.name
+        tag = getattr(definition.handler, "__mcp_tool__", None)
+        if tag:
+            source, server, tool = "mcp", tag[0], tag[1]
+        elif name in bridged:
+            server = next((s for s in servers if name.startswith(f"{s}_")), None)
+            source, tool = "mcp", name[len(server) + 1:] if server else name
+        elif name == "Skill":
+            source, server, tool = "skill", None, name
+        else:
+            source, server, tool = "builtin", None, name
+        records.append({
+            "name": name,
+            "tool": tool,
+            "description": definition.description,
+            "source": source,
+            "server": server,
+            "permission": agent.permissions.get_effective_permission(name, definition).value,
+        })
+    records.sort(key=lambda r: (_SOURCE_ORDER[r["source"]], r["server"] or "", r["name"]))
+    return records
 
 
 def skill_records(chat: Chat) -> list[dict[str, Any]]:

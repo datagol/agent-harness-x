@@ -469,6 +469,13 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
             ("fixture", {"command": "fixture-server", "args": ["--safe", "path with spaces"], "url": None, "permission": PermissionLevel.ASK})
         ]
         assert connected.json()["mcp_servers"]["fixture"]["tools"] == ["inspect"]
+        tools = {tool["name"]: tool for tool in connected.json()["tools"]}
+        assert tools["fixture_inspect"] == {
+            "name": "fixture_inspect", "tool": "inspect", "description": "Inspect a configured fixture",
+            "source": "mcp", "server": "fixture", "permission": "ask",
+        }
+        assert tools["calculate"]["source"] == "builtin" and tools["calculate"]["permission"] == "allow"
+        assert tools["write_file"]["permission"] == "ask" and tools["Skill"]["source"] == "skill"
         definition = chat.agent.tools.get_tool("fixture_inspect")
         assert definition.permission_level == PermissionLevel.ASK
         denied = await chat.agent.tools.execute(ToolCall("mcp", "fixture_inspect", {}), permissions=chat.agent.permissions)
@@ -477,6 +484,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         disconnected = await client.delete(f"/api/chats/{chat_id}/mcp/fixture")
         assert disconnected.status_code == 200
         assert disconnected.json()["mcp_servers"] == {}
+        assert not [tool for tool in disconnected.json()["tools"] if tool["source"] == "mcp"]
         assert not chat.agent.tools.has_tool("fixture_inspect")
         removed = await client.delete(f"/api/chats/{chat_id}/skills/audit.md")
         assert removed.status_code == 200 and removed.json()["skills"] == []
