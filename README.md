@@ -140,11 +140,11 @@ asyncio.run(main())
 |---|---|---|
 | `model` | `"claude-sonnet-4-6"` | Model id passed to the provider |
 | `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, `"openrouter"`, `"azure"`, or a name passed to `register_provider()` |
-| `max_tokens` | `8192` | Per-response token cap |
+| `max_tokens` | `None` | Reply token budget. Unset, the provider chooses for the model: 20,000 on Claude 4 models, 8,192 elsewhere |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=150_000`, `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None` |
-| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `call_timeout_seconds=300` per attempt |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
 | `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False` |
 
@@ -966,6 +966,11 @@ agent.guardrails.usage_summary
 
 Limits are validated at construction. A reached guardrail returns a failed
 `RunResult` with error details. `Limits(max_iterations=0)` means unlimited.
+
+A reply cut off at the token budget ends the run with status `completed` and
+stop reason `max_tokens`; `result.truncated` is true, `result.ok` is false, and
+`raise_for_status()` raises `RunTruncated`. Raise `max_tokens` or ask for
+shorter output.
 
 ### Errors
 

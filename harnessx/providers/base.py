@@ -15,10 +15,17 @@ from ..types import PromptCacheHint
 from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
 
 
+DEFAULT_MAX_TOKENS = 8192  # conservative: accepted by every model the built-in providers know
+
+
 class LLMProvider(ABC):
     """Backend that knows how to talk to one LLM vendor."""
 
     name: str = ""
+
+    def default_max_tokens(self, model: str) -> int:
+        """The reply budget used when AgentConfig.max_tokens is None. Override per vendor."""
+        return DEFAULT_MAX_TOKENS
 
     @abstractmethod
     async def create(

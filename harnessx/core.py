@@ -127,15 +127,21 @@ class Agent:
             return
         memory = self.memory
 
-        async def read_tool_result(result_id: str, offset: int = 0, limit: int = 200) -> str:
+        async def read_tool_result(
+            result_id: str, offset: int = 0, limit: int = 200, max_chars: int = 6000, char_offset: int = 0,
+        ) -> str:
             """Read part of a tool result that was too large for the conversation.
 
             Args:
                 result_id: The tool-use id named in the "[Tool result too large ...]" notice.
                 offset: First line to return, counting from 0.
                 limit: Number of lines to return, at most 2000.
+                max_chars: Character cap for one read (default 6000); long lines are paged.
+                char_offset: Character position to continue from inside the selected lines.
             """
-            return await asyncio.to_thread(memory.read_evicted, result_id, offset, limit)
+            return await asyncio.to_thread(
+                memory.read_evicted, result_id, offset, limit, max_chars=max_chars, char_offset=char_offset,
+            )
 
         read_tool_result.__harnessx_builtin__ = True  # type: ignore[attr-defined]
         self.tools.register_tool(

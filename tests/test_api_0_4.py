@@ -208,7 +208,8 @@ def test_replay_policy_members_are_accepted_and_stored_as_strings():
 def test_default_timeout_is_one_constant():
     assert DEFAULT_TIMEOUT_SECONDS == 300.0
     assert ToolDefinition("t", "t", {"type": "object"}, lambda: None).timeout_seconds == DEFAULT_TIMEOUT_SECONDS
-    assert RetryPolicy().call_timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+    assert RetryPolicy().call_timeout_seconds is None, "derived from the reply budget unless set"
+    assert RetryPolicy().effective_call_timeout(8192) == DEFAULT_TIMEOUT_SECONDS
     assert harnessx.SubAgent(name="s", description="d", config=AgentConfig()).timeout_seconds == DEFAULT_TIMEOUT_SECONDS
 
 
@@ -224,7 +225,7 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     )
     shape = asdict(config)
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
-    assert shape["retry"] == {"attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": DEFAULT_TIMEOUT_SECONDS}
+    assert shape["retry"] == {"attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None}
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}
     assert not any(name in shape for name in ("max_iterations", "llm_max_attempts", "model_timeout_seconds"))
@@ -274,6 +275,7 @@ def test_model_timeout_from_wire_reads_both_shapes():
     assert model_timeout_from_wire({"retry": {"call_timeout_seconds": 7.0}}) == 7.0
     assert model_timeout_from_wire({"model_timeout_seconds": 9.0}) == 9.0
     assert model_timeout_from_wire({}) == DEFAULT_TIMEOUT_SECONDS
+    assert model_timeout_from_wire({"max_tokens": 64_000}) == RetryPolicy().effective_call_timeout(64_000) > DEFAULT_TIMEOUT_SECONDS
 
 
 def slow(x: int) -> int:
@@ -806,3 +808,98 @@ async def test_application_read_tool_result_is_not_replaced():
 
     async with Agent(provider=Scripted(), tools=registry) as agent:
         assert agent.tools.get_tool("read_tool_result").handler is mine
+
+
+# ── Long replies: budgets, timeouts, truncation, and paging ─────────────────
+
+
+def test_reply_budget_defaults_per_provider_and_timeout_follows_it():
+    from harnessx import AnthropicProvider
+    from harnessx.providers.base import DEFAULT_MAX_TOKENS
+    from harnessx.types import call_timeout_for
+
+    assert AgentConfig().max_tokens is None, "unset means the provider chooses for the model"
+    anthropic = AnthropicProvider(client=object())
+    assert anthropic.default_max_tokens("claude-sonnet-4-6") == 20_000
+    assert anthropic.default_max_tokens("claude-3-5-haiku-latest") == DEFAULT_MAX_TOKENS
+    assert Scripted().default_max_tokens("anything") == DEFAULT_MAX_TOKENS
+    # The timeout for one call grows with the budget instead of cutting a long reply short.
+    assert call_timeout_for(8192) == DEFAULT_TIMEOUT_SECONDS
+    assert call_timeout_for(32_000) == 32_000 * 3600 / 128_000 + 60
+    assert RetryPolicy(call_timeout_seconds=45).effective_call_timeout(64_000) == 45, "an explicit value wins"
+
+
+@pytest.mark.asyncio
+async def test_engine_sends_the_resolved_budget_and_reports_truncation():
+    seen: list[dict[str, Any]] = []
+    hooks = HookManager()
+    hooks.on(HookEvent.LLM_REQUEST, lambda ctx: seen.append(dict(ctx.data)))
+    provider = Scripted([ProviderResponse(text="half a reply", stop_reason="max_tokens")])
+    async with Agent(provider=provider, hooks=hooks) as agent:
+        result = await agent.run("write a novel")
+    assert seen[0]["max_tokens"] == 8192 and provider.calls[0]["max_tokens"] == 8192
+    assert result.status is RunStatus.COMPLETED and result.stop_reason == "max_tokens"
+    assert result.truncated and not result.ok and not result.failed
+    with pytest.raises(harnessx.RunTruncated, match="max_tokens"):
+        result.raise_for_status()
+    assert not replace(_result(RunStatus.COMPLETED), stop_reason="end_turn").truncated
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streams_when_the_sdk_refuses_a_long_non_streaming_call():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from harnessx import AnthropicProvider
+
+    message = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="assembled from the stream")], stop_reason="end_turn", model="m",
+        usage=SimpleNamespace(input_tokens=5, output_tokens=7, cache_read_input_tokens=0, cache_creation_input_tokens=0),
+    )
+
+    class Stream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def get_final_message(self):
+            return message
+
+    streamed: list[dict[str, Any]] = []
+
+    def stream(**kwargs):
+        streamed.append(kwargs)
+        return Stream()
+
+    create = AsyncMock(side_effect=ValueError("Streaming is required for operations that may take longer than 10 minutes."))
+    client = SimpleNamespace(messages=SimpleNamespace(create=create, stream=stream))
+    response = await AnthropicProvider(client=client).create(
+        model="claude-sonnet-4-6", messages=[{"role": "user", "content": "x"}], system=None, tools=[], max_tokens=64_000,
+    )
+    assert response.text == "assembled from the stream" and streamed[0]["max_tokens"] == 64_000
+    # Any other ValueError is the caller's problem, not a signal to stream.
+    other = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock(side_effect=ValueError("bad request")), stream=stream))
+    with pytest.raises(ValueError, match="bad request"):
+        await AnthropicProvider(client=other).create(model="m", messages=[], system=None, tools=[], max_tokens=10)
+
+
+@pytest.mark.asyncio
+async def test_read_tool_result_pages_a_single_long_line_by_characters():
+    blob = "{" + ",".join(f'"k{i}": "{"v" * 50}"' for i in range(400)) + "}"  # one ~24 KB line
+    provider = Scripted([*tool_call_then_text("dump", "done")])
+    agent = Agent(provider=provider, config=AgentConfig(system_prompt="", limits=Limits(max_result_chars=1000)))
+
+    @agent.tools.register(permission=PermissionLevel.ALLOW)
+    def dump() -> str:
+        return blob
+
+    async with agent:
+        assert (await agent.run("go")).ok
+        first = await agent.tools.execute(ToolCall("r1", "read_tool_result", {"result_id": "c1"}))
+        header, body = first.content.split("\n", 1)
+        assert len(body) == 6000 and "characters 1-6000 of" in header and "char_offset=6000" in header
+        nxt = await agent.tools.execute(ToolCall("r2", "read_tool_result", {"result_id": "c1", "char_offset": 6000, "max_chars": 20000}))
+        header2, body2 = nxt.content.split("\n", 1)
+        assert body2 == blob[6000:26000] and "char_offset=26000" not in header2 or len(blob) > 26000

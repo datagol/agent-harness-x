@@ -63,7 +63,8 @@ async def use_0_4_api(agent: Agent, runtime: AgentRuntime) -> None:
         limits=Limits(max_iterations=5), retry=RetryPolicy(attempts=1), tools=ToolPolicy(dedupe_calls=True),
     )
     assert_type(config.limits.max_iterations, int)
-    assert_type(config.retry.call_timeout_seconds, float)
+    assert_type(config.retry.call_timeout_seconds, float | None)
+    assert_type(config.retry.effective_call_timeout(config.max_tokens), float)
     assert_type(config.tools.dedupe_calls, bool)
 
     result = await agent.run("hi")

@@ -7,7 +7,7 @@ readers and for imports that want to say what they are for.
 from .artifacts import S3ArtifactStore
 from .backends import LeaseLostError, PostgresBackend, SchemaError, SessionBusyError, SQLiteBackend, StorageError
 from .backends.temporal import RedisEvents, TemporalBackend
-from .errors import ResolutionError, RunAwaitingInput, RuntimeStateError, UnknownExecutionKey
+from .errors import ResolutionError, RunAwaitingInput, RunTruncated, RuntimeStateError, UnknownExecutionKey
 from .execution import PendingTool, RunEvent, RunEventType, RunResult, RunStatus, RunStream, current_tool_context
 from .recorder import BundleLimits, ExportPolicy, IncidentError, IncidentRecorder, Playback, VerificationReport, export_incident
 from ._journal import RecordingError
@@ -21,7 +21,7 @@ __all__ = [
     "PendingTool", "RunEvent", "RunEventType", "RunResult", "RunStatus", "RunStream", "current_tool_context",
     "SQLiteBackend", "PostgresBackend", "TemporalBackend", "RedisEvents", "S3ArtifactStore",
     "SchemaError", "StorageError", "SessionBusyError", "LeaseLostError",
-    "ResolutionError", "RunAwaitingInput", "RuntimeStateError", "UnknownExecutionKey",
+    "ResolutionError", "RunAwaitingInput", "RunTruncated", "RuntimeStateError", "UnknownExecutionKey",
     "IncidentRecorder", "ExportPolicy", "BundleLimits", "IncidentError", "VerificationReport", "Playback",
     "RecordingError", "export_incident",
 ]
