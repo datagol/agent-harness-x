@@ -82,10 +82,14 @@ const date = (value) =>
   });
 
 function Mark({ small = false }) {
+  // The Harness-X mark from the docs site, white on the accent tile.
+  const size = small ? 18 : 24;
   return (
     <div className={`mark ${small ? "small" : ""}`} aria-hidden="true">
-      <span>H</span>
-      <i />
+      <svg viewBox="0 0 64 64" width={size} height={size}>
+        <path fill="#fff" d="M8 8H18V20L30 32L18 44V56H8V40L16 32L8 24Z" />
+        <path fill="#fff" d="M56 8H46V20L34 32L46 44V56H56V40L48 32L56 24Z" />
+      </svg>
     </div>
   );
 }

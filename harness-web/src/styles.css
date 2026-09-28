@@ -161,30 +161,13 @@ pre {
   border-radius: 10px;
   overflow: hidden;
 }
-.mark span {
-  font-size: 25px;
-  line-height: 1;
-  font-weight: 800;
-  font-family: Arial, sans-serif;
-}
-.mark i {
-  position: absolute;
-  height: 23px;
-  width: 3px;
-  background: #aaacff;
-  transform: rotate(-27deg);
+.mark svg {
+  display: block;
 }
 .mark.small {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-}
-.mark.small span {
-  font-size: 20px;
-}
-.mark.small i {
-  height: 18px;
-  width: 2px;
 }
 .workspace-label {
   display: flex;
@@ -1288,9 +1271,6 @@ kbd {
   background: #f1f0fb;
   margin-bottom: 24px;
   transform: rotate(-6deg);
-}
-.chat-orbit .mark {
-  transform: rotate(6deg);
 }
 .chat-empty .eyebrow {
   justify-content: center;
