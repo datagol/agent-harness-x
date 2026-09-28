@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -443,6 +444,48 @@ class MCPManager:
         for tool in tools:
             self._tool_to_server[_registered_name(name, tool.tool_name)] = name
 
+        return tools
+
+    async def connect_all(
+        self, servers: Sequence[MCPServerConfig], *, concurrent: bool = True,
+    ) -> dict[str, list[MCPToolInfo]]:
+        """Connect several servers and return the discovered tools by server name.
+
+        Servers connect concurrently unless ``concurrent=False``. If any fail,
+        the ones that connected stay connected and an ``ExceptionGroup`` names
+        the failures, so a caller can report them or disconnect and retry.
+        """
+        configs = list(servers)
+        for config in configs:
+            if not isinstance(config, MCPServerConfig):
+                raise TypeError("connect_all takes MCPServerConfig entries; use connect() for the keyword form")
+            if config.name in self._connections:
+                raise ValueError(f"MCP server {config.name!r} is already connected; disconnect it first")
+        names = [config.name for config in configs]
+        if len(set(names)) != len(names):
+            raise ValueError("MCP server names must be unique within one connect_all call")
+        if concurrent:
+            outcomes = await asyncio.gather(*(self.connect(config) for config in configs), return_exceptions=True)
+        else:
+            outcomes = []
+            for config in configs:
+                try:
+                    outcomes.append(await self.connect(config))
+                except Exception as exc:  # keep going; the group below reports every failure
+                    outcomes.append(exc)
+        tools: dict[str, list[MCPToolInfo]] = {}
+        failures: list[Exception] = []
+        for config, outcome in zip(configs, outcomes):
+            if isinstance(outcome, BaseException):
+                failures.append(outcome if isinstance(outcome, Exception) else RuntimeError(str(outcome)))
+                failures[-1].add_note(f"MCP server {config.name!r}")
+            else:
+                tools[config.name] = outcome
+        if failures:
+            connected = ", ".join(tools) or "none"
+            raise ExceptionGroup(
+                f"{len(failures)} of {len(configs)} MCP servers failed to connect (connected: {connected})", failures,
+            )
         return tools
 
     async def connect_from_config(
