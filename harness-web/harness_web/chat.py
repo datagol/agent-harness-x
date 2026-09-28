@@ -10,12 +10,14 @@ from harnessx import (
     Agent,
     AgentConfig,
     Limits,
+    Middleware,
     PermissionLevel,
     PermissionManager,
     ProviderResponse,
     RunEventType,
     SkillManager,
     ToolCall,
+    ToolResult,
 )
 from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.execution import wire
@@ -58,8 +60,40 @@ class DemoProvider(LLMProvider):
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful general assistant. Be clear and concise. Use your "
     "calculator for arithmetic. Files are relative to the conversation "
-    "workspace. File changes require the user's approval."
+    "workspace. File changes require the user's approval. When you save or "
+    "generate a file, the app attaches a download link to your reply: refer to "
+    "the file by name and never invent a URL for it."
 )
+
+DOWNLOADS_DIR = ".downloads"  # generate_file copies land here, served by /api/chats/{id}/downloads
+_MARKER = re.compile(r"__FILE__:/files/([0-9a-f]+)/([^:\n]+):([^\n]*)")
+
+
+class _DownloadLinks(Middleware):
+    """Turn generate_file's UI marker into a link the model can quote."""
+
+    def __init__(self, chat: "Chat") -> None:
+        self._chat = chat
+
+    async def after_tool_execution(self, result: Any) -> Any:
+        if isinstance(result, ToolResult) and isinstance(result.content, str) and "__FILE__:" in result.content:
+            content = _MARKER.sub(
+                lambda m: f"Saved {m.group(3) or m.group(2)}. Download link: "
+                f"/api/chats/{self._chat.id}/downloads/{m.group(1)}/{m.group(2)}",
+                result.content,
+            )
+            return ToolResult(result.tool_call_id, content, result.is_error)
+        return result
+
+
+def workspace_relative(chat: "Chat", path: str) -> str | None:
+    """A workspace-relative POSIX path for a tool's path argument, or None if outside."""
+    root = chat.directory.resolve()
+    try:
+        target = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+        return target.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass
@@ -74,6 +108,8 @@ class Chat:
     title: str = "New conversation"
     messages: list = field(default_factory=list)
     active: Run | None = None
+    disabled_tools: set = field(default_factory=set)
+    tool_catalog: list = field(default_factory=list)  # every tool, enabled or not
 
     def public(self, *, include_messages=True):
         assert self.agent is not None
@@ -113,12 +149,18 @@ _SOURCE_ORDER = {"builtin": 0, "skill": 1, "mcp": 2}
 
 
 def tool_records(chat: Chat) -> list[dict[str, Any]]:
-    """Every tool the conversation's agent can call, with where it came from."""
-    agent = chat.agent
-    assert agent is not None
+    """Every tool the conversation knows, enabled or not, with where it came from."""
+    return [
+        {**record, "enabled": record["name"] not in chat.disabled_tools}
+        for record in chat.tool_catalog
+    ]
+
+
+def catalog_tools(chat: Chat, agent: Agent) -> list[dict[str, Any]]:
+    """Describe the agent's registered tools before any disabled ones are removed."""
     bridged = set(getattr(agent, "mcp_tools", ()) or ())
     servers = list(chat.mcp.list_servers())
-    records = []
+    records: list[dict[str, Any]] = []
     for definition in agent.tools.get_tools():
         name = definition.name
         tag = getattr(definition.handler, "__mcp_tool__", None)
@@ -141,6 +183,19 @@ def tool_records(chat: Chat) -> list[dict[str, Any]]:
         })
     records.sort(key=lambda r: (_SOURCE_ORDER[r["source"]], r["server"] or "", r["name"]))
     return records
+
+
+def set_tool_enabled(chat: Chat, name: str, enabled: bool) -> None:
+    """Record a per-conversation tool switch; rebuild_chat applies it."""
+    known = {record["name"] for record in chat.tool_catalog}
+    if name not in known:
+        raise KeyError(name)
+    if name == "Skill":
+        raise ValueError("The Skill tool cannot be disabled")
+    if enabled:
+        chat.disabled_tools.discard(name)
+    else:
+        chat.disabled_tools.add(name)
 
 
 def skill_records(chat: Chat) -> list[dict[str, Any]]:
@@ -188,12 +243,20 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
     agent.tools.register_tool(
         calculate, permission=PermissionLevel.ALLOW, replay_policy="safe"
     )
-    register_filesystem_tools(agent.tools, base_path=str(chat.directory))
+    register_filesystem_tools(
+        agent.tools, base_path=str(chat.directory), output_dir=str(chat.directory / DOWNLOADS_DIR),
+    )
     for name in ("write_file", "generate_file"):
         agent.permissions.set_permission(name, PermissionLevel.ASK)
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
-    # Agent(mcp=chat.mcp) already bridged the connected servers' tools.
+    agent.middleware.add(_DownloadLinks(chat))
+    # Agent(mcp=chat.mcp) already bridged the connected servers' tools. Record
+    # the full catalog, then take the switched-off ones away from the model.
+    chat.tool_catalog = catalog_tools(chat, agent)
+    chat.disabled_tools &= {record["name"] for record in chat.tool_catalog}
+    for name in chat.disabled_tools:
+        agent.tools.unregister(name)
     return agent
 
 
@@ -235,13 +298,20 @@ async def close_chat(chat: Chat) -> None:
 async def run_chat(chat, run, message):
     import asyncio
 
-    assistant = {
+    assistant: dict[str, Any] = {
         "role": "assistant",
         "content": "",
         "tools": [],
+        "files": [],
         "run_id": run.id,
         "status": "running",
     }
+
+    def record_file(entry: dict[str, Any]) -> bool:
+        if any(item["url"] == entry["url"] for item in assistant["files"]):
+            return False
+        assistant["files"].append(entry)
+        return True
     chat.messages.extend([{"role": "user", "content": message}, assistant])
     chat.title = message[:65]
     try:
@@ -269,6 +339,15 @@ async def run_chat(chat, run, message):
                                 status="failed" if event.data.is_error else "completed",
                                 content=event.data.content,
                             )
+                            if not event.data.is_error and tool["name"] in ("write_file", "generate_file"):
+                                added = False
+                                for link in re.findall(r"Download link: (/api/chats/\S+)", str(event.data.content)):
+                                    added |= record_file({"name": link.rsplit("/", 1)[-1], "url": link, "kind": "download"})
+                                rel = workspace_relative(chat, str((tool.get("input") or {}).get("path", "")))
+                                if rel and not rel.startswith(DOWNLOADS_DIR):
+                                    added |= record_file({"name": rel, "url": f"/api/runs/{run.id}/files/{rel}", "kind": "workspace"})
+                                if added:
+                                    await run.emit("chat_files", files=list(assistant["files"]))
                 await run.emit("agent", event=wire(event))
             result = await stream.result()
         assistant["content"] = result.output or assistant["content"]

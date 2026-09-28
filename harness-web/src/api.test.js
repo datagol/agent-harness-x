@@ -8,6 +8,22 @@ test("replayed events do not duplicate output", () => {
   assert.equal(reduceFeed(feed, event).log, "hello");
 });
 
+test("files attached during a turn survive into the final message", () => {
+  let feed = reduceFeed(initialFeed(), {
+    seq: 1,
+    type: "chat_files",
+    files: [{ name: "report.html", url: "/api/chats/c/downloads/ab12/report.html", kind: "download" }],
+  });
+  assert.equal(feed.files.length, 1);
+  feed = reduceFeed(feed, {
+    seq: 2,
+    type: "chat_result",
+    message: { content: "Done", tools: [], files: feed.files },
+    usage: {},
+  });
+  assert.equal(feed.files[0].url, "/api/chats/c/downloads/ab12/report.html");
+});
+
 test("tool results correlate by call ID even when they arrive out of order", () => {
   const event = (seq, type, data) => ({
     seq,

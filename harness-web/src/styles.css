@@ -1025,6 +1025,41 @@ kbd {
   border-color: #efc4c4;
   background: #fff1f1;
 }
+.message-files {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+}
+.message-files .file-row {
+  padding: 10px 0;
+}
+.inline-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.switch {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--text-3);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.switch.on {
+  color: var(--accent);
+}
+.tool-group li.off code,
+.tool-group li.off p {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
 .toolbar-chip {
   display: inline-flex;
   align-items: center;

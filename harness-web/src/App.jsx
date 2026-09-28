@@ -27,6 +27,8 @@ import {
   Radio,
   Search,
   Settings2,
+  ToggleLeft,
+  ToggleRight,
   Wrench,
   ShieldCheck,
   Sparkles,
@@ -877,8 +879,27 @@ function RunView({ id, refresh, examples }) {
   );
 }
 
+// Markdown links to files this app serves become real download links; every
+// other link stays as text so model output never becomes executable HTML.
+const APP_LINK = /\[([^\]]+)\]\((?:sandbox:)?(\/api\/(?:chats|runs)\/[^\s)]+)\)/g;
+
+function renderProse(text, keyPrefix) {
+  const nodes = [];
+  let last = 0;
+  for (const match of text.matchAll(APP_LINK)) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    nodes.push(
+      <a key={`${keyPrefix}-${match.index}`} className="inline-download" href={match[2]} download>
+        <Download size={13} /> {match[1]}
+      </a>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
 function MessageContent({ content }) {
-  // Text-only rendering: model output never becomes executable HTML.
   return (
     <div className="message-content">
       {content.split(/(```[\s\S]*?```)/g).map((part, index) => {
@@ -891,8 +912,26 @@ function MessageContent({ content }) {
             </pre>
           );
         }
-        return <span key={index}>{part}</span>;
+        return <span key={index}>{renderProse(part, index)}</span>;
       })}
+    </div>
+  );
+}
+
+function FileLinks({ files = [] }) {
+  if (!files.length) return null;
+  return (
+    <div className="message-files">
+      {files.map((file) => (
+        <a key={file.url} className="file-row" href={file.url} download>
+          <FileCode2 size={16} />
+          <span>
+            {file.name}
+            <small>{file.kind === "download" ? "Generated download" : "Saved in the conversation workspace"}</small>
+          </span>
+          <Download size={16} />
+        </a>
+      ))}
     </div>
   );
 }
@@ -953,30 +992,54 @@ function ToolChips({ tools = [], showServer = false }) {
   );
 }
 
-function ToolCatalog({ tools = [] }) {
+function ToolCatalog({ tools = [], onToggle, busy = false }) {
   const groups = groupTools(tools);
   if (!groups.length) return <p className="setup-empty">No tools registered.</p>;
   return (
     <div className="tool-catalog">
-      {groups.map((group) => (
-        <section key={group.key} className="tool-group">
-          <header>
-            <strong>{group.title}</strong>
-            <span>{group.tools.length} tools</span>
-          </header>
-          <ul>
-            {group.tools.map((tool) => (
-              <li key={tool.name}>
-                <div>
-                  <code>{tool.name}</code>
-                  <span className={`perm ${tool.permission}`}>{tool.permission}</span>
-                </div>
-                <p>{tool.description || "No description provided."}</p>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+      {groups.map((group) => {
+        const enabled = group.tools.filter((tool) => tool.enabled !== false).length;
+        return (
+          <section key={group.key} className="tool-group">
+            <header>
+              <strong>{group.title}</strong>
+              <span>
+                {enabled === group.tools.length
+                  ? `${group.tools.length} tools`
+                  : `${enabled} of ${group.tools.length} enabled`}
+              </span>
+            </header>
+            <ul>
+              {group.tools.map((tool) => {
+                const on = tool.enabled !== false;
+                const fixed = tool.source === "skill";
+                return (
+                  <li key={tool.name} className={on ? "" : "off"}>
+                    <div>
+                      <code>{tool.name}</code>
+                      <span className={`perm ${tool.permission}`}>{tool.permission}</span>
+                      {onToggle && !fixed ? (
+                        <button
+                          type="button"
+                          className={`switch ${on ? "on" : ""}`}
+                          role="switch"
+                          aria-checked={on}
+                          aria-label={`${on ? "Disable" : "Enable"} ${tool.name}`}
+                          disabled={busy}
+                          onClick={() => onToggle(tool.name, !on)}
+                        >
+                          {on ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+                        </button>
+                      ) : null}
+                    </div>
+                    <p>{tool.description || "No description provided."}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -1071,6 +1134,11 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
       }),
     );
   }
+  async function switchTool(name, enabled) {
+    await apply(() =>
+      api(`/chats/${chat.id}/tools`, { method: "PATCH", body: { name, enabled } }),
+    );
+  }
   return (
     <Modal title="Conversation setup" onClose={onClose}>
       <p className="detail-note">
@@ -1101,10 +1169,11 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
         </div>
         <p className="detail-copy">
           Everything the model can call in this conversation, with the
-          permission that applies when it does. MCP tools are listed under the
+          permission that applies when it does. Switch a tool off to hide it
+          from the model on the next turn; MCP tools are listed under the
           server that provides them.
         </p>
-        <ToolCatalog tools={chat.tools} />
+        <ToolCatalog tools={chat.tools} onToggle={switchTool} busy={busy} />
       </section>
       <section className="setup-section">
         <div className="setup-section-title">
@@ -1185,7 +1254,7 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
                   {serverInfo.tools.length ? (
                     <ToolChips
                       tools={(chat.tools || []).filter(
-                        (tool) => tool.source === "mcp" && tool.server === name,
+                        (tool) => tool.source === "mcp" && tool.server === name && tool.enabled !== false,
                       )}
                     />
                   ) : (
@@ -1441,12 +1510,14 @@ function ChatView({ id, providers, refresh, onNew }) {
   const provider = providers.find(
     (p) => p.id === (chat?.provider || selectedProvider),
   );
+  const enabledTools = (chat?.tools || []).filter((tool) => tool.enabled !== false);
   const visibleMessages = (chat?.messages || []).map((message) =>
     message.run_id === runId && feed.seq > 0
       ? {
           ...message,
           content: feed.text,
           tools: feed.tools,
+          files: feed.files?.length ? feed.files : message.files,
           error: feed.error,
           status: feed.run?.status,
         }
@@ -1472,9 +1543,12 @@ function ChatView({ id, providers, refresh, onNew }) {
               onClick={openSetup}
             >
               <Wrench size={13} />
-              {chat.tools.length} tools
-              {chat.tools.some((tool) => tool.source === "mcp")
-                ? ` · ${chat.tools.filter((tool) => tool.source === "mcp").length} via MCP`
+              {enabledTools.length} tools
+              {enabledTools.some((tool) => tool.source === "mcp")
+                ? ` · ${enabledTools.filter((tool) => tool.source === "mcp").length} via MCP`
+                : ""}
+              {chat.tools.length > enabledTools.length
+                ? ` · ${chat.tools.length - enabledTools.length} off`
                 : ""}
             </button>
           ) : null}
@@ -1595,13 +1669,13 @@ function ChatView({ id, providers, refresh, onNew }) {
                   <div className="toolbox-title">
                     <Wrench size={13} /> Available tools
                     <span>
-                      {chat.tools.length}
+                      {enabledTools.length}
                       {chat.tools.some((tool) => tool.source === "mcp")
                         ? ` · ${Object.keys(chat.mcp_servers || {}).length} MCP server${Object.keys(chat.mcp_servers || {}).length === 1 ? "" : "s"}`
                         : ""}
                     </span>
                   </div>
-                  <ToolChips tools={chat.tools} showServer />
+                  <ToolChips tools={enabledTools} showServer />
                 </div>
               ) : null}
             </div>
@@ -1622,6 +1696,7 @@ function ChatView({ id, providers, refresh, onNew }) {
                   </div>
                   <MessageContent content={message.content || ""} />
                   <ToolList tools={message.tools} />
+                  <FileLinks files={message.files} />
                   {message.role === "assistant" &&
                     !message.content &&
                     active &&

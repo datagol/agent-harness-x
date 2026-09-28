@@ -22,6 +22,7 @@ export const initialFeed = () => ({
   run: null,
   text: "",
   tools: [],
+  files: [],
   error: "",
   notice: "",
   usage: null,
@@ -37,9 +38,11 @@ export function reduceFeed(state, data) {
     next.log = (state.log + `\n› ${data.content}\n`).slice(-200000);
   if (data.type === "error") next.error = data.content;
   if (data.type === "gap") next.notice = data.content;
+  if (data.type === "chat_files") next.files = data.files || [];
   if (data.type === "chat_result") {
     next.text = data.message.content;
     next.tools = data.message.tools;
+    next.files = data.message.files || state.files;
     next.usage = data.usage;
     if (data.message.error) next.error = data.message.error;
   }
