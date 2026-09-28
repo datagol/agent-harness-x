@@ -112,18 +112,34 @@ def agent_bindings() -> dict[str, Any]:
     }
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant with access to tools. "
+    "When a request matches an available skill, load it first. "
+    "Be concise and direct."
+)
+
+
 def create_streaming_agent() -> Agent:
     return Agent(
         config=AgentConfig(
-            system_prompt=(
-                "You are a helpful assistant with access to tools. "
-                "When a request matches an available skill, load it first. "
-                "Be concise and direct."
-            ),
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
             limits=Limits(max_iterations=25),
         ),
         **agent_bindings(),
     )
+
+
+def base_system_prompt(agent: Agent) -> str:
+    """The prompt a person wrote, without the skills catalog the harness appends."""
+    prompt = agent.config.system_prompt or ""
+    return prompt.split(SkillManager.SKILLS_BLOCK_OPEN, 1)[0].rstrip()
+
+
+def apply_system_prompt(agent: Agent, prompt: str | None) -> None:
+    """Set the base prompt (empty means the default) and keep the skills catalog attached."""
+    base = (prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+    catalog = agent.skills.render_catalog() if agent.skills else ""
+    agent.config.system_prompt = f"{base}\n\n{catalog}" if catalog else base
 
 
 @asynccontextmanager
@@ -202,7 +218,7 @@ class SessionResponse(BaseModel):
 async def chat(req: ChatRequest):
     async with use_agent() as agent:
         if req.system_prompt is not None:
-            agent.config.system_prompt = req.system_prompt
+            apply_system_prompt(agent, req.system_prompt)
         calls: dict[str, dict[str, Any]] = {}
         async with agent.run_stream(req.message) as events:
             async for event in events:
@@ -242,7 +258,7 @@ async def stream(req: ChatRequest):
     async def event_generator():
         async with use_agent() as agent:
             if req.system_prompt is not None:
-                agent.config.system_prompt = req.system_prompt
+                apply_system_prompt(agent, req.system_prompt)
             async with agent.run_stream(req.message) as events:
                 async for event in events:
                     payload = None
@@ -311,7 +327,8 @@ async def status():
     return {
         "status": "running" if sa else "stopped",
         "model": sa.config.model if sa else "",
-        "system_prompt": sa.config.system_prompt[:200] if sa else "",
+        "system_prompt": base_system_prompt(sa) if sa else "",
+        "default_system_prompt": DEFAULT_SYSTEM_PROMPT,
         "session_id": sa.session_id if sa else "",
         "tools": tools,
         "mcp_servers": mcp_servers,
