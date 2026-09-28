@@ -83,7 +83,7 @@ async def main(destination: Path):
         backend = SQLiteBackend(str(Path(directory) / "runtime.db"))
         try:
             async with AgentRuntime(agent, backend=backend, recording=True) as runtime:
-                result = await runtime.execute(
+                result = await runtime.run(
                     "Analyze overdue invoices for the demo account"
                 )
                 if result.status != "completed":

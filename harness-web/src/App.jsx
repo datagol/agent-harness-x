@@ -27,6 +27,9 @@ import {
   Radio,
   Search,
   Settings2,
+  ToggleLeft,
+  ToggleRight,
+  Wrench,
   ShieldCheck,
   Sparkles,
   Square,
@@ -82,10 +85,14 @@ const date = (value) =>
   });
 
 function Mark({ small = false }) {
+  // The Harness-X mark from the docs site, white on the accent tile.
+  const size = small ? 18 : 24;
   return (
     <div className={`mark ${small ? "small" : ""}`} aria-hidden="true">
-      <span>H</span>
-      <i />
+      <svg viewBox="0 0 64 64" width={size} height={size}>
+        <path fill="#fff" d="M8 8H18V20L30 32L18 44V56H8V40L16 32L8 24Z" />
+        <path fill="#fff" d="M56 8H46V20L34 32L46 44V56H56V40L48 32L56 24Z" />
+      </svg>
     </div>
   );
 }
@@ -580,6 +587,22 @@ function Library({ examples, loading, onSelect }) {
   );
 }
 
+function summarizeInput(input) {
+  // Long strings (file contents, HTML) become a length; the full input stays one click away.
+  return Object.entries(input || {}).map(([key, value]) => {
+    if (typeof value === "string") {
+      const oneLine = value.replace(/\s+/g, " ").trim();
+      return [
+        key,
+        oneLine.length > 140
+          ? `${oneLine.slice(0, 140)}… (${value.length.toLocaleString()} characters)`
+          : oneLine,
+      ];
+    }
+    return [key, JSON.stringify(value)];
+  });
+}
+
 function Prompt({ run, onReply }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -605,6 +628,8 @@ function Prompt({ run, onReply }) {
     }
   }
   const approval = run.pending.kind === "approval";
+  const tool = run.pending.tool;
+  const summary = tool ? summarizeInput(tool.input) : [];
   return (
     <div className={`prompt-box ${approval ? "approval" : ""}`}>
       <div className="prompt-title">
@@ -612,30 +637,43 @@ function Prompt({ run, onReply }) {
         <strong>
           {approval ? "Your approval is needed" : "Continue the conversation"}
         </strong>
-      </div>
-      {approval ? (
-        <>
-          <pre>
-            {run.pending.tool
-              ? JSON.stringify(run.pending.tool, null, 2)
-              : run.pending.prompt}
-          </pre>
+        {approval && (
           <div className="approval-actions">
-            <button
-              className="button"
-              disabled={busy}
-              onClick={() => send("n")}
-            >
+            <button className="button" disabled={busy} onClick={() => send("n")}>
               Deny
             </button>
-            <button
-              className="button primary"
-              disabled={busy}
-              onClick={() => send("y")}
-            >
+            <button className="button primary" disabled={busy} onClick={() => send("y")}>
               {busy && <LoaderCircle size={15} className="spin" />}Allow once
             </button>
           </div>
+        )}
+      </div>
+      {approval ? (
+        <>
+          {tool ? (
+            <>
+              <p className="approval-what">
+                The agent wants to run <code>{tool.name}</code>
+                {summary.length ? " with:" : "."}
+              </p>
+              {summary.length ? (
+                <dl className="approval-args">
+                  {summary.map(([key, shown]) => (
+                    <div key={key}>
+                      <dt>{key}</dt>
+                      <dd>{shown}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : null}
+              <details className="approval-full">
+                <summary>Full input</summary>
+                <pre>{JSON.stringify(tool.input, null, 2)}</pre>
+              </details>
+            </>
+          ) : (
+            <pre>{run.pending.prompt}</pre>
+          )}
         </>
       ) : (
         <form
@@ -872,8 +910,27 @@ function RunView({ id, refresh, examples }) {
   );
 }
 
+// Markdown links to files this app serves become real download links; every
+// other link stays as text so model output never becomes executable HTML.
+const APP_LINK = /\[([^\]]+)\]\((?:sandbox:)?(\/api\/(?:chats|runs)\/[^\s)]+)\)/g;
+
+function renderProse(text, keyPrefix) {
+  const nodes = [];
+  let last = 0;
+  for (const match of text.matchAll(APP_LINK)) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    nodes.push(
+      <a key={`${keyPrefix}-${match.index}`} className="inline-download" href={match[2]} download>
+        <Download size={13} /> {match[1]}
+      </a>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
 function MessageContent({ content }) {
-  // Text-only rendering: model output never becomes executable HTML.
   return (
     <div className="message-content">
       {content.split(/(```[\s\S]*?```)/g).map((part, index) => {
@@ -886,8 +943,53 @@ function MessageContent({ content }) {
             </pre>
           );
         }
-        return <span key={index}>{part}</span>;
+        return <span key={index}>{renderProse(part, index)}</span>;
       })}
+    </div>
+  );
+}
+
+function TurnActivity({ phase, since }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
+  let label = "Thinking";
+  if (phase === "approval") label = "Waiting for your approval";
+  else if (phase === "model" || phase === "text") label = "Working on the reply";
+  else if (phase?.startsWith("tool:")) label = `Running ${phase.slice(5)}`;
+  else if (phase === "waiting") label = "Reading the tool result";
+  return (
+    <div className="activity" role="status" aria-live="polite">
+      <div className="thinking">
+        <span />
+        <span />
+        <span />
+      </div>
+      <span>
+        {label}
+        {seconds >= 3 ? ` · ${seconds}s` : ""}
+      </span>
+    </div>
+  );
+}
+
+function FileLinks({ files = [] }) {
+  if (!files.length) return null;
+  return (
+    <div className="message-files">
+      {files.map((file) => (
+        <a key={file.url} className="file-row" href={file.url} download>
+          <FileCode2 size={16} />
+          <span>
+            {file.name}
+            <small>{file.kind === "download" ? "Generated download" : "Saved in the conversation workspace"}</small>
+          </span>
+          <Download size={16} />
+        </a>
+      ))}
     </div>
   );
 }
@@ -905,6 +1007,99 @@ function ToolList({ tools = [] }) {
       {tool.content && <pre>{tool.content}</pre>}
     </details>
   ));
+}
+
+const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP" };
+
+function groupTools(tools = []) {
+  const groups = [];
+  for (const tool of tools) {
+    const key = tool.source === "mcp" ? `mcp:${tool.server || ""}` : tool.source;
+    let group = groups.find((g) => g.key === key);
+    if (!group) {
+      group = {
+        key,
+        source: tool.source,
+        title:
+          tool.source === "mcp"
+            ? `${tool.server || "MCP"} · MCP server`
+            : SOURCE_LABEL[tool.source] || tool.source,
+        tools: [],
+      };
+      groups.push(group);
+    }
+    group.tools.push(tool);
+  }
+  return groups;
+}
+
+function ToolChips({ tools = [], showServer = false }) {
+  return (
+    <div className="tool-chips">
+      {tools.map((tool) => (
+        <span
+          key={tool.name}
+          className={`tool-chip ${tool.source || ""} ${tool.permission || ""}`}
+          title={`${tool.description || tool.name}\nPermission: ${tool.permission}`}
+        >
+          {showServer && tool.server ? <em>{tool.server}/</em> : null}
+          {tool.tool || tool.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ToolCatalog({ tools = [], onToggle, busy = false }) {
+  const groups = groupTools(tools);
+  if (!groups.length) return <p className="setup-empty">No tools registered.</p>;
+  return (
+    <div className="tool-catalog">
+      {groups.map((group) => {
+        const enabled = group.tools.filter((tool) => tool.enabled !== false).length;
+        return (
+          <section key={group.key} className="tool-group">
+            <header>
+              <strong>{group.title}</strong>
+              <span>
+                {enabled === group.tools.length
+                  ? `${group.tools.length} tools`
+                  : `${enabled} of ${group.tools.length} enabled`}
+              </span>
+            </header>
+            <ul>
+              {group.tools.map((tool) => {
+                const on = tool.enabled !== false;
+                const fixed = tool.source === "skill";
+                return (
+                  <li key={tool.name} className={on ? "" : "off"}>
+                    <div>
+                      <code>{tool.name}</code>
+                      <span className={`perm ${tool.permission}`}>{tool.permission}</span>
+                      {onToggle && !fixed ? (
+                        <button
+                          type="button"
+                          className={`switch ${on ? "on" : ""}`}
+                          role="switch"
+                          aria-checked={on}
+                          aria-label={`${on ? "Disable" : "Enable"} ${tool.name}`}
+                          disabled={busy}
+                          onClick={() => onToggle(tool.name, !on)}
+                        >
+                          {on ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+                        </button>
+                      ) : null}
+                    </div>
+                    <p>{tool.description || "No description provided."}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
+    </div>
+  );
 }
 
 function ConversationSetup({ chat, onClose, onUpdated }) {
@@ -997,6 +1192,11 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
       }),
     );
   }
+  async function switchTool(name, enabled) {
+    await apply(() =>
+      api(`/chats/${chat.id}/tools`, { method: "PATCH", body: { name, enabled } }),
+    );
+  }
   return (
     <Modal title="Conversation setup" onClose={onClose}>
       <p className="detail-note">
@@ -1017,6 +1217,22 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
           Save prompt
         </button>
       </form>
+      <section className="setup-section">
+        <div className="setup-section-title">
+          <div>
+            <Wrench size={17} />
+            <strong>Tools</strong>
+            <span className="count">{(chat.tools || []).length}</span>
+          </div>
+        </div>
+        <p className="detail-copy">
+          Everything the model can call in this conversation, with the
+          permission that applies when it does. Switch a tool off to hide it
+          from the model on the next turn; MCP tools are listed under the
+          server that provides them.
+        </p>
+        <ToolCatalog tools={chat.tools} onToggle={switchTool} busy={busy} />
+      </section>
       <section className="setup-section">
         <div className="setup-section-title">
           <div>
@@ -1093,9 +1309,15 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
                   <span>
                     {serverInfo.transport} · {serverInfo.tools.length} tools
                   </span>
-                  <small>
-                    {serverInfo.tools.join(", ") || "No tools discovered"}
-                  </small>
+                  {serverInfo.tools.length ? (
+                    <ToolChips
+                      tools={(chat.tools || []).filter(
+                        (tool) => tool.source === "mcp" && tool.server === name && tool.enabled !== false,
+                      )}
+                    />
+                  ) : (
+                    <small>No tools discovered</small>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -1346,12 +1568,17 @@ function ChatView({ id, providers, refresh, onNew }) {
   const provider = providers.find(
     (p) => p.id === (chat?.provider || selectedProvider),
   );
+  const enabledTools = (chat?.tools || []).filter((tool) => tool.enabled !== false);
   const visibleMessages = (chat?.messages || []).map((message) =>
     message.run_id === runId && feed.seq > 0
       ? {
           ...message,
           content: feed.text,
           tools: feed.tools,
+          segments: feed.segments?.length ? feed.segments : message.segments,
+          files: feed.files?.length ? feed.files : message.files,
+          phase: feed.phase,
+          phaseAt: feed.phaseAt,
           error: feed.error,
           status: feed.run?.status,
         }
@@ -1368,6 +1595,24 @@ function ChatView({ id, providers, refresh, onNew }) {
           {(chat?.provider || selectedProvider) === "demo" && (
             <span className="mode-label offline">Local fixture</span>
           )}
+          {chat?.tools?.length ? (
+            <button
+              type="button"
+              className="toolbar-chip"
+              title="Show the tools this conversation can use"
+              disabled={!!provider?.missing.length || !model.trim() || active}
+              onClick={openSetup}
+            >
+              <Wrench size={13} />
+              {enabledTools.length} tools
+              {enabledTools.some((tool) => tool.source === "mcp")
+                ? ` · ${enabledTools.filter((tool) => tool.source === "mcp").length} via MCP`
+                : ""}
+              {chat.tools.length > enabledTools.length
+                ? ` · ${chat.tools.length - enabledTools.length} off`
+                : ""}
+            </button>
+          ) : null}
         </div>
         <div>
           {fileRun && (
@@ -1480,6 +1725,20 @@ function ChatView({ id, providers, refresh, onNew }) {
                   </button>
                 ))}
               </div>
+              {chat?.tools?.length ? (
+                <div className="toolbox">
+                  <div className="toolbox-title">
+                    <Wrench size={13} /> Available tools
+                    <span>
+                      {enabledTools.length}
+                      {chat.tools.some((tool) => tool.source === "mcp")
+                        ? ` · ${Object.keys(chat.mcp_servers || {}).length} MCP server${Object.keys(chat.mcp_servers || {}).length === 1 ? "" : "s"}`
+                        : ""}
+                    </span>
+                  </div>
+                  <ToolChips tools={enabledTools} showServer />
+                </div>
+              ) : null}
             </div>
           ) : (
             visibleMessages.map((message, index) => (
@@ -1496,17 +1755,29 @@ function ChatView({ id, providers, refresh, onNew }) {
                     {message.role === "assistant" &&
                       message.status === "cancelled" && <span>Stopped</span>}
                   </div>
-                  <MessageContent content={message.content || ""} />
-                  <ToolList tools={message.tools} />
+                  {message.segments?.length ? (
+                    message.segments.map((segment, at) =>
+                      segment.type === "text" ? (
+                        <MessageContent key={`t${at}`} content={segment.content || ""} />
+                      ) : (
+                        <ToolList
+                          key={`c${segment.id}`}
+                          tools={(message.tools || []).filter((tool) => tool.id === segment.id)}
+                        />
+                      ),
+                    )
+                  ) : (
+                    <>
+                      <MessageContent content={message.content || ""} />
+                      <ToolList tools={message.tools} />
+                    </>
+                  )}
+                  <FileLinks files={message.files} />
                   {message.role === "assistant" &&
-                    !message.content &&
                     active &&
-                    message.run_id === runId && (
-                      <div className="thinking">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
+                    message.run_id === runId &&
+                    message.status !== "cancelled" && (
+                      <TurnActivity phase={message.phase} since={message.phaseAt} />
                     )}
                   {message.error && <ErrorNotice message={message.error} />}
                 </div>
@@ -1769,11 +2040,9 @@ export default function App() {
         <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />
       )}
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
-        <a className="brand" href="#examples">
-          <Mark />
-          <div>
-            harness-web<span>BY DATAGOL</span>
-          </div>
+        <a className="brand" href="#examples" aria-label="harness-web home">
+          <img className="brand-logo" src="/harnessx-logo.svg" width="148" height="42" alt="Harness-X" />
+          <span className="brand-caption">harness-web · by DataGOL</span>
         </a>
         <div className="workspace-label">
           <span className="live-dot" /> Local workspace{" "}

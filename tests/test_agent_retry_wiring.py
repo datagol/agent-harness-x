@@ -7,6 +7,7 @@ import asyncio
 
 from harnessx import Agent
 from harnessx.types import (
+    RetryPolicy,
     AgentConfig,
     ProviderResponse,
     StopReason,
@@ -61,9 +62,6 @@ class _FlakyProvider:
     async def count_tokens(self, **kwargs):
         return 0
 
-    def format_tools(self, tools):
-        return tools
-
     async def aclose(self):
         pass
 
@@ -86,7 +84,7 @@ async def _stream_kinds_and_text(agent, message="hi"):
 def test_the_default_config_retries_a_transient_failure():
     async def _run():
         provider = _FlakyProvider()
-        async with _agent(provider, llm_retry_backoff_seconds=0) as agent:
+        async with _agent(provider, retry=RetryPolicy(backoff_seconds=0)) as agent:
             kinds, text = await _stream_kinds_and_text(agent)
         assert text == ["hello"]
         assert "error" not in kinds
@@ -98,7 +96,7 @@ def test_the_default_config_retries_a_transient_failure():
 def test_retry_also_covers_the_non_streaming_call():
     async def _run():
         provider = _FlakyProvider()
-        async with _agent(provider, llm_retry_backoff_seconds=0) as agent:
+        async with _agent(provider, retry=RetryPolicy(backoff_seconds=0)) as agent:
             result = await agent.run("hi")
         assert result.output == "hello"
         assert provider.creates == 2
@@ -109,7 +107,7 @@ def test_retry_also_covers_the_non_streaming_call():
 def test_retry_can_be_switched_off():
     async def _run():
         provider = _FlakyProvider()
-        async with _agent(provider, llm_max_attempts=1) as agent:
+        async with _agent(provider, retry=RetryPolicy(attempts=1)) as agent:
             kinds, _ = await _stream_kinds_and_text(agent)
         assert "error" in kinds
         assert provider.opens == 1, "retry disabled means one attempt only"
@@ -120,10 +118,10 @@ def test_retry_can_be_switched_off():
 def test_a_persistent_failure_still_surfaces():
     async def _run():
         provider = _FlakyProvider(fail_times=99)
-        async with _agent(provider, llm_retry_backoff_seconds=0) as agent:
+        async with _agent(provider, retry=RetryPolicy(backoff_seconds=0)) as agent:
             kinds, _ = await _stream_kinds_and_text(agent)
         assert "error" in kinds, "a persistent failure must still surface"
-        assert provider.opens == 2, "bounded by llm_max_attempts"
+        assert provider.opens == 2, "bounded by RetryPolicy.attempts"
 
     asyncio.run(_run())
 
@@ -141,7 +139,7 @@ def test_a_deterministic_failure_is_not_retried():
                 return gen()
 
         provider = _Bad(fail_times=99)
-        async with _agent(provider, llm_retry_backoff_seconds=0) as agent:
+        async with _agent(provider, retry=RetryPolicy(backoff_seconds=0)) as agent:
             kinds, _ = await _stream_kinds_and_text(agent)
         assert "error" in kinds
         assert provider.opens == 1, "a 4xx other than 429 must not be retried"

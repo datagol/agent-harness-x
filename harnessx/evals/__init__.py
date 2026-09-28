@@ -41,12 +41,13 @@ from .evaluators import (
     tool_call_count_evaluator,
     tool_selection_evaluator,
 )
-from .runner import EvaluationSummary, evaluate_agent
+from .runner import EvaluationSummary, evaluate_agent, evaluate_agent_async
 from .target import AgentTarget, create_agent_target
 
 __all__ = [
     # Runner
     "evaluate_agent",
+    "evaluate_agent_async",
     "EvaluationSummary",
     # Target
     "AgentTarget",

@@ -44,6 +44,13 @@ class SQLiteBackend(SQLStore):
         self._mutex = asyncio.Lock()
         self._leases = {}
 
+    @classmethod
+    async def connect(cls, path: str = ".agent_sessions/runtime.sqlite3", *, auto_migrate=True) -> "SQLiteBackend":
+        """Construct and initialize in one call."""
+        backend = cls(str(path), auto_migrate=auto_migrate)
+        await backend.initialize()
+        return backend
+
     async def initialize(self):
         if self.conn is not None:
             return

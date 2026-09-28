@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .errors import HarnessError
+
 import asyncio
 import copy
 import inspect
@@ -10,11 +12,11 @@ from typing import Any, Awaitable, Callable
 from .types import PermissionLevel, TokenUsage, ToolCall, ToolDefinition
 
 
-class MaxIterationsError(Exception):
+class MaxIterationsError(HarnessError):
     pass
 
 
-class CostLimitError(Exception):
+class CostLimitError(HarnessError):
     pass
 
 
@@ -157,6 +159,7 @@ class GuardrailsEngine:
 
     @property
     def estimated_cost(self) -> float:
+        """Every input token at the input rate, so an upper bound where the vendor discounts cache reads."""
         u = self._total_usage
         return (u.input_tokens * self.input_cost_per_m + u.output_tokens * self.output_cost_per_m) / 1_000_000
 

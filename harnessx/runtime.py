@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Literal, overload
 
 if TYPE_CHECKING:
     from .recorder import BundleLimits, ExportPolicy
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 from .core import Agent
 from .engine import drive, new_state, restore
 from .execution import (
+    PendingTool,
     RunEvent,
     RunEventType,
     RunResult,
@@ -22,20 +24,38 @@ from .execution import (
     wire,
     cancel_state,
 )
+from .engine import emit_hook
+from .hooks import HookEvent
 from .registry import AgentRef, AgentRegistry, agents
 from .backends import SQLiteBackend, SessionBusyError
 from .types import AgentConfig, RuntimeConfig, RuntimeState
 from ._journal import record as journal_record
+from .errors import ConfigurationError, ResolutionError, RuntimeStateError, UnknownExecutionKey
+
+
+def _deprecated(old: str, new: str) -> None:
+    warnings.warn(f"{old} is deprecated and will be removed in harnessx 0.5; use {new}", DeprecationWarning, stacklevel=3)
+
+
+def _execution_key(target: str | PendingTool) -> str:
+    return target.execution_key if isinstance(target, PendingTool) else target
 
 
 class RunHandle:
+    """A run that may still be executing, here or in another process."""
+
     def __init__(self, backend, session_id, run_id, task=None):
-        self.backend, self.session_id, self.run_id, self._task = (
+        self._backend, self.session_id, self.run_id, self._task = (
             backend,
             session_id,
             run_id,
             task,
         )
+
+    @property
+    def backend(self):
+        _deprecated("RunHandle.backend", "the runtime's backend")
+        return self._backend
 
     async def result(self):
         if self._task:
@@ -43,12 +63,12 @@ class RunHandle:
                 return await asyncio.shield(self._task)
             except asyncio.CancelledError:
                 if self._task.cancelled():
-                    state = await self.backend.get_run(self.run_id)
+                    state = await self._backend.get_run(self.run_id)
                     if state["status"] == "cancelled":
                         return result_from_state(state)
                 raise
         while True:
-            state = await self.backend.get_run(self.run_id)
+            state = await self._backend.get_run(self.run_id)
             if state["status"] != "running":
                 return result_from_state(state)
             await asyncio.sleep(0.1)
@@ -56,7 +76,7 @@ class RunHandle:
     async def events(self, after="0"):
         last_result_status = None
         while True:
-            events = await self.backend.read_events(self.run_id, after)
+            events = await self._backend.read_events(self.run_id, after)
             for event in events:
                 after = event.cursor
                 if event.type == RunEventType.RUN_RESULT:
@@ -64,11 +84,11 @@ class RunHandle:
                 yield event
             if len(events) == 1000:
                 continue
-            state = await self.backend.get_run(self.run_id)
+            state = await self._backend.get_run(self.run_id)
             if state["status"] != "running":
                 # Status may be committed just before the final event batch.
                 while True:
-                    tail = await self.backend.read_events(self.run_id, after)
+                    tail = await self._backend.read_events(self.run_id, after)
                     for event in tail:
                         after = event.cursor
                         if event.type == RunEventType.RUN_RESULT:
@@ -118,7 +138,7 @@ class AgentRuntime:
         if agent is not None and not isinstance(agent, (Agent, AgentRef)):
             raise TypeError("agent must be an Agent or versioned AgentRef")
         if agent is not None and (agent_config is not None or agent_options or tool_registrar is not None):
-            raise ValueError("Configure an Agent/AgentRef at its definition; inline construction options cannot override it")
+            raise ConfigurationError("Configure an Agent/AgentRef at its definition; inline construction options cannot override it")
         self.backend = backend or SQLiteBackend(
             str(
                 Path((runtime_config or RuntimeConfig()).storage_dir)
@@ -142,14 +162,14 @@ class AgentRuntime:
         self._owns_backend = backend is None
         self._last_status = None
         if getattr(self.backend, "remote", False) and not self._named_binding:
-            raise ValueError("Remote execution requires a versioned AgentRef")
+            raise ConfigurationError("Remote execution requires a versioned AgentRef")
         if self.recording and not getattr(self.backend, "supports_recording", False):
-            raise ValueError("Flight recording currently requires a SQLite or PostgreSQL backend")
+            raise ConfigurationError("Flight recording currently requires a SQLite or PostgreSQL backend")
 
     async def _make_agent(self):
         if self._provided_agent is not None:
             if self._provided_agent._closed:
-                raise RuntimeError(
+                raise RuntimeStateError(
                     "Rebind a fresh agent before resuming a closed inline instance"
                 )
             return self._provided_agent
@@ -166,7 +186,7 @@ class AgentRuntime:
 
     async def start(self, session_id=None):
         if self._session_id:
-            raise RuntimeError(
+            raise RuntimeStateError(
                 "Runtime already started; use another runtime for a new session"
             )
         await self.backend.initialize()
@@ -201,9 +221,9 @@ class AgentRuntime:
 
     async def submit(self, message: str, *, request_id=None, stream=True):
         if not self._session_id:
-            raise RuntimeError("Call start() or resume() first")
+            raise RuntimeStateError("Call start() or resume() first")
         if self._state != RuntimeState.RUNNING:
-            raise RuntimeError("Runtime is not running")
+            raise RuntimeStateError("Runtime is not running")
         request_id = request_id or str(uuid.uuid4())
         if getattr(self.backend, "remote", False):
             return await self.backend.submit(
@@ -212,7 +232,7 @@ class AgentRuntime:
         existing = await self.backend.find_request(self._session_id, request_id)
         if existing:
             if existing["message"] != message:
-                raise ValueError("Request ID already used with different input")
+                raise ConfigurationError("Request ID already used with different input")
             task = (
                 self._task
                 if self._task and self._active_run_id == existing["run_id"]
@@ -297,6 +317,11 @@ class AgentRuntime:
                     await self.backend.save_run(state, events, lease, records=records)
                 else:
                     await self.backend.save_run(state, events, lease)
+                await emit_hook(
+                    self._agent, HookEvent.CHECKPOINT,
+                    session_id=self._session_id, run_id=state["run_id"],
+                    status=state["status"], phase=state["phase"],
+                )
 
         async def discard(event):
             pass
@@ -342,10 +367,15 @@ class AgentRuntime:
             await asyncio.gather(heart, return_exceptions=True)
             await self.backend.release(self._session_id, lease)
 
-    async def execute(self, message, *, request_id=None) -> RunResult:
+    async def run(self, message: str, *, request_id: str | None = None) -> RunResult:
+        """Run one durable turn to completion. A tool needing approval returns needs_input."""
         return await (
             await self.submit(message, request_id=request_id, stream=False)
         ).result()
+
+    async def execute(self, message, *, request_id=None) -> RunResult:
+        _deprecated("AgentRuntime.execute", "AgentRuntime.run")
+        return await self.run(message, request_id=request_id)
 
     async def export_incident(
         self, run_id: str, *, destination: str | Path,
@@ -357,9 +387,9 @@ class AgentRuntime:
         The artifact policy is separate. This method does not execute the incident.
         """
         if not self._session_id:
-            raise RuntimeError("Call start() or resume() before exporting")
+            raise RuntimeStateError("Call start() or resume() before exporting")
         if not getattr(self.backend, "supports_recording", False):
-            raise ValueError("This backend does not support flight-recorder export")
+            raise ConfigurationError("This backend does not support flight-recorder export")
         from .recorder import export_incident
 
         return await export_incident(
@@ -367,7 +397,8 @@ class AgentRuntime:
             policy=policy, limits=limits,
         )
 
-    def execute_stream(self, message, *, request_id=None):
+    def run_stream(self, message: str, *, request_id: str | None = None) -> RunStream:
+        """Run one durable turn as a stream of typed events."""
         async def run(emit):
             handle = await self.submit(message, request_id=request_id, stream=True)
             async for event in handle.events():
@@ -376,32 +407,44 @@ class AgentRuntime:
 
         return RunStream(run)
 
+    def execute_stream(self, message, *, request_id=None):
+        _deprecated("AgentRuntime.execute_stream", "AgentRuntime.run_stream")
+        return self.run_stream(message, request_id=request_id)
+
+    async def stream_text(
+        self, message: str, *, request_id: str | None = None, on_reset: Callable[[], Any] | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield the answer's text as it arrives; raise RunError if the run does not complete."""
+        async with self.run_stream(message, request_id=request_id) as stream:
+            async for text in stream.text(on_reset=on_reset):
+                yield text
+
     async def resume(self, session_id):
         if self._task and not self._task.done():
             raise SessionBusyError("Runtime already executing")
         await self.backend.initialize()
         session = await self.backend.get_session(session_id)
         if session["agent"] != wire(self._ref):
-            raise ValueError("Agent definition version does not match saved session")
+            raise ConfigurationError("Agent definition version does not match saved session")
         saved_recording = session.get("recording", False)
         if self._recording_requested is not None and self._recording_requested != saved_recording:
-            raise ValueError("Recording configuration differs from persisted session")
+            raise ConfigurationError("Recording configuration differs from persisted session")
         if saved_recording and not getattr(self.backend, "supports_recording", False):
-            raise ValueError("This backend cannot resume recorded execution")
+            raise ConfigurationError("This backend cannot resume recorded execution")
         self.recording = saved_recording
         if getattr(self.backend, "remote", False):
             self._session_id = session_id
             self._started_at = time.time()
             self._state = RuntimeState.RUNNING
             return await self.backend.resume(session_id)
-        self._config = AgentConfig(**session["config"])
+        self._config = AgentConfig.from_dict(session["config"])
         lease = await self.backend.claim(session_id)
         previous = self._agent
         candidate = None
         try:
             candidate = await self._make_agent()
             if wire(candidate.config) != wire(self._config):
-                raise ValueError("Agent configuration differs from persisted session")
+                raise ConfigurationError("Agent configuration differs from persisted session")
             candidate._session_id = session_id
             candidate._artifact_store = self.backend
             state = await self.backend.latest_run(session_id)
@@ -459,10 +502,12 @@ class AgentRuntime:
                 "failed",
                 "cancelled",
             ):
-                raise RuntimeError("Run is not awaiting a resolution")
+                raise RuntimeStateError("Run is not awaiting a resolution")
             entry = next(
-                t for t in state["tools"] if t["execution_key"] == execution_key
+                (t for t in state["tools"] if t["execution_key"] == execution_key), None
             )
+            if entry is None:
+                raise UnknownExecutionKey(execution_key)
             resolve_entry(
                 state, entry, allow=allow, result=wire(result), retry=retry, abort=abort
             )
@@ -478,13 +523,57 @@ class AgentRuntime:
         finally:
             await self.backend.release(self._session_id, lease)
 
-    async def approve(self, execution_key, allow=True):
-        await self._resolve(execution_key, allow=allow)
+    @overload
+    async def approve(
+        self, target: str | PendingTool, *, allow: bool = ..., resume: Literal[False] = ...,
+    ) -> None: ...
+
+    @overload
+    async def approve(
+        self, target: str | PendingTool, *, allow: bool = ..., resume: Literal[True],
+    ) -> RunResult: ...
+
+    async def approve(
+        self, target: str | PendingTool, *, allow: bool = True, resume: bool = False,
+    ) -> RunResult | None:
+        """Record an approval decision for a paused tool.
+
+        With ``resume=True`` the run continues and the finished RunResult is
+        returned; a run with several pending tools takes one decision per tool
+        and a single resume at the end.
+        """
+        await self._resolve(_execution_key(target), allow=allow)
+        if not resume:
+            return None
+        return await self._finish_resume()
+
+    @overload
+    async def decline(self, target: str | PendingTool, *, resume: Literal[False] = ...) -> None: ...
+
+    @overload
+    async def decline(self, target: str | PendingTool, *, resume: Literal[True]) -> RunResult: ...
+
+    async def decline(self, target: str | PendingTool, *, resume: bool = False) -> RunResult | None:
+        """Refuse a paused tool; the model sees a permission-denied result."""
+        if resume:
+            return await self.approve(target, allow=False, resume=True)
+        await self.approve(target, allow=False)
+        return None
+
+    async def _finish_resume(self) -> RunResult:
+        handle = await self.resume(self._session_id)
+        if handle is not None:
+            return await handle.result()
+        run = (await self.status()).get("run")
+        if run is None:
+            raise RuntimeStateError("No run to resume in this session")
+        return run
 
     async def resolve_tool(
-        self, execution_key, *, result=None, retry=False, abort=False
+        self, target: str | PendingTool, *, result=None, retry=False, abort=False
     ):
-        await self._resolve(execution_key, result=result, retry=retry, abort=abort)
+        """Settle a tool whose outcome is unknown: supply its result, retry it, or abort the run."""
+        await self._resolve(_execution_key(target), result=result, retry=retry, abort=abort)
 
     async def pause(self):
         await self.backend.set_control(self._session_id, "paused")
@@ -527,7 +616,8 @@ class AgentRuntime:
             raise SessionBusyError("Execution already checkpoints each boundary")
         return await self.backend.latest_run(self._session_id)
 
-    async def get_status(self):
+    async def status(self) -> dict[str, Any]:
+        """Session id, runtime state, and the latest RunResult, if any."""
         if getattr(self.backend, "remote", False):
             status = await self.backend.get_status(self._session_id)
             status["state"] = self._state.value
@@ -539,6 +629,10 @@ class AgentRuntime:
             "run": result_from_state(state) if state else None,
         }
 
+    async def get_status(self):
+        _deprecated("AgentRuntime.get_status", "AgentRuntime.status")
+        return await self.status()
+
     async def stop(self):
         if self._state == RuntimeState.STOPPED:
             return self._last_status
@@ -548,7 +642,7 @@ class AgentRuntime:
                     await self.backend.set_control(self._session_id, "paused")
                 if self._task and not self._task.done():
                     await self.pause()
-                self._last_status = await self.get_status()
+                self._last_status = await self.status()
         finally:
             self._state = RuntimeState.STOPPED
             self._last_status = {**(self._last_status or {"session_id": self._session_id, "run": None}), "state": "stopped"}
@@ -559,6 +653,10 @@ class AgentRuntime:
                 if self._owns_backend:
                     await self.backend.aclose()
         return self._last_status
+
+    async def aclose(self):
+        """Alias of stop(), matching every other closable object in harnessx."""
+        return await self.stop()
 
     async def __aenter__(self):
         await self.start()
@@ -585,7 +683,7 @@ def resolve_entry(state, entry, *, allow=None, result=None, retry=False, abort=F
 
     if allow is not None:
         if entry["status"] != "approval":
-            raise ValueError("Tool is not awaiting approval")
+            raise ResolutionError("Tool is not awaiting approval")
         if allow:
             entry.update(status="prepared", approved=True)
         else:
@@ -595,18 +693,18 @@ def resolve_entry(state, entry, *, allow=None, result=None, retry=False, abort=F
             )
     else:
         if sum([result is not None, retry, abort]) != 1:
-            raise ValueError("Choose exactly one of result, retry, abort")
+            raise ResolutionError("Choose exactly one of result, retry, abort")
         if entry["status"] not in ("uncertain", "started"):
-            raise ValueError("Tool has no uncertain outcome")
+            raise ResolutionError("Tool has no uncertain outcome")
         if abort:
             cancel_state(state)
         elif retry:
             if state["status"] == "cancelled":
-                raise ValueError(
+                raise ResolutionError(
                     "Cancelled runs cannot be retried; supply a verified outcome or start a new turn"
                 )
             entry["status"] = "prepared"
         else:
             if result["tool_call_id"] != entry["call"]["id"]:
-                raise ValueError("Resolution must match tool call ID")
+                raise ResolutionError("Resolution must match tool call ID")
             entry.update(status="raw_completed", raw_result=result)

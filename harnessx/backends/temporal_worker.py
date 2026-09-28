@@ -20,6 +20,7 @@ from ..engine import (
 )
 from ..execution import RunEvent, RunEventType, wire, ToolApprovalRequired
 from ..registry import AgentRef
+from ..types import AgentConfig
 
 
 class ArtifactCodec(PayloadCodec):
@@ -67,7 +68,7 @@ class AgentActivities:
         try:
             if args.get("state"):
                 state = args["state"]
-                if state.get("config") and wire(agent.config) != state["config"]:
+                if state.get("config") and wire(agent.config) != wire(AgentConfig.from_dict(state["config"])):
                     raise ValueError(
                         "Worker agent definition differs from persisted configuration"
                     )

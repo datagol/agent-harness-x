@@ -6,10 +6,13 @@ the LLM can understand, and dispatching LLM tool calls back to those functions.
 
 from __future__ import annotations
 
+from .errors import HarnessError
+
 import asyncio
 import inspect
 import json
 import re
+import logging
 import traceback
 import types
 from copy import deepcopy
@@ -19,7 +22,7 @@ from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origi
 from jsonschema import Draft202012Validator, validate
 
 from .permissions import PermissionManager
-from .types import PermissionLevel, ToolCall, ToolDefinition, ToolResult
+from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolCall, ToolDefinition, ToolPolicy, ToolResult
 
 
 # Python type → JSON Schema type mapping
@@ -162,7 +165,10 @@ def _generate_input_schema(func: Callable) -> tuple[dict[str, Any], list[str]]:
     return schema, required
 
 
-class ToolNotFoundError(Exception):
+logger = logging.getLogger(__name__)
+
+
+class ToolNotFoundError(HarnessError, LookupError):
     pass
 
 
@@ -173,27 +179,50 @@ class ToolRegistry:
         self,
         *,
         default_timeout_seconds: float | None = None,
-        dedupe_calls: bool = False,
+        dedupe_calls: bool | None = None,
+        sandbox: Any | None = None,
     ) -> None:
         self._tools: dict[str, ToolDefinition] = {}
-        # Applied to any tool that does not set its own timeout_seconds.
+        # Applied to any tool that does not set its own timeout_seconds. None
+        # means unset: an adopting Agent's ToolPolicy may fill it in.
         self._default_timeout_seconds = default_timeout_seconds
         # When on, an identical repeated call (same name AND same arguments)
-        # returns the first result instead of running again. A model that
-        # re-emits a call would otherwise do the work twice - two identical
-        # side effects and double the cost. Off by default: a caller whose
-        # tools are meant to be called repeatedly with the same arguments
-        # must opt in, not be surprised.
+        # within one run returns the first result instead of running again.
+        # None means unset (inherit from the adopting Agent, else off).
         self._dedupe_calls = dedupe_calls
         self._call_results: dict[str, ToolResult] = {}
+        # Tools registered without a timeout of their own; re-resolved when a
+        # default arrives later through adopt_policy().
+        self._inherited_timeouts: set[str] = set()
+        # Default execution engine for the bash built-in.
+        self.sandbox = sandbox
 
     def _resolve_timeout(self, timeout_seconds: float | None) -> float:
-        """A tool's own timeout, else the registry default, else 300 seconds."""
+        """A tool's own timeout, else the registry default, else DEFAULT_TIMEOUT_SECONDS."""
         if timeout_seconds is not None:
             return timeout_seconds
         if self._default_timeout_seconds is not None:
             return self._default_timeout_seconds
-        return 300.0
+        return DEFAULT_TIMEOUT_SECONDS
+
+    @property
+    def policy(self) -> ToolPolicy:
+        """Effective options, including anything adopted from an AgentConfig."""
+        return ToolPolicy(
+            default_timeout_seconds=self._default_timeout_seconds,
+            dedupe_calls=bool(self._dedupe_calls),
+        )
+
+    def adopt_policy(self, policy: ToolPolicy) -> None:
+        """Fill options this registry was constructed without. Constructor values always win."""
+        if self._default_timeout_seconds is None and policy.default_timeout_seconds is not None:
+            self._default_timeout_seconds = policy.default_timeout_seconds
+            for name in self._inherited_timeouts & self._tools.keys():
+                self._tools[name] = replace_definition(
+                    self._tools[name], timeout_seconds=policy.default_timeout_seconds
+                )
+        if self._dedupe_calls is None and policy.dedupe_calls:
+            self._dedupe_calls = True
 
     def reset_call_cache(self) -> None:
         """Forget deduped results. Call between turns; results are per-turn."""
@@ -206,12 +235,17 @@ class ToolRegistry:
         except Exception:
             return None  # unserialisable arguments: never dedupe
 
-    def _store(self, definition: ToolDefinition, *, replace: bool = False) -> ToolDefinition:
+    def _store(
+        self, definition: ToolDefinition, *, replace: bool = False, inherited_timeout: bool = False,
+    ) -> ToolDefinition:
         if definition.name in self._tools and not replace:
             raise ValueError(f"Tool {definition.name!r} is already registered; pass replace=True to replace it")
         Draft202012Validator.check_schema(definition.input_schema)
         owned = replace_definition(definition, input_schema=deepcopy(definition.input_schema))
         self._tools[owned.name] = owned
+        self._inherited_timeouts.discard(owned.name)
+        if inherited_timeout:
+            self._inherited_timeouts.add(owned.name)
         return owned
 
     def register(
@@ -221,7 +255,7 @@ class ToolRegistry:
         description: str | None = None,
         permission: PermissionLevel | None = None,
         concurrent: bool = True,
-        replay_policy: str = "manual",
+        replay_policy: ReplayPolicy | str = "manual",
         timeout_seconds: float | None = None,
         replace: bool = False,
     ) -> Callable:
@@ -230,8 +264,11 @@ class ToolRegistry:
         Auto-generates JSON Schema from type hints and docstring.
         """
 
-        if replay_policy not in ("safe", "idempotent", "manual"):
-            raise ValueError("Invalid tool replay policy")
+        try:
+            replay_policy = ReplayPolicy(replay_policy).value
+        except ValueError:
+            raise ValueError("Invalid tool replay policy") from None
+        inherited = timeout_seconds is None
         timeout_seconds = self._resolve_timeout(timeout_seconds)
         if timeout_seconds <= 0:
             raise ValueError("Tool timeout must be positive")
@@ -251,7 +288,7 @@ class ToolRegistry:
                 concurrent=concurrent,
                 replay_policy=replay_policy,
                 timeout_seconds=timeout_seconds,
-            ), replace=replace)
+            ), replace=replace, inherited_timeout=inherited)
             return func
 
         return decorator
@@ -264,7 +301,7 @@ class ToolRegistry:
         description: str | None = None,
         permission: PermissionLevel | None = None,
         concurrent: bool | None = None,
-        replay_policy: str | None = None,
+        replay_policy: ReplayPolicy | str | None = None,
         timeout_seconds: float | None = None,
         replace: bool = False,
     ) -> ToolDefinition:
@@ -295,11 +332,11 @@ class ToolRegistry:
         description: str,
         input_schema: dict[str, Any],
         handler: Callable,
+        *,
         permission: PermissionLevel | None = None,
         concurrent: bool = True,
-        replay_policy: str = "manual",
+        replay_policy: ReplayPolicy | str = "manual",
         timeout_seconds: float | None = None,
-        *,
         replace: bool = False,
     ) -> ToolDefinition:
         """Imperative registration with explicit schema."""
@@ -312,7 +349,7 @@ class ToolRegistry:
             concurrent=concurrent,
             replay_policy=replay_policy,
             timeout_seconds=self._resolve_timeout(timeout_seconds),
-        ), replace=replace)
+        ), replace=replace, inherited_timeout=timeout_seconds is None)
 
     def load_builtin(
         self,
@@ -404,6 +441,7 @@ class ToolRegistry:
 
     def unregister(self, name: str) -> bool:
         """Remove a tool from the registry. Returns True if removed."""
+        self._inherited_timeouts.discard(name)
         return self._tools.pop(name, None) is not None
 
     def get_tool(self, name: str) -> ToolDefinition:
@@ -432,7 +470,7 @@ class ToolRegistry:
             policy = permissions if permissions is not None else PermissionManager()
             allowed = await policy.check_permission(call, definition)
             if not allowed:
-                return ToolResult(call.id, "Permission denied or approval required", True)
+                return ToolResult(call.id, "Permission denied", True)
             try:
                 async with asyncio.timeout(definition.timeout_seconds):
                     return await self._dispatch(call, definition)
@@ -484,15 +522,22 @@ class ToolRegistry:
                 tool_call_id=tool_call.id,
                 content=json.dumps(result, ensure_ascii=False, allow_nan=False) if isinstance(result, (dict, list)) else str(result),
             )
-        except Exception:
+        except Exception as exc:
+            # The model gets one line it can act on; the traceback is for the operator.
+            logger.warning("Tool %s failed: %s", tool_call.name, traceback.format_exc())
             return ToolResult(
                 tool_call_id=tool_call.id,
-                content=f"Tool execution error:\n{traceback.format_exc()}",
+                content=f"Tool execution error: {type(exc).__name__}: {exc}",
                 is_error=True,
             )
 
 
-def normalize_tool_registry(tools: ToolRegistry | list[Any] | None) -> ToolRegistry:
+def normalize_tool_registry(
+    tools: ToolRegistry | list[Any] | None,
+    *,
+    policy: ToolPolicy | None = None,
+    sandbox: Any | None = None,
+) -> ToolRegistry:
     """Normalize tools argument into a ToolRegistry.
 
     Supports:
@@ -501,8 +546,17 @@ def normalize_tool_registry(tools: ToolRegistry | list[Any] | None) -> ToolRegis
     - list of strings (bundles or tool names), callables, or ToolDefinitions
     """
     if isinstance(tools, ToolRegistry):
+        if policy is not None:
+            tools.adopt_policy(policy)
+        if sandbox is not None:
+            if tools.sandbox is None:
+                tools.sandbox = sandbox
+            elif tools.sandbox is not sandbox:
+                raise ValueError("ToolRegistry is already bound to a different sandbox")
         return tools
-    registry = ToolRegistry()
+    registry = ToolRegistry(sandbox=sandbox)
+    if policy is not None:
+        registry.adopt_policy(policy)  # before registering, so defaults apply at registration
     if tools is None:
         return registry
     if isinstance(tools, (list, tuple, set)):

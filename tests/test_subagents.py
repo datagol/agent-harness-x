@@ -87,7 +87,7 @@ async def test_delegation_isolated_and_serial_with_cleanup(monkeypatch, streamin
             assert task in str(request["messages"])
             assert "Private parent context" not in str(request)
             assert "Parent-only prompt" not in str(request)
-            assert not request["tools"]
+            assert [t["name"] for t in request["tools"]] == ["read_tool_result"]  # only the built-in reader
         assert [outcome["content"] for outcome in outcomes(parent)] == ["Review finding"] * 2
         assert "Review finding" in str(parent_provider.requests[-1]["messages"])
         if streaming:
@@ -189,8 +189,8 @@ async def test_timeout_or_cancellation_closes_child(monkeypatch, cancel):
                 await task
         else:
             result = await asyncio.wait_for(task, 2)
-            assert result.status == "awaiting_input" and result.pending[0]["status"] == "uncertain"
-        assert child.closed and not parent._busy
+            assert result.status == "awaiting_input" and result.pending[0].status == "uncertain"
+        assert child.closed and not parent.busy
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ async def test_bindings_and_skills_do_not_mutate_definitions(monkeypatch, tmp_pa
             assert not (await parent.tools.execute(delegate())).is_error
     assert not tools.has_tool("Skill")
     for child in children:
-        assert {t["name"] for t in child.requests[0]["tools"]} == {"sample", "Skill"}
+        assert {t["name"] for t in child.requests[0]["tools"]} == {"sample", "Skill", "read_tool_result"}
         assert "changed after registration" not in str(child.requests)
         assert child.closed
 
@@ -281,7 +281,7 @@ async def test_durable_raw_result_is_reused_after_processing_failure(monkeypatch
     runtime = AgentRuntime(ref, registry=registry, backend=store)
     try:
         sid = await runtime.start()
-        failed = await runtime.execute("review")
+        failed = await runtime.run("review")
         assert failed.status == "failed" and len(children) == 1
         saved = await store.get_run(failed.run_id)
         assert saved["tools"][0]["status"] == "raw_completed"
@@ -319,8 +319,8 @@ async def test_uncertain_durable_delegation_requires_manual_recovery(monkeypatch
         await store.release(sid, lease)
         handle = await runtime.resume(sid)
         result = await handle.result()
-        assert result.status == "awaiting_input" and result.pending[0]["status"] == "uncertain"
-        await runtime.resolve_tool(result.pending[0]["execution_key"], result=ToolResult(call.id, "verified result"))
+        assert result.status == "awaiting_input" and result.pending[0].status == "uncertain"
+        await runtime.resolve_tool(result.pending[0].execution_key, result=ToolResult(call.id, "verified result"))
         handle = await runtime.resume(sid)
         assert (await handle.result()).output == "synthesized"
     finally:

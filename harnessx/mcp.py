@@ -8,12 +8,12 @@ Supports two transports:
   - sse: connects to a remote HTTP server via Server-Sent Events
 
 Usage:
-    mcp_manager = MCPManager()
-    await mcp_manager.connect("filesystem", command="npx", args=[...])
-    await mcp_manager.connect("remote", url="http://localhost:8000/sse")
-    mcp_manager.register_tools(agent.tools)
-    # Now the agent can use all MCP tools transparently
-    await mcp_manager.disconnect_all()
+    async with MCPManager() as mcp:
+        await mcp.connect("filesystem", command="npx", args=[...])
+        await mcp.connect("remote", url="http://localhost:8000/sse")
+        agent = Agent(mcp=mcp)  # bridges the discovered tools into agent.tools
+        ...
+    # leaving the block disconnects every server
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ import logging
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, Mapping, Sequence, overload
 
 from .tools import ToolRegistry
+from .errors import ConfigurationError
 from .types import PermissionLevel
 
 logger = logging.getLogger(__name__)
@@ -42,20 +43,77 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized[:128]
 
 
+def _registered_name(server_name: str, tool_name: str, *, prefix: bool = True) -> str:
+    """The registry name of an MCP tool: sanitized, server-prefixed unless already so."""
+    san_server = _sanitize_tool_name(server_name)
+    san_tool = _sanitize_tool_name(tool_name)
+    if prefix and not san_tool.startswith(san_server):
+        return _sanitize_tool_name(f"{san_server}_{san_tool}")
+    return san_tool
+
+
 @dataclass
 class MCPServerConfig:
-    """Configuration for connecting to an MCP server."""
+    """How to reach one MCP server: a stdio command or an HTTP URL, never both.
+
+    Build one with ``MCPServerConfig.stdio(...)`` or ``MCPServerConfig.http(...)``
+    and hand it to ``MCPManager.connect``. ``name`` is yours to choose; it keys
+    the connection and prefixes every bridged tool (``files_read_file``).
+    """
 
     name: str
     # stdio transport
     command: str | None = None
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
-    # sse transport
+    # HTTP transport: streamable HTTP first, then SSE on the same URL
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
     # common
     permission: PermissionLevel = PermissionLevel.ASK
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ConfigurationError("MCP server name must be a nonempty string")
+        if bool(self.command) == bool(self.url):
+            raise ConfigurationError(
+                f"MCP server {self.name!r}: give exactly one of command (stdio) or url (http)"
+            )
+        self.args = list(self.args)
+        self.headers = dict(self.headers)
+        self.permission = PermissionLevel(self.permission)
+
+    @classmethod
+    def stdio(
+        cls,
+        name: str,
+        command: str,
+        *,
+        args: Sequence[str] = (),
+        env: Mapping[str, str] | None = None,
+        permission: PermissionLevel | str = PermissionLevel.ASK,
+    ) -> MCPServerConfig:
+        """A server launched as a subprocess and spoken to over stdio."""
+        return cls(
+            name=name, command=command, args=list(args),
+            env=dict(env) if env is not None else None, permission=PermissionLevel(permission),
+        )
+
+    @classmethod
+    def http(
+        cls,
+        name: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        permission: PermissionLevel | str = PermissionLevel.ASK,
+    ) -> MCPServerConfig:
+        """A server reached over HTTP: streamable HTTP first, falling back to SSE."""
+        return cls(name=name, url=url, headers=dict(headers or {}), permission=PermissionLevel(permission))
+
+    @property
+    def transport(self) -> Literal["stdio", "http"]:
+        return "stdio" if self.command else "http"
 
 
 @dataclass
@@ -76,6 +134,7 @@ class MCPConnection:
         self.session: Any = None  # mcp.ClientSession
         self._exit_stack: AsyncExitStack | None = None
         self._tools: list[MCPToolInfo] = []
+        self.transport: str | None = None  # negotiated: stdio, streamable-http, or sse
 
     async def connect(self) -> list[MCPToolInfo]:
         """Connect to the MCP server and discover its tools."""
@@ -102,6 +161,7 @@ class MCPConnection:
             read, write = await self._exit_stack.enter_async_context(
                 stdio_client(server_params)
             )
+            self.transport = "stdio"
         elif self.config.url:
             # Try streamable HTTP first (modern transport), fall back to SSE
             connected = False
@@ -125,6 +185,7 @@ class MCPConnection:
                 )
                 read, write = result[0], result[1]
                 connected = True
+                self.transport = "streamable-http"
                 logger.info(f"MCP '{self.config.name}': connected via streamable HTTP")
             except Exception as e:
                 logger.info(f"MCP '{self.config.name}': streamable HTTP failed ({e}), trying SSE")
@@ -136,6 +197,7 @@ class MCPConnection:
                     read, write = await self._exit_stack.enter_async_context(
                         sse_client(self.config.url, headers=self.config.headers)
                     )
+                    self.transport = "sse"
                     logger.info(f"MCP '{self.config.name}': connected via SSE")
                 except Exception as e:
                     raise ConnectionError(
@@ -234,31 +296,54 @@ class MCPConnection:
 
 class MCPManager:
     """Manages connections to multiple MCP servers and bridges their tools
-    into the agent's ToolRegistry.
+    into an agent's ToolRegistry.
 
     Usage:
-        manager = MCPManager()
+        async with MCPManager() as mcp:
+            # Connect to servers first; discovery happens here.
+            await mcp.connect("files", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+            await mcp.connect("api", url="http://localhost:8000/sse")
 
-        # Connect to servers
-        await manager.connect("files", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
-        await manager.connect("api", url="http://localhost:8000/sse")
+            # Agent(mcp=...) bridges every discovered tool into agent.tools and
+            # lists the registered names on agent.mcp_tools.
+            async with Agent(mcp=mcp) as agent:
+                ...  # the model uses MCP tools like native ones
+        # leaving the block disconnects every server
 
-        # Register all MCP tools into the agent's registry
-        manager.register_tools(agent.tools)
-
-        # ... agent runs and uses MCP tools transparently ...
-
-        # Cleanup
-        await manager.disconnect_all()
+    ``register_tools(registry)`` remains available for a registry that is not
+    handed to an Agent; it is idempotent for the same manager. The manager is
+    caller-owned: closing an agent never disconnects it.
     """
 
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
-        self._tool_to_server: dict[str, str] = {}  # tool_name -> server_name
+        self._tool_to_server: dict[str, str] = {}  # registry tool name -> server name
 
+    async def __aenter__(self) -> "MCPManager":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.disconnect_all()
+
+    @overload
+    async def connect(self, name: MCPServerConfig, /) -> list[MCPToolInfo]: ...
+
+    @overload
     async def connect(
         self,
         name: str,
+        *,
+        command: str | None = ...,
+        args: list[str] | None = ...,
+        env: dict[str, str] | None = ...,
+        url: str | None = ...,
+        headers: dict[str, str] | None = ...,
+        permission: PermissionLevel = ...,
+    ) -> list[MCPToolInfo]: ...
+
+    async def connect(
+        self,
+        name: str | MCPServerConfig,
         *,
         command: str | None = None,
         args: list[str] | None = None,
@@ -269,28 +354,35 @@ class MCPManager:
     ) -> list[MCPToolInfo]:
         """Connect to an MCP server and discover its tools.
 
-        For stdio transport: provide command (and optionally args, env).
-        For SSE transport: provide url (and optionally headers).
+        Pass an ``MCPServerConfig`` (``MCPServerConfig.stdio(...)`` or
+        ``MCPServerConfig.http(...)``), or a name with ``command=`` (stdio) or
+        ``url=`` (HTTP) keywords.
         """
-        config = MCPServerConfig(
-            name=name,
-            command=command,
-            args=args or [],
-            env=env,
-            url=url,
-            headers=headers or {},
-            permission=permission,
-        )
+        if isinstance(name, MCPServerConfig):
+            given = [k for k, v in (("command", command), ("args", args), ("env", env), ("url", url), ("headers", headers)) if v is not None]
+            if given or permission is not PermissionLevel.ASK:
+                raise TypeError(
+                    f"connect(MCPServerConfig) takes no keyword arguments ({', '.join(given) or 'permission'} given); "
+                    "put them on the config"
+                )
+            config = name
+        else:
+            config = MCPServerConfig(
+                name=name, command=command, args=args or [], env=env, url=url,
+                headers=headers or {}, permission=permission,
+            )
+        name = config.name
+        if name in self._connections:
+            raise ValueError(f"MCP server {name!r} is already connected; disconnect it first")
 
         conn = MCPConnection(config)
         tools = await conn.connect()
 
         self._connections[name] = conn
 
-        # Map tool names to server (prefix with server name to avoid collisions)
+        # Map registry names to their server so lookups match register_tools().
         for tool in tools:
-            qualified_name = f"{name}__{tool.tool_name}"
-            self._tool_to_server[qualified_name] = name
+            self._tool_to_server[_registered_name(name, tool.tool_name)] = name
 
         return tools
 
@@ -341,22 +433,28 @@ class MCPManager:
             permission: Override permission level for all MCP tools. If None, uses per-server config.
 
         Returns:
-            List of registered tool names.
+            The MCP tool names present in the registry after the call. Calling
+            this twice with the same manager is a no-op for tools it already
+            bridged; a name held by anything else raises ValueError.
         """
         registered: list[str] = []
 
         for server_name, conn in self._connections.items():
             for tool_info in conn.tools:
-                # Prefix with server name, but skip if tool already starts with it
-                san_server = _sanitize_tool_name(server_name)
-                san_tool = _sanitize_tool_name(tool_info.tool_name)
-                if prefix and not san_tool.startswith(san_server):
-                    raw_name = f"{san_server}_{san_tool}"
-                else:
-                    raw_name = san_tool
-                # Sanitize: only allow [a-zA-Z0-9_-], truncate to 128 chars
-                tool_name = _sanitize_tool_name(raw_name)
+                tool_name = _registered_name(server_name, tool_info.tool_name, prefix=prefix)
                 perm = permission or conn.config.permission
+                if registry.has_tool(tool_name):
+                    existing = registry.get_tool(tool_name).handler
+                    if (
+                        getattr(existing, "__mcp_tool__", None) == (server_name, tool_info.tool_name)
+                        and getattr(existing, "__mcp_manager__", None) is self
+                    ):
+                        registered.append(tool_name)
+                        continue
+                    raise ValueError(
+                        f"Tool {tool_name!r} is already registered by something other than "
+                        f"MCP server {server_name!r} on this manager"
+                    )
 
                 # Create a handler that routes to the MCP server
                 handler = self._make_mcp_handler(server_name, tool_info.tool_name)
@@ -386,6 +484,8 @@ class MCPManager:
 
         handler.__name__ = f"mcp_{server_name}_{tool_name}"
         handler.__doc__ = f"MCP tool '{tool_name}' on server '{server_name}'"
+        handler.__mcp_tool__ = (server_name, tool_name)  # type: ignore[attr-defined]
+        handler.__mcp_manager__ = manager  # type: ignore[attr-defined]
         return handler
 
     async def disconnect(self, name: str) -> None:
@@ -414,7 +514,7 @@ class MCPManager:
         for name, conn in self._connections.items():
             result[name] = {
                 "connected": conn.is_connected,
-                "transport": "stdio" if conn.config.command else "sse",
+                "transport": conn.transport or conn.config.transport,
                 "tools": [t.tool_name for t in conn.tools],
             }
         return result

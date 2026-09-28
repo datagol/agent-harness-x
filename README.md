@@ -100,7 +100,9 @@ alongside agents. Try its offline examples with `python -m examples.jev_routing
 `python -m examples.jev_answer_review`. Live calls require the `jev` extra,
 `TYPESAFE_API_KEY`, and an explicit `--live` flag.
 
-For 0.3 API changes, see the [migration guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
+Upgrading from 0.3? [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md) lists every
+renamed, deprecated, and removed name in 0.4. The [durable runtime guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/)
+covers the 0.3 runtime changes.
 
 ---
 
@@ -111,7 +113,7 @@ until the model stops with `end_turn`.
 
 ```python
 import asyncio
-from harnessx import Agent, AgentConfig
+from harnessx import Agent, AgentConfig, Limits
 
 agent = Agent(
     config=AgentConfig(
@@ -119,7 +121,7 @@ agent = Agent(
         provider="anthropic",            # "anthropic", "openai", "gemini", "openrouter", or "azure"
         system_prompt="You are a helpful assistant.",
         max_tokens=8192,
-        max_iterations=50,               # loop guardrail
+        limits=Limits(max_iterations=50),  # loop guardrail
         temperature=None,                # omitted by default for safety
     )
 )
@@ -127,9 +129,7 @@ agent = Agent(
 async def main():
     async with agent:
         result = await agent.run("What is 17 + 25?")
-        if result.error:
-            raise RuntimeError(result.error["message"])
-        print(result.output)
+        print(result.raise_for_status().output)   # raises RunFailed if the run did not complete
 
 asyncio.run(main())
 ```
@@ -139,15 +139,18 @@ asyncio.run(main())
 | Field | Default | Purpose |
 |---|---|---|
 | `model` | `"claude-sonnet-4-6"` | Model id passed to the provider |
-| `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, `"openrouter"`, or `"azure"` |
+| `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, `"openrouter"`, `"azure"`, or a name passed to `register_provider()` |
 | `max_tokens` | `8192` | Per-response token cap |
-| `max_iterations` | `50` | Max loop iterations before `MaxIterationsError` |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
-| `max_result_chars` | `12000` | Tool-result eviction threshold in memory |
-| `llm_max_attempts` | `2` | Attempts per model call for transient failures (429, 5xx, timeouts); `1` disables retry |
-| `llm_retry_backoff_seconds` | `0.5` | Base delay between attempts, doubled each time |
+| `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=150_000`, `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None` |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `call_timeout_seconds=300` per attempt |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
+| `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False` |
+
+The sub-policies are frozen dataclasses; change one with `dataclasses.replace`.
+The 0.3 flat names (`max_iterations=`, `llm_max_attempts=`, ...) still work and
+warn until 0.5; see [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md).
 
 ### Prompt caching
 
@@ -183,7 +186,8 @@ agent = Agent(config=AgentConfig(prompt_cache=None))
 | `gemini` | Implicit caching by default. With `ttl_seconds` set (or the `GEMINI_PROMPT_CACHE_TTL` variable), the system prompt and tools are uploaded once as an explicit cache and referenced per call. A prefix below Gemini's minimum cacheable size runs uncached, and that prefix is not retried for ten minutes |
 
 Cache hits show up in the usual usage fields: `RunResult.usage.cache_read_input_tokens`
-and `cache_creation_input_tokens`. Every `LLM_REQUEST` hook carries
+and `cache_creation_input_tokens`, both counted inside `input_tokens`, which is
+the full prompt size on every provider. Every `LLM_REQUEST` hook carries
 `data["prefix_key"]`, so an observer can assert that consecutive iterations
 share one key. A prefix that drifts, for example a timestamp in the system
 prompt or tools registered in a different order, silently defeats every
@@ -579,8 +583,21 @@ usually become error tool results; runtime/storage errors may fail the run.
 
 ## 3. Streaming agents
 
-`Agent.run_stream()` yields typed events and exposes a final `RunResult`.
-Use its async context manager to close or cancel an abandoned stream.
+`Agent.stream_text()` yields the answer as text and raises `RunFailed` if the
+run does not complete:
+
+```python
+async with agent:
+    async for text in agent.stream_text("Tell me a story"):
+        print(text, end="", flush=True)
+```
+
+Pass `on_reset=callback` to be told when a retried model call restarts the
+answer, so a display can discard the provisional text it has shown.
+
+`Agent.run_stream()` yields typed events (tool calls, results, thinking) and
+exposes the final `RunResult`. Use its async context manager to close or cancel
+an abandoned stream; `stream.text()` is the same text view over its events.
 
 ```python
 import asyncio
@@ -641,7 +658,7 @@ async def main():
                 description="Read public URLs and summarize their evidence.",
                 config=AgentConfig(
                     system_prompt="Read the supplied URLs and cite your sources.",
-                    max_iterations=5,
+                    limits=Limits(max_iterations=5),
                 ),
                 tools=[fetch_url],
             ),
@@ -929,25 +946,37 @@ at `ALLOW`; the callback handles tools explicitly configured as `ASK`.
 Terminal apps can explicitly use `Agent(permissions=CliPermissionManager())`
 with `CliPermissionManager` imported from `harnessx`; this opt-in manager defaults
 to `ASK`. Durable runtimes persist
-approval requests; use `runtime.approve(...)` and `runtime.resume(...)`.
+approval requests: `await runtime.approve(pending, resume=True)` records the
+decision and finishes the run, and `runtime.decline(pending)` refuses it.
 
 ### Guardrails
 
 ```python
-from harnessx import Agent, AgentConfig
+from harnessx import Agent, AgentConfig, Limits
 
-agent = Agent(config=AgentConfig(
+agent = Agent(config=AgentConfig(limits=Limits(
     max_iterations=20,
     max_context_tokens=100_000,
     max_cost_dollars=0.50,
     input_cost_per_m=3.00,   # application-supplied prices, not a live price lookup
     output_cost_per_m=15.00,
-))
+)))
 agent.guardrails.usage_summary
 ```
 
 Limits are validated at construction. A reached guardrail returns a failed
-`RunResult` with error details. `max_iterations=0` means unlimited.
+`RunResult` with error details. `Limits(max_iterations=0)` means unlimited.
+
+### Errors
+
+Every exception the SDK raises derives from `HarnessError`. Invalid
+configuration raises `ConfigurationError` (a `ValueError`); using a closed or
+busy agent raises `RuntimeStateError` (a `RuntimeError`); an unknown execution
+key raises `UnknownExecutionKey` (a `KeyError`). Runs report their outcome as
+data: `result.ok`, `result.failed`, and `result.needs_input` inspect the
+status, and `result.raise_for_status()` turns a run that did not complete into
+`RunFailed`, `RunAwaitingInput`, or `RunCancelled`, each carrying `.result`.
+`PermissionLevel`, like every other enum here, is a `str` enum.
 
 ---
 
@@ -991,9 +1020,15 @@ Read the detailed guides:
 - [Extensions](https://harnessx-site.vercel.app/docs/extensions/): when to use an extension, composing middleware
   with tools and hooks, lifecycle callbacks, ownership, persistence, and built-ins.
 
-Hook data is event specific. `LLM_REQUEST` carries `message_count`,
+Hook data is event specific, and the keys each built-in event carries are
+declared as TypedDicts in `harnessx.hooks` (`HOOK_PAYLOADS` maps an event to
+its shape). `LLM_REQUEST` carries the request as sent: the rendered `system`
+prompt, `model`, `max_tokens`, `temperature`, `stream`, `message_count`,
 `tool_count`, and `prefix_key`, the prompt-cache key for that request (`None`
-when caching is disabled). `AGENT_END` carries the final `RunResult`.
+when caching is disabled). `AGENT_END` carries the final `RunResult`; `SANDBOX_EXEC` reports
+every sandbox execution; `CHECKPOINT` marks every persisted phase of a durable
+run. `hooks.on(...)`, `before_tool(...)`, `after_tool(...)`, and `on_error(...)`
+return a `Registration` whose `close()` unhooks the callback.
 
 Mandatory permissions and effect checks belong in the execution path. Hook
 failures are suppressed, and terminal extension observers are best effort.
@@ -1005,27 +1040,33 @@ already retained by durable execution or recording.
 ## 9. MCP servers
 
 `MCPManager` connects to Model Context Protocol servers (stdio subprocess or
-remote SSE) and registers their tools into your agent's registry, so MCP
-tools look exactly like native tools to the model.
+remote SSE). `Agent(mcp=manager)` bridges the discovered tools into the agent's
+registry at construction, so MCP tools look exactly like native tools to the
+model; their names are listed on `agent.mcp_tools`.
 
 ```python
-from harnessx import Agent, AgentConfig, MCPManager
+from harnessx import Agent, AgentConfig, MCPManager, MCPServerConfig
 
-mcp = MCPManager()
-await mcp.connect(
-    "filesystem",
-    command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-)
-# or a remote server:
-# await mcp.connect("remote", url="http://localhost:8000/sse")
+async with MCPManager() as mcp:
+    await mcp.connect(MCPServerConfig.stdio(
+        "files", "npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    ))
+    # or a remote server, streamable HTTP with an SSE fallback:
+    # await mcp.connect(MCPServerConfig.http("remote", "http://localhost:8000/mcp",
+    #                                        headers={"Authorization": "Bearer ..."}))
 
-agent = Agent(config=AgentConfig(system_prompt="..."), mcp=mcp)
-mcp.register_tools(agent.tools)
-
-print((await agent.run("What's in /tmp?")).output)
-await mcp.disconnect_all()
+    async with Agent(config=AgentConfig(system_prompt="..."), mcp=mcp) as agent:
+        print(agent.mcp_tools)                 # ('files_read_file', ...)
+        print((await agent.run("What's in /tmp?")).output)
+# leaving the manager's block disconnects every server
 ```
+
+`MCPServerConfig.stdio(...)` and `.http(...)` pick the transport by
+constructor; each takes `permission=` for the server's tools (default `ASK`).
+`connect()` also accepts a name with `command=` or `url=` keywords. The name is
+yours to choose: it keys the connection and prefixes every bridged tool. The
+manager is caller-owned: closing the agent leaves it connected, and one manager
+can serve several agents. Connecting a server name twice raises `ValueError`.
 
 See `examples/mcp_agent.py` for the interactive version.
 
@@ -1051,10 +1092,29 @@ unsupported values instead of stringifying them. Saved artifacts survive agent
 closure until `PersistentMemory(directory).delete_session(session_id)`.
 
 For managed multi-session services (checkpointing, pause/resume, expiry),
-see [durable runtimes and the 0.3 migration guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
+use `AgentRuntime` with a backend; see the [durable runtime guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
+
+```python
+from harnessx import Agent, AgentRuntime, SQLiteBackend
+
+async with await SQLiteBackend.connect("runtime.db") as backend:
+    async with AgentRuntime(Agent(), backend=backend) as runtime:
+        result = await runtime.run("write the report")
+        if result.needs_input:                      # a tool is waiting for approval
+            result = await runtime.approve(result.pending[0], resume=True)
+        async for text in runtime.stream_text("summarize it"):
+            print(text, end="")
+        print((await runtime.status())["run"].status)
+```
+
+`run()`, `run_stream()`, and `stream_text()` mirror the `Agent` methods;
+`submit()` returns a `RunHandle` when the caller wants to detach. `execute()`,
+`execute_stream()`, and `get_status()` remain as deprecated aliases until 0.5.
 
 The default backend is SQLite. PostgreSQL automatically provisions its schema from
-a connection string; Temporal adds distributed workflow recovery and Redis events.
+a connection string (`await PostgresBackend.connect(dsn)`); Temporal adds
+distributed workflow recovery and Redis events. Every backend is an async
+context manager.
 For PostgreSQL, pass your configured agent directly:
 `runtime = AgentRuntime(agent, backend=backend)`. In a replacement process,
 construct a fresh compatible `Agent` and call `await runtime.resume(session_id)`.
@@ -1081,10 +1141,11 @@ service qualification, and Temporal recording is not implemented. Try
 
 ## 11. Shipping a web app
 
-The harness is transport-agnostic. The trusted local, single-conversation example in
-`examples/web_app` demonstrates:
+The harness is transport-agnostic: a web server runs the same `Agent` and
+translates its run events to whatever the browser speaks. The pattern is
 
-1. **Streaming agent execution** translated to Server-Sent Events (SSE) or WebSockets:
+1. **Stream the run** with `agent.run_stream()` and forward each event as a
+   Server-Sent Event or WebSocket frame:
 
 ```python
 import asyncio
@@ -1098,7 +1159,7 @@ from harnessx import Agent, RunEventType
 async def lifespan(app):
     async with Agent() as agent:
         app.state.agent = agent
-        app.state.lock = asyncio.Lock()  # One shared conversation in this demo.
+        app.state.lock = asyncio.Lock()  # one agent, one active run at a time
         yield
 
 app = FastAPI(lifespan=lifespan)
@@ -1120,14 +1181,21 @@ async def stream(req: dict):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 ```
 
-2. **Register tools as `PermissionLevel.ALLOW`** — in a server context, tools should be pre-approved or gated via an authorization middleware rather than interactive stdin prompts.
-3. **Built-in UI and MCP integrations** — the web app serves a complete browser UI that displays tool calls, token usage, MCP servers, and dynamic skills.
+2. **Decide permissions server-side.** Pre-approve tools with
+   `PermissionLevel.ALLOW`, or give the `PermissionManager` an approval
+   callback that asks the browser; never fall back to stdin prompts.
+3. **One agent per conversation.** An `Agent` runs one turn at a time, so a
+   multi-user service keeps a distinct agent, or a durable `AgentRuntime`
+   session, per conversation.
 
-Run the full example from the repo root:
+The repository's complete web application is [harness-web](https://github.com/datagol/agent-harness-x/tree/main/harness-web):
+a FastAPI backend and a Vite frontend that run every example in this
+repository, stream their output, present approvals in the browser, and host a
+general chat with per-conversation skills and MCP servers. From the checkout:
 
 ```bash
-uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000 --reload
-# open http://localhost:8000
+npm --prefix harness-web ci && npm --prefix harness-web run build
+uv run python harness-web/run.py        # http://127.0.0.1:8765
 ```
 
 ---
@@ -1184,6 +1252,10 @@ summary = evaluate_agent(
 print(f"Pass rate: {summary.pass_rate * 100:.1f}%")
 ```
 
+From a running event loop, `await evaluate_agent_async(...)` takes the same
+arguments and runs the evaluation in a worker thread; pass a factory rather than
+an agent bound to your loop. Experiments are named `harnessx-eval-...` by default.
+
 ### Running evals from the CLI
 
 ```bash
@@ -1211,8 +1283,12 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | Class / function | Module | Purpose |
 |---|---|---|
 | `Agent` | `harnessx` | Core agentic loop (`await agent.run(msg)`) |
-| `RunResult` / `RunStream` | `harnessx` | Structured completion and streaming APIs |
-| `AgentConfig` | `harnessx` | Model, provider, limits, prompt, retry, prompt caching |
+| `RunResult` / `RunStream` | `harnessx` | Completion result (`ok`, `failed`, `needs_input`, `raise_for_status()`) and event stream (`text()`) |
+| `PendingTool` | `harnessx` | A tool the run stopped on: `execution_key`, `call`, `status` |
+| `AgentConfig` | `harnessx` | Model, provider, prompt, plus the `limits`, `retry`, `prompt_cache`, and `tools` sub-policies |
+| `Limits` / `RetryPolicy` / `ToolPolicy` | `harnessx` | Budgets, transient-failure handling, registry-wide tool options |
+| `HarnessError` and subclasses | `harnessx` | `ConfigurationError`, `RuntimeStateError`, `UnknownExecutionKey`, `RunFailed`, `RunAwaitingInput`, ... |
+| `register_provider` | `harnessx` | Add a provider name that `AgentConfig` accepts |
 | `PromptCachePolicy` / `PromptCacheHint` | `harnessx` | Prompt-cache policy on the config; the per-request hint providers receive |
 | `ToolRegistry` | `harnessx` | `register`, `register_with_schema`, `execute` |
 | `SubAgent` | `harnessx` | Declare isolated specialists with `Agent(subagents=[...])` |
@@ -1229,10 +1305,12 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `SkillManager` | `harnessx` | Lazy skill loading |
 | `MCPManager` | `harnessx` | MCP server connections |
 | `Sandbox` | `harnessx` | Sandboxed code execution |
-| `AgentRuntime` | `harnessx` | Managed sessions, checkpoints |
+| `AgentRuntime` | `harnessx` | Durable sessions: `run`, `run_stream`, `stream_text`, `approve(..., resume=True)`, `decline`, `status` |
+| `SQLiteBackend` / `PostgresBackend` / `TemporalBackend` | `harnessx` | Runtime storage; `await Backend.connect(...)`, `async with backend` |
+| `harnessx.durable` | module | Runtime, backends, recorder, and their errors in one namespace |
 | `IncidentRecorder` / `ExportPolicy` | `harnessx` | Offline incident playback, verification, and export disclosure |
 | `Extension` / `LangSmithExtension` | `harnessx` | Pluggable runtime extensions / LangSmith tracing |
-| `evaluate_agent` | `harnessx.evals` | LangSmith evaluation runner |
+| `evaluate_agent` / `evaluate_agent_async` | `harnessx.evals` | LangSmith evaluation runner, sync and from a running loop |
 | `AgentTarget` | `harnessx.evals` | Target adapter with telemetry & trace linking |
 | `default_evaluators` | `harnessx.evals` | Standard suite of evaluators |
 | `register_all_tools` | `harnessx.builtin` | Filesystem, bash, web, memory tools |
@@ -1265,4 +1343,4 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `examples.langsmith_tracing` | LangSmith lifecycle tracing with a nested specialist span | `langsmith` extra, Anthropic and LangSmith keys |
 | `examples.run_evals --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
 | `examples.mcp_agent --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
-| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Single-agent web chat with SSE streaming, MCP management, and snapshots | `server` extra, Anthropic key |
+| `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

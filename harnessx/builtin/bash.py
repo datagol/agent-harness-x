@@ -69,6 +69,8 @@ def register_bash_tools(
     """
     if not select_tools(registry, ["run_bash"], include, exclude, replace=replace):
         return []
+    if sandbox is None:
+        sandbox = getattr(registry, "sandbox", None)
 
     if sandbox is not None:
         async def sandboxed_run_bash(command: str, timeout: int = 30) -> str:

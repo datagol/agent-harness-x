@@ -16,7 +16,7 @@ from harnessx import (
     Agent, AgentConfig, AgentRegistry, AgentRuntime, CliPermissionManager, ConversationMemory, Extension,
     HookEvent, Message, Middleware, PermissionLevel, PermissionManager, PersistentMemory,
     ProviderResponse, ResultSpillExtension, RunEvent, RunEventType, RunResult, RunStatus,
-    RuntimeConfig, Sandbox, SandboxConfig, SQLiteBackend, ToolCall, ToolDefinition, ToolResult,
+    Limits, RuntimeConfig, Sandbox, SandboxConfig, SQLiteBackend, ToolCall, ToolDefinition, ToolResult,
     TokenUsage,
 )
 from harnessx.providers import LLMProvider
@@ -51,8 +51,9 @@ def owned_agent(**kwargs):
     {"temperature": -1}, {"max_cost_dollars": float("inf")}, {"provider": "unknown"}, {"model": ""},
 ])
 def test_invalid_agent_configuration_is_rejected(values):
+    # from_dict accepts the 0.3 flat keys without warnings and validates them.
     with pytest.raises((ValueError, TypeError)):
-        AgentConfig(**values)
+        AgentConfig.from_dict(values)
 
 
 def test_provider_precedence_is_explicit():
@@ -62,19 +63,21 @@ def test_provider_precedence_is_explicit():
         Agent(provider=provider)
     with pytest.raises(ValueError, match="does not match"):
         Agent(provider=provider, config=AgentConfig(provider="anthropic"))
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(TypeError, match="removed in harnessx 0.4"):
         Agent(provider=provider, client=object())
     assert Agent(provider=provider, config=AgentConfig(provider="openai", model="test-model")).provider is provider
 
 
 def test_budget_and_context_configuration_is_wired():
-    agent = Agent(provider=Provider(), config=AgentConfig(max_cost_dollars=2, input_cost_per_m=3, output_cost_per_m=4, max_context_tokens=2048))
+    agent = Agent(provider=Provider(), config=AgentConfig(
+        limits=Limits(max_cost_dollars=2, input_cost_per_m=3, output_cost_per_m=4, max_context_tokens=2048),
+    ))
     assert agent.guardrails.max_cost_dollars == 2
     agent.guardrails.track_usage(TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000))
     assert agent.guardrails.estimated_cost == 7
     with pytest.raises(ValueError):
         RuntimeConfig(max_session_duration_seconds=-1)
-    with pytest.warns(DeprecationWarning):
+    with pytest.raises(TypeError):  # removed in 0.4; the runtime checkpoints at every phase boundary
         RuntimeConfig(checkpoint_interval=5)
 
 
@@ -114,11 +117,11 @@ async def test_resume_closes_replaced_factory_agent(tmp_path):
     runtime = AgentRuntime(ref, backend=store, registry=registry)
     try:
         sid = await runtime.start()
-        await runtime.execute("hello")
+        await runtime.run("hello")
         await runtime.pause()
         await runtime.resume(sid)
-        assert len(created) == 2 and created[0]._closed and created[0].provider.closed == 1
-        assert not created[1]._closed
+        assert len(created) == 2 and created[0].closed and created[0].provider.closed == 1
+        assert not created[1].closed
     finally:
         await runtime.stop()
         await store.aclose()
@@ -134,10 +137,10 @@ async def test_evaluation_factory_owned_agents_close_and_borrowed_stay_open():
         created.append(agent)
         return agent
     await AgentTarget(factory, attach_langsmith=False).run_async({"prompt": "hello"})
-    assert created[0]._closed and created[0].provider.closed == 1
+    assert created[0].closed and created[0].provider.closed == 1
     borrowed = owned_agent()
     await AgentTarget(borrowed, attach_langsmith=False).run_async({"prompt": "hello"})
-    assert not borrowed._closed
+    assert not borrowed.closed
     await borrowed.aclose()
 
 
@@ -265,7 +268,7 @@ async def test_extension_priority_and_disposable_registrations():
     assert ("late", RunStatus.COMPLETED) in log
     await agent.aclose()
     assert log[-2:] == [("late", "close"), ("early", "close")]
-    assert not agent.tools.list_tools() and not agent.middleware._middleware and not agent.prompt_providers
+    assert agent.tools.list_tools() == ["read_tool_result"] and not agent.middleware._middleware and not agent.prompt_providers
     assert not agent.hooks._hooks[HookEvent.AGENT_START]
 
 
@@ -327,7 +330,7 @@ async def test_cancelling_pending_approval_notifies_terminal_extension_once(tmp_
     runtime = AgentRuntime(agent, backend=store)
     try:
         await runtime.start()
-        assert (await runtime.execute("hello")).status == RunStatus.AWAITING_INPUT
+        assert (await runtime.run("hello")).status == RunStatus.AWAITING_INPUT
         assert ("terminal", RunStatus.CANCELLED) not in log
         await runtime.cancel()
         await runtime.cancel()
@@ -345,7 +348,7 @@ async def test_teardown_failure_does_not_skip_owned_provider_cleanup():
     agent = owned_agent(extensions=[Broken("broken", [])])
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
-    assert agent.provider.closed == 1 and not agent.tools.list_tools()
+    assert agent.provider.closed == 1 and agent.tools.list_tools() == ["read_tool_result"]
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
     assert agent.provider.closed == 1

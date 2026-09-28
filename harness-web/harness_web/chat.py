@@ -1,6 +1,7 @@
 """Independent chat sessions over the same HarnessX streaming engine."""
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 import re
 from typing import Any
@@ -9,12 +10,16 @@ import uuid
 from harnessx import (
     Agent,
     AgentConfig,
+    HookEvent,
+    Limits,
+    Middleware,
     PermissionLevel,
     PermissionManager,
     ProviderResponse,
     RunEventType,
     SkillManager,
     ToolCall,
+    ToolResult,
 )
 from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.execution import wire
@@ -57,8 +62,44 @@ class DemoProvider(LLMProvider):
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful general assistant. Be clear and concise. Use your "
     "calculator for arithmetic. Files are relative to the conversation "
-    "workspace. File changes require the user's approval."
+    "workspace. File changes require the user's approval. When you save or "
+    "generate a file, the app attaches a download link to your reply: refer to "
+    "the file by name and never invent a URL for it."
 )
+
+DOWNLOADS_DIR = ".downloads"  # generate_file copies land here, served by /api/chats/{id}/downloads
+_MARKER = re.compile(r"__FILE__:/files/([0-9a-f]+)/([^:\n]+):([^\n]*)")
+
+
+class _DownloadLinks(Middleware):
+    """Turn generate_file's UI marker into a link the model can quote."""
+
+    def __init__(self, chat: "Chat") -> None:
+        self._chat = chat
+
+    async def after_tool_execution(self, result: Any) -> Any:
+        if isinstance(result, ToolResult) and isinstance(result.content, str) and "__FILE__:" in result.content:
+            content = _MARKER.sub(
+                lambda m: f"Saved {m.group(3) or m.group(2)}. Download link: "
+                f"/api/chats/{self._chat.id}/downloads/{m.group(1)}/{m.group(2)}",
+                result.content,
+            )
+            return ToolResult(result.tool_call_id, content, result.is_error)
+        return result
+
+
+def today_line() -> str:
+    return f"Today's date is {date.today():%A, %B %-d, %Y}. Treat it as the present when reasoning about recent events or dates."
+
+
+def workspace_relative(chat: "Chat", path: str) -> str | None:
+    """A workspace-relative POSIX path for a tool's path argument, or None if outside."""
+    root = chat.directory.resolve()
+    try:
+        target = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+        return target.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass
@@ -73,6 +114,8 @@ class Chat:
     title: str = "New conversation"
     messages: list = field(default_factory=list)
     active: Run | None = None
+    disabled_tools: set = field(default_factory=set)
+    tool_catalog: list = field(default_factory=list)  # every tool, enabled or not
 
     def public(self, *, include_messages=True):
         assert self.agent is not None
@@ -90,6 +133,7 @@ class Chat:
             "system_prompt": self.system_prompt,
             "skills": skill_records(self),
             "mcp_servers": self.mcp.list_servers(),
+            "tools": tool_records(self),
         }
         if include_messages:
             result["messages"] = self.messages
@@ -105,6 +149,59 @@ def _skill_paths(chat: Chat) -> list[Path]:
         for path in sorted(folder.glob("*.md"))
         if path.is_file() and not path.is_symlink() and not path.name.startswith(".")
     ]
+
+
+_SOURCE_ORDER = {"builtin": 0, "skill": 1, "mcp": 2}
+
+
+def tool_records(chat: Chat) -> list[dict[str, Any]]:
+    """Every tool the conversation knows, enabled or not, with where it came from."""
+    return [
+        {**record, "enabled": record["name"] not in chat.disabled_tools}
+        for record in chat.tool_catalog
+    ]
+
+
+def catalog_tools(chat: Chat, agent: Agent) -> list[dict[str, Any]]:
+    """Describe the agent's registered tools before any disabled ones are removed."""
+    bridged = set(getattr(agent, "mcp_tools", ()) or ())
+    servers = list(chat.mcp.list_servers())
+    records: list[dict[str, Any]] = []
+    for definition in agent.tools.get_tools():
+        name = definition.name
+        tag = getattr(definition.handler, "__mcp_tool__", None)
+        if tag:
+            source, server, tool = "mcp", tag[0], tag[1]
+        elif name in bridged:
+            server = next((s for s in servers if name.startswith(f"{s}_")), None)
+            source, tool = "mcp", name[len(server) + 1:] if server else name
+        elif name == "Skill":
+            source, server, tool = "skill", None, name
+        else:
+            source, server, tool = "builtin", None, name
+        records.append({
+            "name": name,
+            "tool": tool,
+            "description": definition.description,
+            "source": source,
+            "server": server,
+            "permission": agent.permissions.get_effective_permission(name, definition).value,
+        })
+    records.sort(key=lambda r: (_SOURCE_ORDER[r["source"]], r["server"] or "", r["name"]))
+    return records
+
+
+def set_tool_enabled(chat: Chat, name: str, enabled: bool) -> None:
+    """Record a per-conversation tool switch; rebuild_chat applies it."""
+    known = {record["name"] for record in chat.tool_catalog}
+    if name not in known:
+        raise KeyError(name)
+    if name == "Skill":
+        raise ValueError("The Skill tool cannot be disabled")
+    if enabled:
+        chat.disabled_tools.discard(name)
+    else:
+        chat.disabled_tools.add(name)
 
 
 def skill_records(chat: Chat) -> list[dict[str, Any]]:
@@ -141,7 +238,7 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
             provider="anthropic" if chat.provider == "demo" else chat.provider,
             model=chat.model,
             system_prompt=chat.system_prompt,
-            max_iterations=20,
+            limits=Limits(max_iterations=20),
         ),
         provider=provider_instance
         or (DemoProvider() if chat.provider == "demo" else None),
@@ -152,13 +249,23 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
     agent.tools.register_tool(
         calculate, permission=PermissionLevel.ALLOW, replay_policy="safe"
     )
-    register_filesystem_tools(agent.tools, base_path=str(chat.directory))
+    register_filesystem_tools(
+        agent.tools, base_path=str(chat.directory), output_dir=str(chat.directory / DOWNLOADS_DIR),
+    )
     for name in ("write_file", "generate_file"):
         agent.permissions.set_permission(name, PermissionLevel.ASK)
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
-    if chat.mcp.tool_count:
-        chat.mcp.register_tools(agent.tools)
+    agent.middleware.add(_DownloadLinks(chat))
+    # The model has no clock. Day granularity keeps the cached prompt prefix
+    # stable within a day while stopping searches for last year's news.
+    agent.prompt_providers.append(today_line)
+    # Agent(mcp=chat.mcp) already bridged the connected servers' tools. Record
+    # the full catalog, then take the switched-off ones away from the model.
+    chat.tool_catalog = catalog_tools(chat, agent)
+    chat.disabled_tools &= {record["name"] for record in chat.tool_catalog}
+    for name in chat.disabled_tools:
+        agent.tools.unregister(name)
     return agent
 
 
@@ -200,24 +307,57 @@ async def close_chat(chat: Chat) -> None:
 async def run_chat(chat, run, message):
     import asyncio
 
-    assistant = {
+    assistant: dict[str, Any] = {
         "role": "assistant",
         "content": "",
         "tools": [],
+        "files": [],
+        "segments": [],  # text and tool calls in the order they happened
         "run_id": run.id,
         "status": "running",
     }
+
+    def append_text(delta: str) -> None:
+        segments = assistant["segments"]
+        if segments and segments[-1]["type"] == "text":
+            segments[-1]["content"] += delta
+        else:
+            segments.append({"type": "text", "content": delta})
+
+    def record_file(entry: dict[str, Any]) -> bool:
+        if any(item["url"] == entry["url"] for item in assistant["files"]):
+            return False
+        assistant["files"].append(entry)
+        return True
     chat.messages.extend([{"role": "user", "content": message}, assistant])
     chat.title = message[:65]
+    assert chat.agent is not None
+    agent = chat.agent
+
+    # The browser shows what the turn is doing between visible events: a model
+    # call can stream a long tool argument with nothing else to display.
+    async def model_started(ctx):
+        await run.emit("phase", phase="model", message_count=ctx.data.get("message_count"))
+
+    async def model_finished(ctx):
+        await run.emit("phase", phase="waiting")
+
+    registrations = [
+        agent.hooks.on(HookEvent.LLM_REQUEST, model_started),
+        agent.hooks.on(HookEvent.LLM_RESPONSE, model_finished),
+    ]
     try:
         await run.state("running")
-        assert chat.agent is not None
         async with chat.agent.run_stream(message) as stream:
             async for event in stream:
                 if event.type == RunEventType.TEXT_DELTA:
                     assistant["content"] += event.data
+                    append_text(event.data)
                 elif event.type == RunEventType.ATTEMPT_RESET:
                     assistant["content"] = ""
+                    # A retried model call restarts its answer: drop the provisional text.
+                    if assistant["segments"] and assistant["segments"][-1]["type"] == "text":
+                        assistant["segments"].pop()
                 elif event.type == RunEventType.TOOL_CALL_START:
                     assistant["tools"].append(
                         {
@@ -227,6 +367,7 @@ async def run_chat(chat, run, message):
                             "status": "running",
                         }
                     )
+                    assistant["segments"].append({"type": "tool", "id": event.data.id})
                 elif event.type == RunEventType.TOOL_RESULT:
                     for tool in assistant["tools"]:
                         if tool["id"] == event.data.tool_call_id:
@@ -234,6 +375,15 @@ async def run_chat(chat, run, message):
                                 status="failed" if event.data.is_error else "completed",
                                 content=event.data.content,
                             )
+                            if not event.data.is_error and tool["name"] in ("write_file", "generate_file"):
+                                added = False
+                                for link in re.findall(r"Download link: (/api/chats/\S+)", str(event.data.content)):
+                                    added |= record_file({"name": link.rsplit("/", 1)[-1], "url": link, "kind": "download"})
+                                rel = workspace_relative(chat, str((tool.get("input") or {}).get("path", "")))
+                                if rel and not rel.startswith(DOWNLOADS_DIR):
+                                    added |= record_file({"name": rel, "url": f"/api/runs/{run.id}/files/{rel}", "kind": "workspace"})
+                                if added:
+                                    await run.emit("chat_files", files=list(assistant["files"]))
                 await run.emit("agent", event=wire(event))
             result = await stream.result()
         assistant["content"] = result.output or assistant["content"]
@@ -259,4 +409,6 @@ async def run_chat(chat, run, message):
         await run.emit("error", content=str(exc))
         await run.state("failed")
     finally:
+        for registration in registrations:
+            registration.close()
         run.pending = None

@@ -29,7 +29,7 @@ from .catalog import (
     public_catalog,
     requirements,
 )
-from .chat import Chat, close_chat, create_chat, rebuild_chat, run_chat
+from .chat import DOWNLOADS_DIR, Chat, close_chat, create_chat, rebuild_chat, run_chat, set_tool_enabled
 from .files import open_workspace_file
 from .runs import RunManager, run_example
 
@@ -383,6 +383,52 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             raise HTTPException(422, f"Could not remove skill: {exc}") from exc
         return chat.public()
 
+    class ToolSwitchRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        name: str = Field(min_length=1, max_length=200)
+        enabled: bool
+
+    @app.patch("/api/chats/{chat_id}/tools")
+    async def switch_chat_tool(chat_id: str, body: ToolSwitchRequest):
+        """Enable or disable one tool for this conversation's next turns."""
+        chat = get_chat(chat_id)
+        ensure_chat_idle(chat)
+        try:
+            set_tool_enabled(chat, body.name, body.enabled)
+        except KeyError:
+            raise HTTPException(404, "Unknown tool") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        try:
+            await rebuild_chat(chat)
+        except Exception as exc:
+            raise HTTPException(422, f"Could not apply tool change: {exc}") from exc
+        return chat.public()
+
+    @app.get("/api/chats/{chat_id}/downloads/{file_id}/{name}")
+    async def chat_download(chat_id: str, file_id: str, name: str):
+        """Serve a file that generate_file published for this conversation."""
+        chat = get_chat(chat_id)
+        if not re.fullmatch(r"[0-9a-f]{6,32}", file_id):
+            raise HTTPException(404, "File not found")
+        try:
+            stream = open_workspace_file(chat.directory / DOWNLOADS_DIR, f"{file_id}/{name}")
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, "File not found") from exc
+
+        async def chunks():
+            try:
+                while data := await asyncio.to_thread(stream.read, 65536):
+                    yield data
+            finally:
+                stream.close()
+
+        return StreamingResponse(
+            chunks(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(name, safe="")},
+        )
+
     @app.post("/api/chats/{chat_id}/mcp", status_code=201)
     async def connect_chat_mcp(chat_id: str, body: MCPConnectRequest):
         chat = get_chat(chat_id)
@@ -422,9 +468,9 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             await chat.mcp.disconnect(body.name)
             raise HTTPException(422, f"Could not connect MCP server: {exc}") from exc
         return {
-            **chat.public(),
+            **chat.public(),  # includes "tools", every tool the agent can now call
             "connected": body.name,
-            "tools": [
+            "discovered": [
                 {"name": tool.tool_name, "description": tool.description}
                 for tool in tools
             ],

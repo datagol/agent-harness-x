@@ -68,12 +68,12 @@ async def test_worker_restart_replay_and_duplicate_submission(tmp_path):
         async with await backend.worker():
             sid = await runtime.start()
             result = await asyncio.wait_for(
-                runtime.execute("hello", request_id="r1"), 30
+                runtime.run("hello", request_id="r1"), 30
             )
             assert result.output == "temporal works"
         # A fresh worker must reconstruct the session from history.
         async with await backend.worker():
-            again = await runtime.execute("hello", request_id="r1")
+            again = await runtime.run("hello", request_id="r1")
             assert again.run_id == result.run_id
             events = [
                 e
@@ -128,10 +128,10 @@ async def test_approval_survives_worker_restart(tmp_path):
     try:
         async with await backend.worker():
             sid = await runtime.start()
-            result = await asyncio.wait_for(runtime.execute("write"), 30)
+            result = await asyncio.wait_for(runtime.run("write"), 30)
             assert result.status == "awaiting_input" and not effects
         async with await backend.worker():
-            await runtime.approve(result.pending[0]["execution_key"])
+            await runtime.approve(result.pending[0].execution_key)
             handle = await runtime.resume(sid)
             assert (await asyncio.wait_for(handle.result(), 30)).output == "done"
             assert effects == ["effect"]

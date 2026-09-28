@@ -33,6 +33,7 @@ from .messages import Message
 logger = logging.getLogger(__name__)
 
 # Defaults for tool result eviction
+_SAVED_PATH = re.compile(r"Full output saved to: (.+?)\]")
 DEFAULT_MAX_RESULT_CHARS = 12_000  # ~3k tokens at ~4 chars/token
 DEFAULT_PREVIEW_LINES = 20         # head and tail lines in preview
 
@@ -42,7 +43,9 @@ class ConversationMemory:
 
     Stores validated SDK Message objects; provider adapters consume detached dict views.
     Large tool results are automatically evicted to disk when they exceed
-    max_result_chars, replaced with a preview + file path reference.
+    max_result_chars and replaced with a preview. The agent registers a
+    ``read_tool_result`` tool that reads an evicted result back in sections
+    by its tool-use id, so no filesystem tool or path access is needed.
     """
 
     def __init__(
@@ -161,9 +164,41 @@ class ConversationMemory:
         return (
             f"[Tool result too large ({total_lines} lines, {len(content)} chars). "
             f"Full output saved to: {filepath}]\n"
-            f"[Use read_file with offset and limit parameters to access specific sections.]\n\n"
+            f'[Read it in sections with read_tool_result(result_id="{tool_use_id}", offset=0, limit=200); '
+            f"read_file cannot open this location.]\n\n"
             f"{preview}"
         )
+
+    def read_evicted(self, tool_use_id: str, offset: int = 0, limit: int = 200) -> str:
+        """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
+
+        The result is found by the tool-use id of the call that produced it,
+        so it survives session save and load, where the file moves.
+        """
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            raise ValueError("result_id must be the tool-use id of the evicted result")
+        offset = max(int(offset), 0)
+        limit = max(min(int(limit), 2_000), 1)
+        path = None
+        for message in self._messages:
+            if message.role != "user" or not isinstance(message.content, list):
+                continue
+            for block in message.content:
+                if block.get("type") == "tool_result" and block.get("tool_use_id") == tool_use_id:
+                    text = block.get("content")
+                    match = _SAVED_PATH.search(text) if isinstance(text, str) else None
+                    if match:
+                        path = match.group(1)
+        if path is None or path not in self._artifact_paths:
+            raise LookupError(f"No evicted result with id {tool_use_id!r}; only oversized results are stored")
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+        section = lines[offset:offset + limit]
+        end = offset + len(section)
+        header = f"[{tool_use_id}: lines {offset + 1}-{end} of {len(lines)}]"
+        if end < len(lines):
+            header += f" [next: offset={end}]"
+        return header + "\n" + "\n".join(section)
 
     def get_messages(self) -> list[dict[str, Any]]:
         return [message.to_dict() for message in self._messages]
@@ -194,40 +229,27 @@ class ConversationMemory:
 
     async def trim_if_needed(
         self,
-        provider_or_client: Any,
+        provider: Any,
         model: str,
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
     ) -> bool:
         """If token count approaches limit, summarize older messages.
 
-        Accepts either an LLMProvider (preferred) or a raw Anthropic client
-        (back-compat). Returns True if trimming was performed.
+        Uses the provider's count_tokens; falls back to a size heuristic when
+        counting fails. Returns True if trimming was performed.
         """
         if len(self._messages) < 6:
             return False
 
         try:
-            if hasattr(provider_or_client, "count_tokens") and not hasattr(
-                provider_or_client, "messages"
-            ):
-                # LLMProvider path
-                token_count = await provider_or_client.count_tokens(
-                    model=model,
-                    system=system,
-                    tools=tools or [],
-                    messages=self.get_messages(),
-                )
-            else:
-                # Raw Anthropic client path (back-compat)
-                resp = await provider_or_client.messages.count_tokens(
-                    model=model,
-                    system=system,
-                    tools=tools if tools else [],
-                    messages=self.get_messages(),
-                )
-                token_count = resp.input_tokens
+            token_count = await provider.count_tokens(
+                model=model,
+                system=system or None,
+                tools=tools or [],
+                messages=self.get_messages(),
+            )
         except Exception:
             token_count = len(str(self._messages)) // 3
 

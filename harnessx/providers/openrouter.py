@@ -92,7 +92,7 @@ class OpenRouterProvider(OpenAIProvider):
         *,
         model: str,
         messages: list[dict[str, Any]],
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
     ) -> int:
         """Estimate token count across diverse OpenRouter model families."""

@@ -80,7 +80,7 @@ def test_catalog_covers_every_example_entry_point(tmp_path):
         for path in (ROOT / "examples").glob("*.py")
         if not path.name.startswith("_")
     }
-    assert set(CATALOG) == expected | {"web_app"}
+    assert set(CATALOG) == expected
     for item in CATALOG.values():
         assert importlib.util.find_spec(item.module)
         config = {
@@ -296,12 +296,50 @@ async def test_demo_chat_tools_history_and_session_isolation(tmp_path):
         await asyncio.wait_for(run.task, 5)
         chat = (await client.get(f"/api/chats/{first['id']}")).json()
         assert chat["messages"][-1]["tools"][0]["content"] == "576"
+        assert [s["type"] for s in chat["messages"][-1]["segments"]] == ["tool", "text"], "shown in the order it happened"
         assert "576" in chat["messages"][-1]["content"]
         assert "no model calls" in chat["messages"][-1]["content"]
         assert (await client.get(f"/api/chats/{second['id']}")).json()["messages"] == []
         agent = app.state.chats[first["id"]].agent
         assert (await client.delete(f"/api/chats/{first['id']}")).status_code == 200
-        assert agent._closed
+        assert agent.closed
+
+
+@pytest.mark.asyncio
+async def test_generated_files_get_download_links(tmp_path):
+    def factory(provider, model, directory):
+        scripted = ScriptedProvider(
+            [
+                ProviderResponse(
+                    tool_calls=[ToolCall("gen", "generate_file", {"path": "report.html", "content": "<h1>Hi</h1>"})],
+                    stop_reason="tool_use",
+                ),
+                ProviderResponse(text="Your report is ready: report.html"),
+            ]
+        )
+        return create_chat(provider, model, directory, provider_instance=scripted)
+
+    async with web(tmp_path, chat_factory=factory) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()["id"]
+        response = await client.post(f"/api/chats/{chat_id}/messages", json={"message": "Make me a report"})
+        run = app.state.manager.runs[response.json()["id"]]
+        await wait_status(run, "waiting")
+        await client.post(f"/api/runs/{run.id}/input", json={"prompt_id": run.pending["id"], "value": "y"})
+        await asyncio.wait_for(run.task, 5)
+
+        message = (await client.get(f"/api/chats/{chat_id}")).json()["messages"][-1]
+        assert "Download link: /api/chats/" in message["tools"][0]["content"]
+        assert "__FILE__" not in message["tools"][0]["content"]
+        kinds = {item["kind"]: item for item in message["files"]}
+        assert kinds["workspace"]["url"] == f"/api/runs/{run.id}/files/report.html"
+        assert kinds["download"]["url"].startswith(f"/api/chats/{chat_id}/downloads/")
+        for item in message["files"]:
+            served = await client.get(item["url"])
+            assert served.status_code == 200 and served.content == b"<h1>Hi</h1>"
+        assert any(event["type"] == "chat_files" for event in run.events)
+        assert (await client.get(f"/api/chats/{chat_id}/downloads/zz/report.html")).status_code == 404
+        listed = [item["name"] for item in (await client.get(f"/api/runs/{run.id}/files")).json()]
+        assert listed == ["report.html"], "the hidden downloads copy stays out of the workspace listing"
 
 
 @pytest.mark.asyncio
@@ -351,7 +389,7 @@ async def test_chat_write_permission_is_enforced_in_engine(tmp_path, decision, e
             )
             await asyncio.wait_for(run.task, 5)
         assert (run.workdir / "review.txt").exists() is exists
-        assert not app.state.chats[chat_id].agent._busy
+        assert not app.state.chats[chat_id].agent.busy
 
 
 @pytest.mark.asyncio
@@ -431,7 +469,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         )
         assert updated.status_code == 200, updated.text
         assert updated.json()["system_prompt"] == "You are a precise data analyst."
-        assert chat.agent is not original_agent and original_agent._closed
+        assert chat.agent is not original_agent and original_agent.closed
         assert chat.agent.memory.get_messages() == [{"role": "user", "content": "Remember this history"}]
 
         skill = "---\nname: audit-check\ndescription: Check business-data assumptions\n---\n\nVerify source dates before advising.\n"
@@ -449,6 +487,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
             }
         ]
         assert "<available-skills>" in chat.agent.config.system_prompt
+        assert "Today's date is" in chat.agent._build_system_prompt(), "the model is told the current date"
         duplicate = await client.post(
             f"/api/chats/{chat_id}/skills",
             json={"name": "same-name.md", "content": skill},
@@ -469,6 +508,25 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
             ("fixture", {"command": "fixture-server", "args": ["--safe", "path with spaces"], "url": None, "permission": PermissionLevel.ASK})
         ]
         assert connected.json()["mcp_servers"]["fixture"]["tools"] == ["inspect"]
+        tools = {tool["name"]: tool for tool in connected.json()["tools"]}
+        assert tools["fixture_inspect"] == {
+            "name": "fixture_inspect", "tool": "inspect", "description": "Inspect a configured fixture",
+            "source": "mcp", "server": "fixture", "permission": "ask", "enabled": True,
+        }
+        assert tools["calculate"]["source"] == "builtin" and tools["calculate"]["permission"] == "allow"
+        assert tools["write_file"]["permission"] == "ask" and tools["Skill"]["source"] == "skill"
+        assert all(tool["enabled"] for tool in tools.values())
+
+        # Switch the MCP tool off: it leaves the model's registry but stays listed.
+        switched = await client.patch(f"/api/chats/{chat_id}/tools", json={"name": "fixture_inspect", "enabled": False})
+        assert switched.status_code == 200, switched.text
+        listed = {tool["name"]: tool for tool in switched.json()["tools"]}
+        assert listed["fixture_inspect"]["enabled"] is False and not chat.agent.tools.has_tool("fixture_inspect")
+        assert chat.agent.tools.has_tool("calculate")
+        assert (await client.patch(f"/api/chats/{chat_id}/tools", json={"name": "Skill", "enabled": False})).status_code == 422
+        assert (await client.patch(f"/api/chats/{chat_id}/tools", json={"name": "nope", "enabled": False})).status_code == 404
+        restored = await client.patch(f"/api/chats/{chat_id}/tools", json={"name": "fixture_inspect", "enabled": True})
+        assert restored.status_code == 200 and chat.agent.tools.has_tool("fixture_inspect")
         definition = chat.agent.tools.get_tool("fixture_inspect")
         assert definition.permission_level == PermissionLevel.ASK
         denied = await chat.agent.tools.execute(ToolCall("mcp", "fixture_inspect", {}), permissions=chat.agent.permissions)
@@ -477,6 +535,7 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         disconnected = await client.delete(f"/api/chats/{chat_id}/mcp/fixture")
         assert disconnected.status_code == 200
         assert disconnected.json()["mcp_servers"] == {}
+        assert not [tool for tool in disconnected.json()["tools"] if tool["source"] == "mcp"]
         assert not chat.agent.tools.has_tool("fixture_inspect")
         removed = await client.delete(f"/api/chats/{chat_id}/skills/audit.md")
         assert removed.status_code == 200 and removed.json()["skills"] == []

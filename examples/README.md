@@ -52,7 +52,7 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.jev_classification` | Choice classifies W2, Deposit, Insurance, Payroll, or unknown | No external services by default |
 | `python -m examples.jev_answer_review` | Score checks coverage; Noul checks evidence support after a completed run | No external services by default |
 | `python -m examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |
-| `python -m examples.runtime_approvals` | Persisted `ASK` approval and explicit resume | No external services; terminal input |
+| `python -m examples.runtime_approvals` | Persisted `ASK` approval finished with `approve(pending, resume=True)` | No external services; terminal input |
 | `python -m examples.flight_recorder --output incident.hx` | Retry history, middleware boundaries, offline playback | No external services; unused output path |
 | `python -m examples.postgres_runtime` | PostgreSQL runtime streaming and cleanup | `postgres` extra, `DATABASE_URL` or `--config PATH`, Anthropic key |
 | `python -m examples.postgres_runtime check` / `crash` / `status` / `resume` | Check storage, write a report, crash, and finish the same run without repeating the tool | `postgres` extra and `DATABASE_URL` or `--config PATH`; no model key |
@@ -60,7 +60,6 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.run_evals --offline` | Three scripted math/selection evaluations | `langsmith` extra; no keys or uploads |
 | `python -m examples.run_evals` | The same cases against a live model | `langsmith` extra, Anthropic key; upload enabled when a LangSmith key exists |
 | `python -m examples.mcp_agent --server NAME --command COMMAND` | Local MCP tools alongside native tools | `mcp` extra, Anthropic key, an installed MCP server |
-| `uvicorn examples.web_app.server:app --host 127.0.0.1 --port 8000` | Web chat, SSE, MCP management, snapshot save/load | `server` extra, Anthropic key; `mcp` extra if connecting servers |
 
 The files `_console.py`, `_calculator.py`, `_fixtures.py`, and `_decision_fixtures.py` are shared helpers.
 The `.md` files under `skills/` are sample skill inputs.

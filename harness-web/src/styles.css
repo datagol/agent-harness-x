@@ -130,21 +130,24 @@ pre {
 }
 .brand {
   display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 0 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 2px 10px 0;
   margin-bottom: 29px;
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.6px;
 }
-.brand span:not(.mark span) {
+.brand-logo {
   display: block;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 2.2px;
+  width: 148px;
+  height: auto;
+}
+.brand-caption {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
   color: var(--text-3);
-  margin-top: 1px;
+  padding-left: 1px;
 }
 .mark {
   position: relative;
@@ -158,30 +161,13 @@ pre {
   border-radius: 10px;
   overflow: hidden;
 }
-.mark span {
-  font-size: 25px;
-  line-height: 1;
-  font-weight: 800;
-  font-family: Arial, sans-serif;
-}
-.mark i {
-  position: absolute;
-  height: 23px;
-  width: 3px;
-  background: #aaacff;
-  transform: rotate(-27deg);
+.mark svg {
+  display: block;
 }
 .mark.small {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-}
-.mark.small span {
-  font-size: 20px;
-}
-.mark.small i {
-  height: 18px;
-  width: 2px;
 }
 .workspace-label {
   display: flex;
@@ -934,6 +920,179 @@ kbd {
 .setup-row small {
   color: var(--text-3);
 }
+.setup-section-title .count {
+  font-size: 11px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  white-space: normal;
+}
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+.tool-chip.mcp {
+  border-color: #c9c8f3;
+  background: #f4f4ff;
+  color: #3b3bb8;
+}
+.tool-chip em {
+  font-style: normal;
+  color: var(--text-3);
+}
+.tool-catalog {
+  display: grid;
+  gap: 12px;
+}
+.tool-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.tool-group header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 12px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.tool-group header span {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.tool-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tool-group li {
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+}
+.tool-group li > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tool-group code {
+  font-size: 12px;
+}
+.tool-group p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.perm {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+}
+.perm.ask {
+  color: #8a5a00;
+  border-color: #ecd6a4;
+  background: #fff8e8;
+}
+.perm.allow {
+  color: #1f7a4d;
+  border-color: #bfe3cf;
+  background: #eefbf3;
+}
+.perm.deny {
+  color: #a03030;
+  border-color: #efc4c4;
+  background: #fff1f1;
+}
+.message-files {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+}
+.message-files .file-row {
+  padding: 10px 0;
+}
+.inline-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.switch {
+  margin-left: auto;
+  display: inline-flex;
+  color: var(--text-3);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.switch.on {
+  color: var(--accent);
+}
+.tool-group li.off code,
+.tool-group li.off p {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+.toolbar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #fff;
+}
+.toolbar-chip:hover:not(:disabled) {
+  border-color: #b9b7e7;
+  color: var(--text-1);
+}
+.toolbox {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+}
+.toolbox-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.toolbox-title span {
+  color: var(--text-3);
+  font-weight: 400;
+}
 .mcp-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1224,6 +1383,44 @@ kbd {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+  margin-left: auto;
+}
+.prompt-box.approval .prompt-title {
+  flex-wrap: wrap;
+}
+.approval-what {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+.approval-args {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.approval-args > div {
+  display: contents;
+}
+.approval-args dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-2);
+}
+.approval-args dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-1);
+}
+.approval-full summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.approval-full pre {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .chat-page {
   height: calc(100dvh - 76px);
@@ -1285,9 +1482,6 @@ kbd {
   background: #f1f0fb;
   margin-bottom: 24px;
   transform: rotate(-6deg);
-}
-.chat-orbit .mark {
-  transform: rotate(6deg);
 }
 .chat-empty .eyebrow {
   justify-content: center;
@@ -1510,6 +1704,18 @@ kbd {
   gap: 4px;
   padding: 8px 0;
 }
+.activity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.activity .thinking {
+  padding: 0;
+}
 .thinking span {
   height: 5px;
   width: 5px;
@@ -1667,9 +1873,10 @@ kbd {
     width: 205px;
   }
   .brand {
-    font-size: 18px;
-    gap: 9px;
     padding-inline: 4px;
+  }
+  .brand-logo {
+    width: 132px;
   }
   .main {
     width: calc(100% - 205px);

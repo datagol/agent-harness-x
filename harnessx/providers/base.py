@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator
 
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
+from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
 
 
 class LLMProvider(ABC):
@@ -77,17 +78,13 @@ class LLMProvider(ABC):
             if inspect.isawaitable(result):
                 await result
 
-    def format_tools(self, tools: list[dict[str, Any]]) -> Any:
-        """Convert tools into vendor-specific format. Default passes through."""
-        return tools
-
     @abstractmethod
     async def count_tokens(
         self,
         *,
         model: str,
         messages: list[dict[str, Any]],
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
     ) -> int:
         """Estimate prompt token count for trim-decision logic in memory.py."""
@@ -108,10 +105,13 @@ def make_provider(name: str, **kwargs: Any) -> LLMProvider:
     if name == "openrouter":
         from .openrouter import OpenRouterProvider
         return OpenRouterProvider(**kwargs)
-    if name in ("azure", "azure-openai"):
+    if name == "azure":
         from .azure_openai import AzureOpenAIProvider
         return AzureOpenAIProvider(**kwargs)
+    factory = provider_factory(name)
+    if factory is not None:
+        return factory(**kwargs)
+    registered = ", ".join(registered_providers()) or "none"
     raise ValueError(
-        f"Unknown provider: {name!r} "
-        "(expected 'anthropic', 'openai', 'gemini', 'openrouter', or 'azure')"
+        f"Unknown provider: {name!r} (built-in: {', '.join(BUILTIN_PROVIDERS)}; registered: {registered})"
     )

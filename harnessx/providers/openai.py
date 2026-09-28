@@ -199,7 +199,7 @@ class OpenAIProvider(LLMProvider):
         *,
         model: str,
         messages: list[dict[str, Any]],
-        system: str,
+        system: str | None,
         tools: list[dict[str, Any]],
     ) -> int:
         try:

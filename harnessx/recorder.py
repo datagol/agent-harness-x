@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .errors import HarnessError
+
 import asyncio
 import copy
 from dataclasses import dataclass, field
@@ -60,7 +62,7 @@ _SECRET_KEYS = {
 }
 
 
-class IncidentError(ValueError):
+class IncidentError(HarnessError, ValueError):
     """Malformed, oversized, unsupported or corrupted incident bundle."""
 
 

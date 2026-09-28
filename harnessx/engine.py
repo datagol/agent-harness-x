@@ -21,9 +21,9 @@ from .execution import (
 )
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
-from .providers.retry import call_with_retry, stream_with_retry
+from .providers.retry import is_transient
 from .prompt_cache import accepts_cache, build_hint, hint_from_wire
-from .types import PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult
+from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult
 from ._journal import RecordingError, record as journal_record
 
 
@@ -129,6 +129,9 @@ async def command(agent, state, name, emit, *, record=None):
 
     if name == "start":
         agent.guardrails.reset_turn()
+        reset_cache = getattr(agent.tools, "reset_call_cache", None)
+        if reset_cache is not None:
+            reset_cache()  # deduped tool results are per run, never per session
         agent.memory.add_user_message(state["message"])
         for ext in agent.extensions:
             await ext.on_turn_start(ExtensionContext(agent, ext.name), state["message"])
@@ -148,7 +151,7 @@ async def command(agent, state, name, emit, *, record=None):
         system = agent._build_system_prompt()
         await agent.memory.trim_if_needed(
             agent.provider, agent.config.model, system, tools,
-            max_context_tokens=agent.config.max_context_tokens,
+            max_context_tokens=agent.config.limits.max_context_tokens,
         )
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools
@@ -189,6 +192,11 @@ async def command(agent, state, name, emit, *, record=None):
         await emit_hook(
             agent,
             HookEvent.LLM_REQUEST,
+            system=request.get("system"),
+            model=request["model"],
+            max_tokens=request.get("max_tokens"),
+            temperature=request.get("temperature"),
+            stream=streaming,
             message_count=len(request["messages"]),
             tool_count=len(request["tools"]),
             prefix_key=cache_hint.prefix_key if cache_hint is not None and cache_hint.enabled else None,
@@ -198,18 +206,11 @@ async def command(agent, state, name, emit, *, record=None):
             for m in agent.middleware._middleware
         )
         response = None
-        retry = dict(
-            attempts=agent.config.llm_max_attempts,
-            backoff_seconds=agent.config.llm_retry_backoff_seconds,
-        )
-        provider_label = getattr(agent.provider, "name", "") or "provider"
-        async with asyncio.timeout(agent.config.model_timeout_seconds):
+        # Retries live in the driver (one policy, journaled per attempt);
+        # this command makes exactly one provider call.
+        async with asyncio.timeout(agent.config.retry.call_timeout_seconds):
             if streaming:
-                async for chunk in stream_with_retry(
-                    lambda: agent.provider.stream(**request),
-                    description=f"{provider_label} stream",
-                    **retry,
-                ):
+                async for chunk in agent.provider.stream(**request):
                     if chunk.kind == "response":
                         response = chunk.data
                     elif not buffered and chunk.kind in (
@@ -222,11 +223,7 @@ async def command(agent, state, name, emit, *, record=None):
                         "Provider stream ended without a completed response"
                     )
             else:
-                response = await call_with_retry(
-                    lambda: agent.provider.create(**request),
-                    description=f"{provider_label} create",
-                    **retry,
-                )
+                response = await agent.provider.create(**request)
         if record:
             # Copy before middleware can mutate the same ProviderResponse in place.
             await record("model.response", response_payload(response))
@@ -288,7 +285,7 @@ async def command(agent, state, name, emit, *, record=None):
                 "execution_key": f"{state['run_id']}:{state['iterations']}:{call.id}",
                 "policy": "manual",
                 "concurrent": False,
-                "timeout": 300.0,
+                "timeout": DEFAULT_TIMEOUT_SECONDS,
             }
             try:
                 definition = agent.tools.get_tool(call.name)
@@ -598,14 +595,16 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                         await record("model.failed", {
                             "type": type(exc).__name__, "message": str(exc),
                         })
-                    if name != "model" or not retryable(exc) or state["attempt"] >= 3:
+                    retry = agent.config.retry
+                    if name != "model" or not retryable(exc) or state["attempt"] >= retry.attempts:
                         raise
                     state["usage_incomplete"] = True
                     buffered_events.clear()
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
                     state["attempt"] += 1
                     await persist()
-                    await asyncio.sleep(min(state["attempt"] - 1, 2))
+                    if retry.backoff_seconds:
+                        await asyncio.sleep(retry.backoff_seconds * (2 ** (state["attempt"] - 2)))
             outcome = await capture(agent, outcome)
             state = transition(state, name, outcome)
             await persist(buffered_events, journal=(
@@ -642,10 +641,5 @@ async def drive(agent, state, emit, *, commit=None, control=None):
 
 
 def retryable(exc):
-    """Only transport failures, throttling and server failures are auto-retried."""
-    status = getattr(exc, "status_code", None)
-    return (
-        isinstance(exc, (TimeoutError, ConnectionError, OSError))
-        or status == 429
-        or (isinstance(status, int) and status >= 500)
-    )
+    """One classifier for model and tool attempts: throttling, server failures, timeouts, connection loss."""
+    return is_transient(exc)

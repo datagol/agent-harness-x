@@ -1,6 +1,5 @@
 """Run example application flows without model charges or external services."""
 
-import asyncio
 import importlib
 import socket
 import sys
@@ -64,7 +63,7 @@ def example_environment(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Agent, "__init__", track)
     yield created
-    assert all(agent._closed and not agent._busy for agent in created)
+    assert all(agent.closed and not agent.busy for agent in created)
 
 
 @pytest.mark.asyncio
@@ -219,7 +218,7 @@ async def test_provider_chat_selection_tool_execution_and_cleanup(
     result = calls[1]["messages"][2]["content"][0]
     assert result["content"] == "400" and not result.get("is_error")
     assert "40 * 10 = 400" in capsys.readouterr().out
-    assert example_environment[0]._closed
+    assert example_environment[0].closed
 
 
 def test_provider_chat_defaults_and_model_validation(capsys):
@@ -253,7 +252,7 @@ async def test_provider_chat_interactive_followups(
     agent = example_environment[0]
     assert len(agent.memory.get_messages()) == 4
     assert "cache_read_input_tokens" in capsys.readouterr().out
-    assert agent._closed
+    assert agent.closed
 
 
 @pytest.mark.asyncio
@@ -273,7 +272,7 @@ async def test_provider_chat_one_shot_reports_failed_run(
     args = ["--prompt", "hello"] + ([] if streaming else ["--no-stream"])
     assert await provider_chat.main(args) == 1
     assert len(errors) == 1 and "Provider fixture unavailable" in str(errors[0])
-    assert example_environment[0]._closed
+    assert example_environment[0].closed
 
 
 @pytest.mark.asyncio
@@ -330,9 +329,16 @@ class FakeMCP:
         self.closed = False
         self.args = []
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.disconnect_all()
+
     async def connect(self, name, **options):
         self.connected = True
-        self.args = options.get("args", [])
+        # the example passes an MCPServerConfig; the keyword form is still accepted
+        self.args = list(getattr(name, "args", options.get("args", [])))
         return self.list_tools()
 
     async def disconnect_all(self):
@@ -457,97 +463,3 @@ def test_offline_evaluation_example_runs_without_model_or_upload(
     output = capsys.readouterr().out
     assert "SCRIPTED FIXTURE" in output and "100.0%" in output
     assert len(example_environment) == 3
-
-
-@pytest.mark.asyncio
-async def test_web_example_chat_stream_snapshots_and_cleanup(
-    example_environment, monkeypatch
-):
-    pytest.importorskip("fastapi")
-    import httpx
-    from examples.web_app import server
-
-    responses = iter(
-        [
-            ProviderResponse(
-                tool_calls=[ToolCall("a", "first", {}), ToolCall("b", "second", {})],
-                stop_reason="tool_use",
-            ),
-            ProviderResponse(text="Chat completed"),
-            ProviderResponse(
-                tool_calls=[ToolCall("c", "second", {})], stop_reason="tool_use"
-            ),
-            ProviderResponse(text="Stream completed"),
-        ]
-    )
-
-    class WebProvider(TextProvider):
-        async def create(self, **kwargs):
-            return next(responses, ProviderResponse(text="Restored conversation"))
-
-    monkeypatch.setattr("harnessx.core.make_provider", lambda *a, **kw: WebProvider())
-    monkeypatch.setattr(server, "MCPManager", FakeMCP)
-    monkeypatch.setattr(server, "agent_lock", asyncio.Lock())
-    bindings = server.agent_bindings
-
-    def with_test_tools():
-        options = bindings()
-
-        @options["tools"].register(permission=PermissionLevel.ALLOW)
-        async def first():
-            await asyncio.sleep(0.02)
-            return "first result"
-
-        @options["tools"].register(permission=PermissionLevel.ALLOW)
-        async def second():
-            return "second result"
-
-        return options
-
-    monkeypatch.setattr(server, "agent_bindings", with_test_tools)
-    async with server.lifespan(server.app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=server.app),
-            base_url="http://example.test",
-        ) as client:
-            assert (await client.get("/")).status_code == 200
-            response = await client.post("/api/chat", json={"message": "hello"})
-            assert response.status_code == 200, response.text
-            body = response.json()
-            assert body["response"] == "Chat completed"
-            assert {item["id"]: item["result"] for item in body["tool_calls"]} == {
-                "a": "first result",
-                "b": "second result",
-            }
-            streamed = await client.post("/api/stream", json={"message": "stream"})
-            assert (
-                '"tool_call_id": "c"' in streamed.text
-                and "Stream completed" in streamed.text
-            )
-            assert "data: [DONE]" in streamed.text
-            snapshot = (await client.post("/api/session/save")).json()["session_id"]
-            saved_prompt = server.streaming_agent.config.system_prompt
-            saved_usage = server.streaming_agent.guardrails.total_usage
-            assert (await client.post("/api/session/clear")).status_code == 200
-            assert (
-                await client.post(f"/api/session/load/{snapshot}")
-            ).status_code == 200
-            assert server.streaming_agent.config.system_prompt == saved_prompt
-            assert server.streaming_agent.guardrails.total_usage == saved_usage
-            assert (
-                server.streaming_agent.config.system_prompt.count("<available-skills>")
-                == 1
-            )
-            assert (await client.get("/api/status")).json()["session_id"] == snapshot
-            assert (
-                await client.post("/api/chat", json={"message": "continue"})
-            ).json()["response"] == "Restored conversation"
-            assert (await client.get("/api/sessions")).status_code == 200
-            assert (await client.get("/api/skills")).json()["skills"]
-            assert (
-                await client.post(
-                    "/api/mcp/connect", json={"name": "fixture", "command": "fixture"}
-                )
-            ).status_code == 200
-            assert (await client.post("/api/mcp/disconnect/fixture")).status_code == 200
-    assert server.streaming_agent is None and server.mcp_manager is None
