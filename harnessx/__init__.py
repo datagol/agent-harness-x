@@ -53,6 +53,7 @@ from .types import (
     Limits,
     PermissionLevel,
     PromptCacheHint,
+    ProgressPolicy,
     PromptCachePolicy,
     ProviderResponse,
     ReplayPolicy,
@@ -75,7 +76,7 @@ from .types import (
 __all__ = [
     "__version__",
     # Agent and configuration
-    "Agent", "SubAgent", "AgentConfig", "Limits", "RetryPolicy", "PromptCachePolicy", "ToolPolicy",
+    "Agent", "SubAgent", "AgentConfig", "Limits", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ProgressPolicy",
     "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "make_provider", "register_provider",

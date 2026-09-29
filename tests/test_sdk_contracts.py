@@ -396,6 +396,27 @@ def test_event_payload_and_failure_validation():
     assert RunEvent.from_dict(wire(event)) == event
 
 
+def test_waiting_events_say_what_is_slow():
+    """The payload is the contract: a consumer branches on `on` to word it."""
+    from harnessx import ProgressPolicy
+
+    event = RunEvent(RunEventType.WAITING, {"on": "model", "seconds": 12.0})
+    from harnessx.execution import wire
+    assert RunEvent.from_dict(wire(event)) == event
+
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"seconds": 1.0})           # no subject
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"on": "model"})            # no elapsed
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"on": "weather", "seconds": 1.0})
+
+    # Notices are on by default; a consumer opts out rather than opting in,
+    # because a silent slow call is the failure this exists to prevent.
+    assert ProgressPolicy().enabled is True
+    assert ProgressPolicy(first_after_seconds=None).enabled is False
+
+
 @pytest.mark.asyncio
 async def test_sandbox_selection_never_downgrades(monkeypatch):
     import harnessx.sandbox as module

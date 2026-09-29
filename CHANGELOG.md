@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `WAITING` run events while a model call is outstanding, so a provider that is
+  slow rather than broken is visible instead of silent. A call that succeeds
+  late never fails, never retries and never logs, so a streaming consumer shows
+  nothing for the duration and reads as hung; the first conclusion drawn tends
+  to be that the last deploy broke something. Configured by
+  `AgentConfig.progress=ProgressPolicy(first_after_seconds=10.0,
+  repeat_every_seconds=15.0)`; `first_after_seconds=None` disables it. The
+  events carry `{"on": "model", "seconds": <elapsed>}` and are notices, not
+  deadlines — nothing is cancelled, and the call stays bounded by
+  `RetryPolicy.call_timeout_seconds`. `"on"` also admits `"tool"`, which
+  nothing emits yet: tool calls run concurrently behind the driver's commit
+  lock and want their own change.
+
 ## [0.4.1] - 2026-09-28
 
 Long replies. An agent that writes whole files hits the reply token budget,

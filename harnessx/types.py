@@ -329,6 +329,35 @@ def call_timeout_for(max_tokens: int | None) -> float:
 
 
 @dataclass(frozen=True)
+class ProgressPolicy:
+    """How long a call may run silently before the run stream says it is still working.
+
+    A provider that is slow rather than broken produces nothing at all: no
+    deltas, no error, no retry. From the caller's side that is
+    indistinguishable from a hung agent, so every consumer ends up writing the
+    same timer, or -- more often -- ships an interface that looks frozen.
+    ``WAITING`` events say which side is slow, the model or a named tool, and
+    how long it has been.
+
+    They are notices, not deadlines: nothing is cancelled, and the call is
+    still bounded by ``RetryPolicy.effective_call_timeout`` and the tool's own
+    timeout. ``first_after_seconds=None`` turns them off.
+    """
+
+    first_after_seconds: float | None = 10.0
+    repeat_every_seconds: float = 15.0
+
+    def __post_init__(self) -> None:
+        if self.first_after_seconds is not None:
+            _positive(self.first_after_seconds, "first_after_seconds")
+        _positive(self.repeat_every_seconds, "repeat_every_seconds")
+
+    @property
+    def enabled(self) -> bool:
+        return self.first_after_seconds is not None
+
+
+@dataclass(frozen=True)
 class ToolPolicy:
     """Registry-wide tool options that an Agent applies to the registry it adopts."""
 
@@ -356,7 +385,7 @@ _LEGACY_FIELDS: dict[str, tuple[str, str]] = {
 }
 _OMITTED: Any = object()  # "argument not given", where None is itself a legal value
 
-_P = TypeVar("_P", Limits, RetryPolicy, ToolPolicy, PromptCachePolicy)
+_P = TypeVar("_P", Limits, RetryPolicy, ToolPolicy, ProgressPolicy, PromptCachePolicy)
 
 
 def _coerce(kind: type[_P], value: Any, name: str) -> _P:
@@ -398,6 +427,7 @@ class AgentConfig:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)  # None disables caching
     tools: ToolPolicy = field(default_factory=ToolPolicy)
+    progress: ProgressPolicy = field(default_factory=ProgressPolicy)
 
     def __init__(
         self,
@@ -411,6 +441,7 @@ class AgentConfig:
         retry: RetryPolicy | dict[str, Any] | None = None,
         prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
         tools: ToolPolicy | dict[str, Any] | None = None,
+        progress: ProgressPolicy | dict[str, Any] | None = None,
         # Deprecated 0.3 flat names. Each overrides the matching sub-policy attribute.
         max_iterations: int | None = None,
         max_context_tokens: int | None = None,
@@ -427,6 +458,7 @@ class AgentConfig:
         self.limits = _coerce(Limits, limits, "limits")
         self.retry = _coerce(RetryPolicy, retry, "retry")
         self.tools = _coerce(ToolPolicy, tools, "tools")
+        self.progress = _coerce(ProgressPolicy, progress, "progress")
         if prompt_cache is _OMITTED:
             self.prompt_cache = PromptCachePolicy()
         elif prompt_cache is None:
