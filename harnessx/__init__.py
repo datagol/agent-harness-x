@@ -56,6 +56,7 @@ from .types import (
     LoopGuard,
     PermissionLevel,
     PromptCacheHint,
+    ProgressPolicy,
     PromptCachePolicy,
     ProviderResponse,
     ReplayPolicy,
@@ -79,7 +80,7 @@ from .types import (
 __all__ = [
     "__version__",
     # Agent and configuration
-    "Agent", "SubAgent", "AgentConfig", "Limits", "LoopGuard", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry",
+    "Agent", "SubAgent", "AgentConfig", "Limits", "LoopGuard", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry", "ProgressPolicy",
     "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",

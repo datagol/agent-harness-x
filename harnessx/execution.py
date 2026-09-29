@@ -36,6 +36,7 @@ class RunEventType(str, Enum):
     APPROVAL_REQUIRED = "approval_required"
     RECOVERY_REQUIRED = "recovery_required"
     ATTEMPT_RESET = "attempt_reset"
+    WAITING = "waiting"
     RUN_RESULT = "run_result"
     GAP = "gap"
 
@@ -242,6 +243,11 @@ class RunEvent:
                 raise ValueError("Pending-tool events require execution_key and call")
         if self.type == RunEventType.ATTEMPT_RESET and isinstance(self.data, dict) and type(self.data.get("attempt")) is not int:
             raise ValueError("Attempt reset requires an integer attempt")
+        if self.type == RunEventType.WAITING and isinstance(self.data, dict):
+            if self.data.get("on") not in ("model", "tool"):
+                raise ValueError("Waiting events say what is being waited on: 'model' or 'tool'")
+            if not isinstance(self.data.get("seconds"), (int, float)):
+                raise ValueError("Waiting events require elapsed seconds")
 
     @classmethod
     def from_dict(cls, data: dict) -> RunEvent:

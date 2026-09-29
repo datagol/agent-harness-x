@@ -58,6 +58,47 @@ SUMMARY_INSTRUCTION = (
 )
 
 
+async def await_with_notices(awaitable, policy, event, *, on, name=None):
+    """Await something slow, saying so rather than going quiet.
+
+    The wait runs in the calling task: a side task emitting into the same run
+    stream would interleave with the driver's own writes, and the durable
+    backends persist events in order. Nothing is cancelled here -- the call is
+    still bounded by the retry policy's call timeout and the tool's own.
+    """
+    task = asyncio.ensure_future(awaitable)
+    if policy is None or not policy.enabled:
+        return await task
+    waited = 0.0
+    delay = policy.first_after_seconds
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=delay)
+        if done:
+            return await task
+        waited += delay
+        await event(E.WAITING, {"on": on, "seconds": round(waited, 1), **({"name": name} if name else {})})
+        delay = policy.repeat_every_seconds
+
+
+async def stream_with_notices(iterator, policy, event, *, on):
+    """The same, for a stream: the gap before the first chunk is the slow part.
+
+    Between chunks the wait restarts, so a provider that stalls mid-answer is
+    reported too.
+    """
+    if policy is None or not policy.enabled:
+        async for chunk in iterator:
+            yield chunk
+        return
+    iterator = iterator.__aiter__()
+    while True:
+        try:
+            chunk = await await_with_notices(iterator.__anext__(), policy, event, on=on)
+        except StopAsyncIteration:
+            return
+        yield chunk
+
+
 def default_max_tokens(provider, model: str) -> int:
     """The provider's reply budget for the model; duck-typed providers get the conservative default."""
     chooser = getattr(provider, "default_max_tokens", None)
@@ -299,9 +340,12 @@ async def command(agent, state, name, emit, *, record=None):
         response = None
         # Retries live in the driver (one policy, journaled per attempt);
         # this command makes exactly one provider call.
+        progress = getattr(agent.config, "progress", None)
         async with asyncio.timeout(agent.config.retry.effective_call_timeout(request.get("max_tokens"))):
             if streaming:
-                async for chunk in agent.provider.stream(**request):
+                async for chunk in stream_with_notices(
+                    agent.provider.stream(**request), progress, event, on="model"
+                ):
                     if chunk.kind == "response":
                         response = chunk.data
                     elif not buffered and chunk.kind in (
@@ -314,7 +358,9 @@ async def command(agent, state, name, emit, *, record=None):
                         "Provider stream ended without a completed response"
                     )
             else:
-                response = await agent.provider.create(**request)
+                response = await await_with_notices(
+                    agent.provider.create(**request), progress, event, on="model"
+                )
         if record:
             # Copy before middleware can mutate the same ProviderResponse in place.
             await record("model.response", response_payload(response))

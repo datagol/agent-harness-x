@@ -669,9 +669,32 @@ asyncio.run(main())
 
 Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
 `TOOL_CALL_COMPLETE`, `TOOL_RESULT`, `THINKING_DELTA`, `TURN_COMPLETE`,
-`ERROR`, `ATTEMPT_RESET`, and `RUN_RESULT`. Durable runs also emit approval and
-recovery events. Text deltas are provisional; discard an interrupted attempt's
-text when `ATTEMPT_RESET` arrives.
+`ERROR`, `ATTEMPT_RESET`, `WAITING`, and `RUN_RESULT`. Durable runs also emit
+approval and recovery events. Text deltas are provisional; discard an
+interrupted attempt's text when `ATTEMPT_RESET` arrives.
+
+### When the model is slow rather than broken
+
+A provider under load answers correctly and late. Nothing fails, so nothing
+retries and nothing is logged, and a streaming interface shows the user
+nothing for as long as it takes — which reads as a hung agent, not a slow one.
+
+`WAITING` events say so, carrying `{"on": "model", "seconds": 12.0}`:
+
+```python
+config = AgentConfig(
+    model="...",
+    progress=ProgressPolicy(first_after_seconds=5, repeat_every_seconds=8),
+)
+...
+elif event.type == RunEventType.WAITING:
+    print(f"still working ({event.data['seconds']:.0f}s)")
+```
+
+They are notices, not deadlines: nothing is cancelled, and the call stays
+bounded by `RetryPolicy.call_timeout_seconds`. `ProgressPolicy(
+first_after_seconds=None)` turns them off. The `on` field also admits
+`"tool"`, which no call emits yet.
 
 Usage stats accumulate on the guardrails engine:
 
