@@ -10,7 +10,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypedDict, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, TypedDict, Union
 
 if TYPE_CHECKING:
     from .execution import RunResult
@@ -29,6 +29,7 @@ class HookEvent(Enum):
     SKILL_INVOKED = "skill_invoked"
     SANDBOX_EXEC = "sandbox_exec"
     CHECKPOINT = "checkpoint"
+    RETRY = "retry"
     ERROR = "error"
 
 
@@ -58,6 +59,19 @@ class LLMRequestData(TypedDict):
 class LLMResponseData(TypedDict):
     response: "ProviderResponse"
     stop_reason: Any
+    provider: str  # the provider that served the call; a FallbackProvider reports the member
+
+
+class RetryData(TypedDict):
+    """A model or tool attempt failed and the engine is about to try again."""
+
+    kind: Literal["model", "tool"]
+    name: str  # model name, or tool name
+    attempt: int  # the attempt that failed (1-based)
+    next_attempt: int
+    wait_seconds: float
+    error: str
+    provider: str | None  # model retries only
 
 
 class ToolCallStartData(TypedDict):
@@ -101,7 +115,7 @@ class CheckpointEventData(TypedDict):
 HookData = Union[
     AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
     ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, SandboxExecData,
-    CheckpointEventData,
+    CheckpointEventData, RetryData,
 ]
 
 HOOK_PAYLOADS: dict[HookEvent, type] = {
@@ -117,6 +131,7 @@ HOOK_PAYLOADS: dict[HookEvent, type] = {
     HookEvent.SKILL_INVOKED: SkillInvokedData,
     HookEvent.SANDBOX_EXEC: SandboxExecData,
     HookEvent.CHECKPOINT: CheckpointEventData,
+    HookEvent.RETRY: RetryData,
 }
 
 

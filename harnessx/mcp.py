@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from contextlib import AsyncExitStack
@@ -25,8 +26,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence, overload
 
 from .tools import ToolRegistry
-from .errors import ConfigurationError
-from .types import PermissionLevel
+from .errors import ConfigurationError, TransientToolError
+from .providers.retry import is_transient_text
+from .types import PermissionLevel, ReplayPolicy, ToolResult, ToolRetry
+
+# Bridged tools re-run a throttled or failed call up to three times, once the
+# server is declared safe or idempotent (a manual tool is never retried).
+DEFAULT_MCP_RETRY = ToolRetry(attempts=3, backoff_seconds=1.0, retry_error_results=True)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +77,13 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     # common
     permission: PermissionLevel = PermissionLevel.ASK
+    # What durable execution and retry may do with this server's tools when an
+    # outcome is lost or transient: "manual" (stop and ask), "safe" (repeat
+    # freely), or "idempotent" (the server deduplicates repeats).
+    replay_policy: ReplayPolicy | str = "manual"
+    # Retry for this server's tools; None means DEFAULT_MCP_RETRY. Only acts on a
+    # safe or idempotent replay policy.
+    retry: ToolRetry | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -82,6 +95,12 @@ class MCPServerConfig:
         self.args = list(self.args)
         self.headers = dict(self.headers)
         self.permission = PermissionLevel(self.permission)
+        try:
+            self.replay_policy = ReplayPolicy(self.replay_policy).value
+        except ValueError:
+            raise ConfigurationError(f"MCP server {self.name!r}: invalid replay policy") from None
+        if self.retry is not None and not isinstance(self.retry, ToolRetry):
+            raise TypeError("MCP server retry must be a ToolRetry")
 
     @classmethod
     def stdio(
@@ -92,11 +111,14 @@ class MCPServerConfig:
         args: Sequence[str] = (),
         env: Mapping[str, str] | None = None,
         permission: PermissionLevel | str = PermissionLevel.ASK,
+        replay_policy: ReplayPolicy | str = "manual",
+        retry: ToolRetry | None = None,
     ) -> MCPServerConfig:
         """A server launched as a subprocess and spoken to over stdio."""
         return cls(
             name=name, command=command, args=list(args),
             env=dict(env) if env is not None else None, permission=PermissionLevel(permission),
+            replay_policy=replay_policy, retry=retry,
         )
 
     @classmethod
@@ -107,9 +129,14 @@ class MCPServerConfig:
         *,
         headers: Mapping[str, str] | None = None,
         permission: PermissionLevel | str = PermissionLevel.ASK,
+        replay_policy: ReplayPolicy | str = "manual",
+        retry: ToolRetry | None = None,
     ) -> MCPServerConfig:
         """A server reached over HTTP: streamable HTTP first, falling back to SSE."""
-        return cls(name=name, url=url, headers=dict(headers or {}), permission=PermissionLevel(permission))
+        return cls(
+            name=name, url=url, headers=dict(headers or {}), permission=PermissionLevel(permission),
+            replay_policy=replay_policy, retry=retry,
+        )
 
     @property
     def transport(self) -> Literal["stdio", "http"]:
@@ -270,6 +297,8 @@ class MCPConnection:
         # Check for errors
         is_error = getattr(result, "isError", False)
         if is_error:
+            if is_transient_text(text):
+                raise TransientToolError(f"MCP tool error: {text}")
             raise RuntimeError(f"MCP tool error: {text}")
 
         return text
@@ -292,6 +321,36 @@ class MCPConnection:
     @property
     def is_connected(self) -> bool:
         return self.session is not None
+
+
+def mcp_result_transient(result: ToolResult) -> bool:
+    """A successful MCP result that carries a throttling or server failure in its body.
+
+    Servers wrap upstream HTTP errors as ordinary text: a JSON object with an
+    ``error`` and a ``status``/``code`` of 429 or 5xx, or a short message that
+    reads as a rate limit. Only short bodies are inspected; real content is not.
+    """
+    text = result.content if isinstance(result.content, str) else ""
+    if not text or len(text) > 2000:
+        return False
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            body = json.loads(stripped)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            error = body.get("error")
+            if error is None and "status" not in body and "code" not in body:
+                return False
+            for key in ("status", "status_code", "code"):
+                for holder in (body, error if isinstance(error, dict) else {}):
+                    value = holder.get(key)
+                    if isinstance(value, int) and (value == 429 or value >= 500):
+                        return True
+            message = error if isinstance(error, str) else json.dumps(error) if error is not None else ""
+            return is_transient_text(message)
+    return result.is_error and is_transient_text(stripped)
 
 
 class MCPManager:
@@ -465,6 +524,9 @@ class MCPManager:
                     input_schema=tool_info.input_schema,
                     handler=handler,
                     permission=perm,
+                    replay_policy=conn.config.replay_policy,
+                    retry=conn.config.retry or DEFAULT_MCP_RETRY,
+                    retry_if_result=mcp_result_transient,
                 )
 
                 self._tool_to_server[tool_name] = server_name

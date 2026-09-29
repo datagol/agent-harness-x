@@ -18,6 +18,7 @@ from .errors import (
     RunError,
     RunFailed,
     RuntimeStateError,
+    TransientToolError,
     UnknownExecutionKey,
 )
 from .subagents import SubAgent
@@ -34,7 +35,7 @@ from .memory import (
 )
 from .messages import Message, ContentBlock
 from .permissions import CliPermissionManager, CostLimitError, GuardrailsEngine, MaxIterationsError, PermissionManager
-from .providers import AnthropicProvider, LLMProvider, make_provider, register_provider
+from .providers import AnthropicProvider, Fallback, FallbackProvider, LLMProvider, make_provider, register_provider
 from .runtime import AgentRuntime, RunHandle
 from .recorder import IncidentRecorder, ExportPolicy, BundleLimits, IncidentError, VerificationReport, Playback, export_incident
 from ._journal import RecordingError
@@ -70,15 +71,16 @@ from .types import (
     ToolDefinition,
     ToolPolicy,
     ToolResult,
+    ToolRetry,
 )
 
 __all__ = [
     "__version__",
     # Agent and configuration
-    "Agent", "SubAgent", "AgentConfig", "Limits", "RetryPolicy", "PromptCachePolicy", "ToolPolicy",
+    "Agent", "SubAgent", "AgentConfig", "Limits", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry",
     "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
-    "LLMProvider", "AnthropicProvider", "make_provider", "register_provider",
+    "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",
     # Tools
     "ToolRegistry", "ToolDefinition", "ToolCall", "ToolResult", "ToolNotFoundError", "PermissionLevel",
     "ReplayPolicy", "ToolExecutionContext", "ToolApprovalRequired", "current_tool_context", "normalize_tool_registry",
@@ -86,7 +88,7 @@ __all__ = [
     "RunEvent", "RunEventType", "RunResult", "RunStatus", "RunStream", "RunFailure", "PendingTool", "TokenUsage",
     # Errors
     "HarnessError", "ConfigurationError", "RuntimeStateError", "ResolutionError", "UnknownExecutionKey",
-    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled", "RunTruncated",
+    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled", "RunTruncated", "TransientToolError",
     "MaxIterationsError", "CostLimitError",
     # Memory and sessions
     "ConversationMemory", "Message", "ContentBlock", "PersistentMemory", "LongTermMemory", "AgentMemory",

@@ -107,6 +107,8 @@ class AzureOpenAIProvider(OpenAIProvider):
             if resolved_api_key is not None:
                 kwargs["api_key"] = resolved_api_key
             kwargs.update(client_kwargs)
+            # The engine owns retries (RetryPolicy); the SDK's own would compound them.
+            kwargs.setdefault("max_retries", 0)
 
             super().__init__(client=AsyncAzureOpenAI(**kwargs))
 

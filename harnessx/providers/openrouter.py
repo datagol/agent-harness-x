@@ -80,6 +80,8 @@ class OpenRouterProvider(OpenAIProvider):
             if resolved_app_name:
                 headers["X-Title"] = resolved_app_name
 
+            # The engine owns retries (RetryPolicy); the SDK's own would compound them.
+            client_kwargs.setdefault("max_retries", 0)
             self.client = AsyncOpenAI(
                 api_key=resolved_api_key or "missing-openrouter-key",
                 base_url=resolved_base_url,

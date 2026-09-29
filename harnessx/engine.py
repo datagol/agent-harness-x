@@ -19,11 +19,13 @@ from .execution import (
     transition,
     wire,
 )
+from .errors import TransientToolError
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
-from .providers.retry import is_transient
+from .providers.retry import is_transient, retry_after_seconds
 from .prompt_cache import accepts_cache, build_hint, hint_from_wire
-from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult
+from .tools import retry_wanted
+from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult, ToolRetry
 from ._journal import RecordingError, record as journal_record
 
 
@@ -263,6 +265,7 @@ async def command(agent, state, name, emit, *, record=None):
             HookEvent.LLM_RESPONSE,
             response=canonical,
             stop_reason=canonical.stop_reason,
+            provider=served_by(agent),
         )
         if buffered and canonical.text:
             await event(E.TEXT_DELTA, canonical.text)
@@ -299,6 +302,7 @@ async def command(agent, state, name, emit, *, record=None):
                 "policy": "manual",
                 "concurrent": False,
                 "timeout": DEFAULT_TIMEOUT_SECONDS,
+                "retry": ToolRetry().to_dict(),
             }
             try:
                 definition = agent.tools.get_tool(call.name)
@@ -309,6 +313,7 @@ async def command(agent, state, name, emit, *, record=None):
                     policy=definition.replay_policy,
                     concurrent=definition.concurrent,
                     timeout=definition.timeout_seconds,
+                    retry=(definition.retry or ToolRetry()).to_dict(),
                 )
                 level = agent.permissions.get_effective_permission(
                     call.name, definition
@@ -388,6 +393,13 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         await emit_hook(agent, HookEvent.TOOL_CALL_START, tool_call=copy.deepcopy(call))
         async with asyncio.timeout(entry["timeout"]):
             result = await agent.tools._dispatch(call, definition)
+        policy = tool_retry_from_wire(entry)
+        if (
+            entry.get("policy", "manual") != "manual"
+            and int(entry.get("attempt", 0)) < policy.attempts
+            and retry_wanted(definition, policy, result)
+        ):
+            raise TransientToolError(str(result.content))
         # Commit the raw result before fallible middleware/extension work.
         return wire(result)
     finally:
@@ -498,23 +510,43 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     raise
                 except Exception as exc:
                     async with lock:
+                        declared = isinstance(exc, TransientToolError)
                         failure = records("tool.failed", {
                             "type": type(exc).__name__, "message": str(exc),
-                            "outcome": "unknown",
+                            "outcome": "failed" if declared else "unknown",
                         }, entry)
+                        policy = tool_retry_from_wire(entry)
+                        exhausted = entry["attempt"] >= policy.attempts
+                        if declared and (entry["policy"] == "manual" or exhausted):
+                            # The handler said the call did not take effect: no recovery
+                            # stop, and no more attempts; the model sees the failure.
+                            await persist(journal=failure)
+                            raw = wire(ToolResult(
+                                tool_call_id=entry["call"]["id"],
+                                content=f"Tool execution error: {exc}",
+                                is_error=True,
+                            ))
+                            break
                         if entry["policy"] == "manual":
                             entry["status"] = "uncertain"
                             await persist([ev(E.RECOVERY_REQUIRED, entry)], journal=failure)
                             return
-                        if not retryable(exc) or entry["attempt"] >= 3:
+                        if not (declared or retryable(agent, exc)) or exhausted:
                             await persist(journal=failure)
                             raise
                         await persist(journal=failure)
+                        wait = policy.wait_for(entry["attempt"])
+                        await emit_hook(
+                            agent, HookEvent.RETRY, kind="tool", name=entry["call"]["name"],
+                            attempt=entry["attempt"], next_attempt=entry["attempt"] + 1,
+                            wait_seconds=wait, error=str(exc), provider=None,
+                        )
                         entry["attempt"] += 1
                         await persist(journal=records("tool.started", {
                             "call": entry["call"], "replay_policy": entry["policy"],
                         }, entry))
-                    await asyncio.sleep(min(entry["attempt"] - 1, 2))
+                    if wait:
+                        await asyncio.sleep(wait)
             async with lock:
                 if state.get("recording"):
                     from .artifacts import capture
@@ -609,15 +641,21 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    if name != "model" or not retryable(exc) or state["attempt"] >= retry.attempts:
+                    if name != "model" or not retryable(agent, exc) or state["attempt"] >= retry.attempts:
                         raise
+                    wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
+                    await emit_hook(
+                        agent, HookEvent.RETRY, kind="model", name=agent.config.model,
+                        attempt=state["attempt"], next_attempt=state["attempt"] + 1,
+                        wait_seconds=wait, error=str(exc), provider=served_by(agent),
+                    )
                     state["usage_incomplete"] = True
                     buffered_events.clear()
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
                     state["attempt"] += 1
                     await persist()
-                    if retry.backoff_seconds:
-                        await asyncio.sleep(retry.backoff_seconds * (2 ** (state["attempt"] - 2)))
+                    if wait:
+                        await asyncio.sleep(wait)
             outcome = await capture(agent, outcome)
             state = transition(state, name, outcome)
             await persist(buffered_events, journal=(
@@ -653,6 +691,45 @@ async def drive(agent, state, emit, *, commit=None, control=None):
     return result
 
 
-def retryable(exc):
-    """One classifier for model and tool attempts: throttling, server failures, timeouts, connection loss."""
+def retryable(agent, exc):
+    """One classifier for model and tool attempts, asked of the agent's provider.
+
+    Providers override ``is_transient`` for vendor-specific errors; duck-typed
+    providers without it get the shared classifier (429, 5xx, timeouts,
+    connection loss).
+    """
+    classify = getattr(agent.provider, "is_transient", None)
+    if callable(classify):
+        try:
+            return bool(classify(exc))
+        except Exception:
+            pass
     return is_transient(exc)
+
+
+def retry_after(agent, exc):
+    """The server's Retry-After for a model failure, via the provider when it has a reader."""
+    reader = getattr(agent.provider, "retry_after", None)
+    if callable(reader):
+        try:
+            value = reader(exc)
+            return None if value is None else max(0.0, float(value))
+        except Exception:
+            pass
+    return retry_after_seconds(exc)
+
+
+def served_by(agent) -> str:
+    """The name of the provider that answered: a FallbackProvider reports the member it used."""
+    provider = agent.provider
+    return str(
+        getattr(provider, "last_served", None) or getattr(provider, "name", "") or type(provider).__name__
+    )
+
+
+def tool_retry_from_wire(entry) -> ToolRetry:
+    """The retry policy carried on a prepared tool entry; older run states get the default."""
+    try:
+        return ToolRetry.from_dict(entry.get("retry"))
+    except Exception:
+        return ToolRetry()

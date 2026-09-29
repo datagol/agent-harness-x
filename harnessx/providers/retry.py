@@ -11,17 +11,21 @@ Two rules matter and are easy to get wrong:
   same error. 429, 5xx and timeouts are the transient set.
 
 * **Never retry a stream that has already delivered.** Once a text delta has
-  reached the caller, re-running the request duplicates output. `stream_with_retry`
-  therefore retries only up to the FIRST chunk, and never after.
+  reached the caller, re-running the request duplicates output. The engine's
+  loop and `FallbackProvider` therefore retry a stream only up to the FIRST
+  chunk, and never after.
+
+This module holds the classification the engine's retry loop asks for by
+default; providers override it through `LLMProvider.is_transient`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
-from typing import Any, AsyncIterator, Awaitable, Callable, TypeVar
-
-from ..types import StreamChunk
+from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +43,11 @@ _TRANSIENT_MARKERS = (
     "temporarily",
     "connection reset",
     "server error",
+    "too many requests",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
 )
-
-T = TypeVar("T")
 
 
 def is_transient(exc: BaseException) -> bool:
@@ -56,77 +62,66 @@ def is_transient(exc: BaseException) -> bool:
                 return False           # deterministic; do not retry
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError)):
         return True
-    text = str(exc).lower()
-    return any(marker in text for marker in _TRANSIENT_MARKERS)
+    return is_transient_text(str(exc))
 
 
-async def call_with_retry(
-    operation: Callable[[], Awaitable[T]],
-    *,
-    attempts: int = DEFAULT_ATTEMPTS,
-    backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
-    description: str = "provider call",
-) -> T:
-    """Run `operation`, retrying transient failures up to `attempts` times."""
-    last: BaseException | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            return await operation()
-        except Exception as exc:
-            last = exc
-            if attempt + 1 >= attempts or not is_transient(exc):
-                raise
-            logger.warning(
-                "%s failed (attempt %d/%d), retrying: %s",
-                description, attempt + 1, attempts, exc,
-            )
-            if backoff_seconds:
-                await asyncio.sleep(backoff_seconds * (2 ** attempt))
-    raise last  # pragma: no cover - loop always returns or raises
+def is_transient_text(text: str) -> bool:
+    """True when an error message reads like throttling, overload, or a timeout.
 
-
-async def stream_with_retry(
-    open_stream: Callable[[], AsyncIterator[StreamChunk]],
-    *,
-    attempts: int = DEFAULT_ATTEMPTS,
-    backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
-    description: str = "provider stream",
-) -> AsyncIterator[StreamChunk]:
-    """Stream, retrying only while nothing has been delivered.
-
-    A failure after the first chunk is raised, not retried: the caller has
-    already seen part of the answer and a second run would repeat it.
+    Used for exceptions without a status attribute and for error results whose
+    only signal is their text (an MCP tool reporting a 429 in its body).
     """
-    for attempt in range(max(1, attempts)):
-        iterator = open_stream()
-        try:
-            first = await iterator.__anext__()
-        except StopAsyncIteration:
-            return
-        except Exception as exc:
-            if attempt + 1 >= attempts or not is_transient(exc):
-                raise
-            logger.warning(
-                "%s failed before first chunk (attempt %d/%d), retrying: %s",
-                description, attempt + 1, attempts, exc,
-            )
-            await _aclose(iterator)
-            if backoff_seconds:
-                await asyncio.sleep(backoff_seconds * (2 ** attempt))
+    lowered = str(text).lower()
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """The server's Retry-After for this failure in seconds, or None when it sent none.
+
+    Reads the header off SDK exceptions (``exc.response.headers`` or ``exc.headers``)
+    and a ``retry_after`` field in a JSON error body; accepts delay-seconds or an
+    HTTP-date. Never negative.
+    """
+    value: Any = None
+    for headers in (
+        getattr(getattr(exc, "response", None), "headers", None),
+        getattr(exc, "headers", None),
+    ):
+        if headers is None:
             continue
+        try:
+            value = headers.get("retry-after") or headers.get("Retry-After")
+        except Exception:
+            value = None
+        if value:
+            break
+    if not value:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            nested = body.get("error")
+            error: dict[str, Any] = nested if isinstance(nested, dict) else body
+            value = error.get("retry_after") or error.get("retry-after")
+    return _parse_retry_after(value)
 
-        yield first
-        # Past this point the caller has output; a retry would duplicate it.
-        async for chunk in iterator:
-            yield chunk
-        return
 
-
-async def _aclose(iterator: Any) -> None:
-    close = getattr(iterator, "aclose", None)
-    if close is None:
-        return
+def _parse_retry_after(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    text = str(value).strip()
+    if not text:
+        return None
     try:
-        await close()
-    except Exception:  # pragma: no cover - best effort
+        return max(0.0, float(text))
+    except ValueError:
         pass
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())

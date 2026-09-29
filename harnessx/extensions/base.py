@@ -8,7 +8,7 @@ import logging
 import warnings
 
 from ..hooks import HookCallback, HookEvent, HookManager, Middleware, MiddlewarePipeline, Registration
-from ..types import AgentConfig, PermissionLevel, ReplayPolicy
+from ..types import AgentConfig, PermissionLevel, ReplayPolicy, ToolResult, ToolRetry
 from ..tools import ToolRegistry
 from ..memory import ConversationMemory
 
@@ -76,6 +76,8 @@ class ExtensionContext:
         concurrent: bool = True,
         replay_policy: ReplayPolicy | str = "manual",
         timeout_seconds: float | None = None,
+        retry: ToolRetry | None = None,
+        retry_if_result: Callable[[ToolResult], bool] | None = None,
         replace: bool = False,
     ) -> Registration:
         tool_name = name or handler.__name__
@@ -91,12 +93,15 @@ class ExtensionContext:
                 concurrent=concurrent,
                 replay_policy=replay_policy,
                 timeout_seconds=timeout_seconds,
+                retry=retry,
+                retry_if_result=retry_if_result,
                 replace=replace,
             )
         else:
             definition = self.tools.register_tool(
                 handler, name=name, description=description, permission=perm, concurrent=concurrent,
-                replay_policy=replay_policy, timeout_seconds=timeout_seconds, replace=replace,
+                replay_policy=replay_policy, timeout_seconds=timeout_seconds, retry=retry,
+                retry_if_result=retry_if_result, replace=replace,
             )
         def remove():
             if self.tools.has_tool(tool_name) and self.tools.get_tool(tool_name) is definition:
