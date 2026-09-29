@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harnessx"
-version = "0.4.2"
+version = "0.4.3"
 description = "A lightweight, production-grade LLM agent toolkit in Python: streaming, MCP, lazy skills, memory, and sandboxing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -103,7 +103,7 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["harnessx/types.py", "harnessx/errors.py", "harnessx/durable.py", "harnessx/providers/registry.py", "harnessx/messages.py", "harnessx/execution.py", "harnessx/subagents.py", "harnessx/recorder.py", "harnessx/_journal.py", "harnessx/decisions", "tests/typing/sdk_usage.py", "tests/typing/decision_usage.py", "examples", "harness-web/harness_web", "harness-web/run.py"]
+files = ["harnessx/types.py", "harnessx/errors.py", "harnessx/durable.py", "harnessx/providers/registry.py", "harnessx/providers/retry.py", "harnessx/providers/fallback.py", "harnessx/messages.py", "harnessx/execution.py", "harnessx/subagents.py", "harnessx/recorder.py", "harnessx/_journal.py", "harnessx/decisions", "tests/typing/sdk_usage.py", "tests/typing/decision_usage.py", "examples", "harness-web/harness_web", "harness-web/run.py"]
 follow_imports = "silent"
 ignore_missing_imports = true
 check_untyped_defs = true

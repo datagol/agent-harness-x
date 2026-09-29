@@ -3,10 +3,10 @@
 from typing import assert_type
 from pathlib import Path
 
-from harnessx import Agent, Message, PermissionManager, RunEvent, RunResult, SubAgent, ToolCall, ToolDefinition
+from harnessx import Agent, Fallback, FallbackProvider, Message, PermissionManager, RunEvent, RunResult, SubAgent, ToolCall, ToolDefinition, ToolResult, ToolRetry, TransientToolError
 from harnessx.extensions.base import ExtensionContext
 from harnessx.hooks import HookContext, HookEvent, Registration
-from harnessx.types import AgentConfig, Limits
+from harnessx.types import AgentConfig, Limits, RetryPolicy, ToolPolicy
 from harnessx import AgentRuntime, ExportPolicy, IncidentRecorder, Playback, VerificationReport
 
 
@@ -105,3 +105,34 @@ async def use_0_4_api(agent: Agent, runtime: AgentRuntime) -> None:
         assert_type(await mcp.connect("files", command="npx", args=["-y", "server"]), list[MCPToolInfo])
     async with await SQLiteBackend.connect("runtime.db") as backend:
         assert_type(backend, SQLiteBackend)
+
+
+async def use_retry_seams(agent: Agent) -> None:
+    policy = ToolRetry(attempts=3, backoff_seconds=1.0, retry_error_results=True)
+    assert_type(policy.wait_for(1), float)
+    assert_type(ToolRetry.from_dict(policy.to_dict()), ToolRetry)
+    assert_type(RetryPolicy(max_backoff_seconds=10).wait_for(1, retry_after=2.0), float)
+    assert_type(ToolPolicy(retry=policy).retry, ToolRetry | None)
+
+    def transient(result: ToolResult) -> bool:
+        return result.is_error
+
+    @agent.tools.register(replay_policy="idempotent", retry=policy, retry_if_result=transient)
+    def flaky(url: str) -> str:
+        """Fetch something flaky."""
+        raise TransientToolError("throttled")
+
+    assert_type(agent.tools.get_tool("flaky").retry, ToolRetry | None)
+
+    chain = FallbackProvider(
+        "anthropic",
+        Fallback("openrouter", model="anthropic/claude-sonnet-4.6"),
+        switch_after=2,
+        cooldown_seconds=30,
+    )
+    assert_type(chain.members, tuple[Fallback, ...])
+    assert_type(chain.last_served, str | None)
+    assert_type(chain.is_transient(RuntimeError("x")), bool)
+    assert_type(chain.retry_after(RuntimeError("x")), float | None)
+    Agent(config=AgentConfig(model="claude-sonnet-4-6"), provider=chain)
+    await chain.aclose()

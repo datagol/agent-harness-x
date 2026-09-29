@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-09-29
+
+Retry seams. The engine has always had one retry loop; 0.4.3 keeps it there and
+gives it the seams an application needs, extends it to tool calls that report a
+transient failure, and stops the vendor SDKs from retrying underneath it.
+Everything here is optional: unconfigured agents behave as they did.
+
+### Added
+
+- `ToolRetry(attempts, backoff_seconds, max_backoff_seconds, retry_error_results)`
+  and `TransientToolError`. A handler raises the error to say the call failed
+  for a reason that may clear and did not take effect; the engine runs it again
+  under the tool's policy. Set it per tool (`register(..., retry=...)` on every
+  registration route) or registry-wide with `ToolPolicy(retry=...)`. Retry
+  applies only to `safe` and `idempotent` tools: a `manual` tool still stops for
+  recovery on an unknown outcome, and a declared transient failure there goes to
+  the model instead of being repeated.
+- `ToolDefinition.retry_if_result`, and `ToolRetry.retry_error_results`, for an
+  API that reports throttling inside an otherwise successful result.
+- `LLMProvider.is_transient(exc)` and `LLMProvider.retry_after(exc)`: the engine
+  now asks the provider how to classify a failure and how long the server asked
+  it to wait. `Retry-After` (seconds or HTTP-date) is honored.
+- `RetryPolicy.max_backoff_seconds` (default 30) caps one wait, including one
+  the server asked for, and `RetryPolicy.wait_for()` exposes the calculation.
+- `FallbackProvider(primary, *fallbacks, switch_after=1, cooldown_seconds=0)`
+  with `Fallback(provider, model=None, max_tokens=None)`: an ordered chain of
+  providers that looks like one provider. A transient failure strikes the
+  current member; at `switch_after` the next one is tried inside the same call,
+  with its own model id and reply budget. Deterministic errors never fail over,
+  and a stream fails over only before its first chunk.
+- `HookEvent.RETRY` with a `RetryData` payload (`kind`, `name`, `attempt`,
+  `next_attempt`, `wait_seconds`, `error`, `provider`), and `provider` on the
+  `LLM_RESPONSE` payload.
+- `MCPServerConfig.replay_policy` and `.retry`. Bridged tools on a `safe` or
+  `idempotent` server retry a throttled call three times by default, including
+  when the server reports a 429 or 5xx inside a successful result.
+
+### Changed
+
+- Provider clients the harness constructs pass `max_retries=0` to the vendor
+  SDK (Anthropic, OpenAI, Azure, OpenRouter). Retries were previously doubled:
+  the SDK's two on top of the engine's, invisible to the journal and to
+  tracing. An SDK client you construct and inject keeps its own setting.
+- A tool attempt is bounded by its `ToolRetry` instead of a hard-coded three,
+  waits with capped exponential backoff instead of a fixed ramp, and is carried
+  on the run state so the Temporal path uses the same bound. Run states written
+  before this release default to the standard policy.
+- `engine.retryable()` takes the agent and asks its provider; `PendingTool`
+  gained a `retry` field.
+
+### Removed
+
+- `providers.retry.call_with_retry` and `stream_with_retry`, helpers nothing
+  called. The engine's loop is the retry path.
+
 ## [0.4.2] - 2026-09-29
 
 A patch release for one silent regression in 0.4.1.
@@ -216,6 +271,7 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
+[0.4.3]: https://github.com/datagol/agent-harness-x/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/datagol/agent-harness-x/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/datagol/agent-harness-x/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/datagol/agent-harness-x/compare/v0.3.0...v0.4.0

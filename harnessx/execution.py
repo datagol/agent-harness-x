@@ -66,7 +66,7 @@ class PendingTool:
     policy: str = "manual"
     concurrent: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    retry: ToolRetry | None = None  # the tool's retry policy; None on entries persisted before 0.4.2
+    retry: ToolRetry | None = None  # the tool's retry policy; None on entries persisted before 0.4.3
 
     def __post_init__(self) -> None:
         if self.status not in ("approval", "uncertain") or not isinstance(self.execution_key, str):

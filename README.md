@@ -144,9 +144,9 @@ asyncio.run(main())
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=150_000`, `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None` |
-| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=30.0` caps one wait, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
-| `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False` |
+| `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False`, `retry=None` (a `ToolRetry` applied to tools registered without one) |
 
 The sub-policies are frozen dataclasses; change one with `dataclasses.replace`.
 The 0.3 flat names (`max_iterations=`, `llm_max_attempts=`, ...) still work and
@@ -561,6 +561,43 @@ Durable execution uses `manual` to stop for recovery when an interrupted operati
 outcome is unknown. Select `safe` only when repeating an operation is safe, or
 `idempotent` when the integration actually enforces idempotency. Neither setting
 provides exactly-once external effects on its own.
+
+### Retrying a flaky tool
+
+A tool that calls a rate-limited API fails for a reason that clears on its own.
+Raise `TransientToolError` from the handler and the engine runs the call again
+under the tool's `ToolRetry`, exactly the way it retries a model call. Every
+other exception still becomes a one-line error result for the model, as before.
+
+```python
+from harnessx import ToolRetry, TransientToolError
+
+@agent.tools.register(replay_policy="idempotent", retry=ToolRetry(attempts=3, backoff_seconds=2))
+async def fetch_page(url: str) -> str:
+    """Fetch a page."""
+    response = await http.get(url)
+    if response.status in (429, 503):
+        raise TransientToolError(f"{response.status} from {url}")
+    return response.text
+```
+
+`ToolRetry(attempts=3, backoff_seconds=0.5, max_backoff_seconds=30.0,
+retry_error_results=False)` is the whole policy; `attempts=1` disables retry.
+Set a default for a whole registry with `ToolPolicy(retry=...)`; a tool
+registered with its own `retry=` keeps it.
+
+Retry only happens when `replay_policy` is `safe` or `idempotent`: repeating a
+`manual` tool could duplicate a side effect, so a declared transient failure
+there goes straight to the model instead. Two more ways to spot a failure that
+arrived as a successful result:
+
+- `retry_error_results=True` retries an error result whose text reads as
+  throttling, overload, or a timeout.
+- `retry_if_result=lambda result: ...` is your own check, for an API that
+  reports `{"error": ..., "status": 429}` inside a 200.
+
+Each attempt is journaled and emits the `RETRY` hook, so the retries are
+visible in the flight recorder and in tracing rather than hidden in a handler.
 
 ### Calling a function versus executing an agent tool
 
@@ -981,7 +1018,61 @@ key raises `UnknownExecutionKey` (a `KeyError`). Runs report their outcome as
 data: `result.ok`, `result.failed`, and `result.needs_input` inspect the
 status, and `result.raise_for_status()` turns a run that did not complete into
 `RunFailed`, `RunAwaitingInput`, or `RunCancelled`, each carrying `.result`.
-`PermissionLevel`, like every other enum here, is a `str` enum.
+`PermissionLevel`, like every other enum here, is a `str` enum. A tool handler
+that raises `TransientToolError` asks for a retry rather than reporting a
+failure; see [Retrying a flaky tool](#retrying-a-flaky-tool).
+
+### Retries
+
+There is exactly one retry loop, in the engine. It clears buffered stream
+events, emits `ATTEMPT_RESET`, journals every attempt, and marks usage
+incomplete, so nothing outside the engine can stand in for it. What you
+configure are the seams it consults.
+
+| Seam | Where |
+|---|---|
+| How many attempts, how long to wait | `AgentConfig.retry` for the model, `ToolRetry` per tool |
+| Which failures are worth retrying | `LLMProvider.is_transient(exc)`, overridable per provider |
+| How long the server asked us to wait | `LLMProvider.retry_after(exc)`, reading `Retry-After` |
+| What to call when one vendor is down | `FallbackProvider` |
+| What happened | the `RETRY` hook, and the journal |
+
+Clients the harness builds itself pass `max_retries=0` to the vendor SDK, so a
+503 costs the attempts you configured and no more. An SDK client you construct
+and inject keeps whatever you set on it.
+
+Middleware cannot retry: it transforms a request or a result and never re-issues
+a call. Put normalization there, and retry policy here.
+
+#### Failing over to another provider
+
+`FallbackProvider` is an ordered chain that looks like one provider:
+
+```python
+from harnessx import Agent, AgentConfig, Fallback, FallbackProvider
+
+provider = FallbackProvider(
+    "anthropic",                                                # primary, uses AgentConfig.model
+    Fallback("openrouter", model="anthropic/claude-sonnet-4.6"),  # same model, other vendor
+    Fallback("openai", model="gpt-5", max_tokens=16_000),         # last resort
+    switch_after=2,        # transient failures a member takes before the chain moves on
+    cooldown_seconds=60,   # and how long it then stays out of rotation
+)
+agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"), provider=provider)
+```
+
+Each member can carry its own model id and reply budget, because the same model
+is named differently on different vendors. A transient failure adds a strike to
+the current member; at `switch_after` the next one is tried inside the same
+call. A deterministic error (a bad request) raises at once, and a stream fails
+over only before its first chunk. When every member fails, `AgentConfig.retry`
+decides whether to walk the chain again. `LLM_RESPONSE` and `RETRY` hooks report
+which member served the call.
+
+Members given as names are built and closed by the chain; instances you pass in
+stay yours. To reach a chain from configuration alone, register it:
+`register_provider("resilient", lambda: FallbackProvider(...))`, then
+`AgentConfig(provider="resilient")`.
 
 ---
 
@@ -1067,7 +1158,11 @@ async with MCPManager() as mcp:
 ```
 
 `MCPServerConfig.stdio(...)` and `.http(...)` pick the transport by
-constructor; each takes `permission=` for the server's tools (default `ASK`).
+constructor; each takes `permission=` for the server's tools (default `ASK`),
+plus `replay_policy=` and `retry=`. A server whose tools only read is worth
+declaring `replay_policy="safe"`: bridged tools then retry a throttled call
+three times on their own, including the common case of a server that reports a
+429 inside an otherwise successful result.
 `connect()` also accepts a name with `command=` or `url=` keywords. The name is
 yours to choose: it keys the connection and prefixes every bridged tool. The
 manager is caller-owned: closing the agent leaves it connected, and one manager
