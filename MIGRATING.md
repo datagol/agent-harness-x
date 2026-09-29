@@ -315,3 +315,8 @@ loop is the retry path. `providers.retry.is_transient` stays, and is what
 | `FallbackProvider`, `Fallback` | An ordered chain of providers that looks like one |
 | `HookEvent.RETRY`, `RetryData` | Every retry, model or tool |
 | `MCPServerConfig.replay_policy`, `.retry` | Retry for bridged MCP tools |
+
+Providers also became async context managers. An agent closes only a provider
+it built itself, so one you construct and inject has always been yours to
+close; `async with FallbackProvider(...) as provider:` is now how, instead of
+`contextlib.aclosing`. Nothing about ownership changed.

@@ -1070,9 +1070,29 @@ decides whether to walk the chain again. `LLM_RESPONSE` and `RETRY` hooks report
 which member served the call.
 
 Members given as names are built and closed by the chain; instances you pass in
-stay yours. To reach a chain from configuration alone, register it:
-`register_provider("resilient", lambda: FallbackProvider(...))`, then
-`AgentConfig(provider="resilient")`.
+stay yours.
+
+#### Who closes the provider
+
+An agent closes only a provider it built itself, so one you construct and pass
+as `provider=` is yours to close. Providers are async context managers:
+
+```python
+async with FallbackProvider("anthropic", Fallback("openai", model="gpt-5")) as provider:
+    async with Agent(config=AgentConfig(model="claude-sonnet-4-6"), provider=provider) as agent:
+        ...
+# the chain closed the clients it built
+```
+
+Or hand the whole thing to configuration and let the agent own it, which is one
+line shorter and has nothing to remember:
+
+```python
+register_provider("resilient", lambda: FallbackProvider("anthropic", Fallback("openai", model="gpt-5")))
+
+async with Agent(config=AgentConfig(model="claude-sonnet-4-6", provider="resilient")) as agent:
+    ...
+```
 
 ---
 

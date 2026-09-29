@@ -294,6 +294,36 @@ async def test_fallback_owns_members_built_from_names_only(monkeypatch):
     assert await chain.count_tokens(model="m", messages=[], system=None, tools=[]) == 7
 
 
+@pytest.mark.asyncio
+async def test_a_provider_closes_itself_on_the_way_out_of_async_with():
+    provider = Scripted()
+    async with provider as same:
+        assert same is provider, "async with yields the provider, not a wrapper"
+        assert not provider.closed
+    assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_async_with_closes_a_fallback_chains_owned_members(monkeypatch):
+    built = Scripted(label="built")
+    monkeypatch.setattr("harnessx.providers.fallback.make_provider", lambda name, **kw: built)
+    injected = Scripted(label="injected")
+    async with FallbackProvider("anthropic", injected) as chain:
+        assert chain.labels == ("anthropic", "injected")
+    assert built.closed and not injected.closed
+
+
+@pytest.mark.asyncio
+async def test_an_injected_provider_is_still_the_callers_to_close():
+    provider = Scripted()
+    async with Agent(config=AgentConfig(model="m"), provider=provider) as agent:
+        assert (await agent.run("hi")).ok
+    assert not provider.closed, "an agent closes only a provider it built itself"
+    async with provider:
+        pass
+    assert provider.closed
+
+
 def test_fallback_validates_its_arguments():
     with pytest.raises(ValueError):
         FallbackProvider(Scripted(), switch_after=0)

@@ -136,3 +136,5 @@ async def use_retry_seams(agent: Agent) -> None:
     assert_type(chain.retry_after(RuntimeError("x")), float | None)
     Agent(config=AgentConfig(model="claude-sonnet-4-6"), provider=chain)
     await chain.aclose()
+    async with chain as same:
+        assert_type(same, FallbackProvider)

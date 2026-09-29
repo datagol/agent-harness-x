@@ -40,6 +40,9 @@ Everything here is optional: unconfigured agents behave as they did.
 - `MCPServerConfig.replay_policy` and `.retry`. Bridged tools on a `safe` or
   `idempotent` server retry a throttled call three times by default, including
   when the server reports a 429 or 5xx inside a successful result.
+- `LLMProvider` is an async context manager, so a provider you construct and
+  inject closes with `async with` rather than `contextlib.aclosing`. Ownership
+  is unchanged: an agent still closes only a provider it built itself.
 
 ### Changed
 
