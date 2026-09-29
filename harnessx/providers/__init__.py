@@ -4,9 +4,11 @@ through a single interface."""
 from .registry import BUILTIN_PROVIDERS, register_provider, registered_providers, unregister_provider  # noqa: F401
 from .base import LLMProvider, ProviderResponse, make_provider
 from .anthropic import AnthropicProvider
+from .fallback import Fallback, FallbackProvider
 
 __all__ = [
-    "BUILTIN_PROVIDERS", "register_provider", "registered_providers", "unregister_provider", "LLMProvider", "ProviderResponse", "AnthropicProvider", "make_provider"]
+    "BUILTIN_PROVIDERS", "register_provider", "registered_providers", "unregister_provider", "LLMProvider", "ProviderResponse", "AnthropicProvider", "make_provider",
+    "Fallback", "FallbackProvider"]
 
 # OpenAIProvider is gated on the openai SDK being installed.
 try:

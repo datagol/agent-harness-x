@@ -30,7 +30,8 @@ class OpenAIProvider(LLMProvider):
     supports_prompt_cache_key = True
 
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
-        self.client = client or AsyncOpenAI()
+        # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
+        self.client = client or AsyncOpenAI(max_retries=0)
 
     def _apply_prompt_cache(self, kwargs: dict[str, Any], cache: PromptCacheHint | None) -> None:
         if cache is None or not cache.enabled or not self.supports_prompt_cache_key:

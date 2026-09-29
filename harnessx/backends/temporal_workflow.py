@@ -164,7 +164,7 @@ class AgentSessionWorkflow:
                                 retry_policy=RetryPolicy(
                                     maximum_attempts=1
                                     if entry["policy"] == "manual"
-                                    else 3
+                                    else int((entry.get("retry") or {}).get("attempts", 3))
                                 ),
                             )
                             self.activities.append(handle)

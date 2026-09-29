@@ -6,7 +6,7 @@ the LLM can understand, and dispatching LLM tool calls back to those functions.
 
 from __future__ import annotations
 
-from .errors import HarnessError
+from .errors import HarnessError, TransientToolError
 
 import asyncio
 import inspect
@@ -22,7 +22,8 @@ from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origi
 from jsonschema import Draft202012Validator, validate
 
 from .permissions import PermissionManager
-from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolCall, ToolDefinition, ToolPolicy, ToolResult
+from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolCall, ToolDefinition, ToolPolicy, ToolResult, ToolRetry
+from .providers.retry import is_transient, is_transient_text
 
 
 # Python type → JSON Schema type mapping
@@ -181,6 +182,7 @@ class ToolRegistry:
         default_timeout_seconds: float | None = None,
         dedupe_calls: bool | None = None,
         sandbox: Any | None = None,
+        retry: ToolRetry | None = None,
     ) -> None:
         self._tools: dict[str, ToolDefinition] = {}
         # Applied to any tool that does not set its own timeout_seconds. None
@@ -194,6 +196,11 @@ class ToolRegistry:
         # Tools registered without a timeout of their own; re-resolved when a
         # default arrives later through adopt_policy().
         self._inherited_timeouts: set[str] = set()
+        # Applied to any tool registered without a retry of its own. None means
+        # unset: an adopting Agent's ToolPolicy may fill it in, else the engine
+        # uses ToolRetry().
+        self._default_retry = retry
+        self._inherited_retries: set[str] = set()
         # Default execution engine for the bash built-in.
         self.sandbox = sandbox
 
@@ -205,12 +212,17 @@ class ToolRegistry:
             return self._default_timeout_seconds
         return DEFAULT_TIMEOUT_SECONDS
 
+    def _resolve_retry(self, retry: ToolRetry | None) -> ToolRetry | None:
+        """A tool's own retry, else the registry default, else None (the engine's default)."""
+        return retry if retry is not None else self._default_retry
+
     @property
     def policy(self) -> ToolPolicy:
         """Effective options, including anything adopted from an AgentConfig."""
         return ToolPolicy(
             default_timeout_seconds=self._default_timeout_seconds,
             dedupe_calls=bool(self._dedupe_calls),
+            retry=self._default_retry,
         )
 
     def adopt_policy(self, policy: ToolPolicy) -> None:
@@ -223,6 +235,10 @@ class ToolRegistry:
                 )
         if self._dedupe_calls is None and policy.dedupe_calls:
             self._dedupe_calls = True
+        if self._default_retry is None and policy.retry is not None:
+            self._default_retry = policy.retry
+            for name in self._inherited_retries & self._tools.keys():
+                self._tools[name] = replace_definition(self._tools[name], retry=policy.retry)
 
     def reset_call_cache(self) -> None:
         """Forget deduped results. Call between turns; results are per-turn."""
@@ -237,6 +253,7 @@ class ToolRegistry:
 
     def _store(
         self, definition: ToolDefinition, *, replace: bool = False, inherited_timeout: bool = False,
+        inherited_retry: bool = False,
     ) -> ToolDefinition:
         if definition.name in self._tools and not replace:
             raise ValueError(f"Tool {definition.name!r} is already registered; pass replace=True to replace it")
@@ -246,6 +263,9 @@ class ToolRegistry:
         self._inherited_timeouts.discard(owned.name)
         if inherited_timeout:
             self._inherited_timeouts.add(owned.name)
+        self._inherited_retries.discard(owned.name)
+        if inherited_retry:
+            self._inherited_retries.add(owned.name)
         return owned
 
     def register(
@@ -257,11 +277,15 @@ class ToolRegistry:
         concurrent: bool = True,
         replay_policy: ReplayPolicy | str = "manual",
         timeout_seconds: float | None = None,
+        retry: ToolRetry | None = None,
+        retry_if_result: Callable[[ToolResult], bool] | None = None,
         replace: bool = False,
     ) -> Callable:
         """Decorator to register a function as a tool.
 
-        Auto-generates JSON Schema from type hints and docstring.
+        Auto-generates JSON Schema from type hints and docstring. ``retry`` is
+        the tool's ToolRetry (default: the registry's, else the engine's) and
+        applies only when ``replay_policy`` is safe or idempotent.
         """
 
         try:
@@ -288,7 +312,9 @@ class ToolRegistry:
                 concurrent=concurrent,
                 replay_policy=replay_policy,
                 timeout_seconds=timeout_seconds,
-            ), replace=replace, inherited_timeout=inherited)
+                retry=self._resolve_retry(retry),
+                retry_if_result=retry_if_result,
+            ), replace=replace, inherited_timeout=inherited, inherited_retry=retry is None)
             return func
 
         return decorator
@@ -303,6 +329,8 @@ class ToolRegistry:
         concurrent: bool | None = None,
         replay_policy: ReplayPolicy | str | None = None,
         timeout_seconds: float | None = None,
+        retry: ToolRetry | None = None,
+        retry_if_result: Callable[[ToolResult], bool] | None = None,
         replace: bool = False,
     ) -> ToolDefinition:
         """Register a function or ToolDefinition directly (non-decorator style)."""
@@ -310,9 +338,13 @@ class ToolRegistry:
             overrides = {
                 "name": name, "description": description, "permission_level": permission,
                 "concurrent": concurrent, "replay_policy": replay_policy, "timeout_seconds": timeout_seconds,
+                "retry": retry, "retry_if_result": retry_if_result,
             }
             definition = replace_definition(tool, **{k: v for k, v in overrides.items() if v is not None})
-            return self._store(definition, replace=replace)
+            inherited = definition.retry is None
+            if inherited:
+                definition = replace_definition(definition, retry=self._default_retry)
+            return self._store(definition, replace=replace, inherited_retry=inherited)
 
         decorator = self.register(
             name=name,
@@ -321,6 +353,8 @@ class ToolRegistry:
             concurrent=True if concurrent is None else concurrent,
             replay_policy="manual" if replay_policy is None else replay_policy,
             timeout_seconds=timeout_seconds,
+            retry=retry,
+            retry_if_result=retry_if_result,
             replace=replace,
         )
         decorator(tool)
@@ -337,6 +371,8 @@ class ToolRegistry:
         concurrent: bool = True,
         replay_policy: ReplayPolicy | str = "manual",
         timeout_seconds: float | None = None,
+        retry: ToolRetry | None = None,
+        retry_if_result: Callable[[ToolResult], bool] | None = None,
         replace: bool = False,
     ) -> ToolDefinition:
         """Imperative registration with explicit schema."""
@@ -349,7 +385,9 @@ class ToolRegistry:
             concurrent=concurrent,
             replay_policy=replay_policy,
             timeout_seconds=self._resolve_timeout(timeout_seconds),
-        ), replace=replace, inherited_timeout=timeout_seconds is None)
+            retry=self._resolve_retry(retry),
+            retry_if_result=retry_if_result,
+        ), replace=replace, inherited_timeout=timeout_seconds is None, inherited_retry=retry is None)
 
     def load_builtin(
         self,
@@ -462,6 +500,8 @@ class ToolRegistry:
         explicit ASK still requires approval and DENY blocks execution.
         Agent runs handle approval/recovery in the engine before internal dispatch.
         A timeout stops waiting but cannot forcibly stop a synchronous worker thread.
+        A tool registered with its own ``retry`` (and a safe or idempotent replay
+        policy) is re-executed on transient failures the same way the engine does it.
         """
         call = deepcopy(tool_call)
         try:
@@ -471,17 +511,36 @@ class ToolRegistry:
             allowed = await policy.check_permission(call, definition)
             if not allowed:
                 return ToolResult(call.id, "Permission denied", True)
-            try:
-                async with asyncio.timeout(definition.timeout_seconds):
-                    return await self._dispatch(call, definition)
-            except TimeoutError:
-                # The model needs to know this tool is unavailable so it can
-                # move on; a turn that hangs on one slow tool helps nobody.
-                return ToolResult(
-                    call.id,
-                    f"TimeoutError: Tool '{call.name}' timed out after {definition.timeout_seconds}s.",
-                    True,
-                )
+            retry = definition.retry if definition.replay_policy != "manual" else None
+            attempts = retry.attempts if retry is not None else 1
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    try:
+                        async with asyncio.timeout(definition.timeout_seconds):
+                            result = await self._dispatch(call, definition)
+                    except TimeoutError:
+                        # The model needs to know this tool is unavailable so it can
+                        # move on; a turn that hangs on one slow tool helps nobody.
+                        raise TimeoutError(
+                            f"Tool '{call.name}' timed out after {definition.timeout_seconds}s."
+                        ) from None
+                    if retry is not None and attempt < attempts and retry_wanted(definition, retry, result):
+                        raise TransientToolError(str(result.content))
+                    return result
+                except Exception as exc:
+                    transient = isinstance(exc, TransientToolError) or is_transient(exc)
+                    if retry is None or attempt >= attempts or not transient:
+                        if isinstance(exc, TransientToolError):
+                            return ToolResult(call.id, f"Tool execution error: {exc}", True)
+                        raise
+                    logger.warning(
+                        "Tool %s failed (attempt %d/%d), retrying: %s", call.name, attempt, attempts, exc,
+                    )
+                    wait = retry.wait_for(attempt)
+                    if wait:
+                        await asyncio.sleep(wait)
         except Exception as exc:
             return ToolResult(call.id, f"{type(exc).__name__}: {exc}", True)
 
@@ -522,6 +581,8 @@ class ToolRegistry:
                 tool_call_id=tool_call.id,
                 content=json.dumps(result, ensure_ascii=False, allow_nan=False) if isinstance(result, (dict, list)) else str(result),
             )
+        except TransientToolError:
+            raise  # the handler asked for a retry; the caller's policy decides
         except Exception as exc:
             # The model gets one line it can act on; the traceback is for the operator.
             logger.warning("Tool %s failed: %s", tool_call.name, traceback.format_exc())
@@ -530,6 +591,22 @@ class ToolRegistry:
                 content=f"Tool execution error: {type(exc).__name__}: {exc}",
                 is_error=True,
             )
+
+
+def retry_wanted(definition: ToolDefinition, retry: ToolRetry, result: ToolResult) -> bool:
+    """Whether a result that came back should be treated as a transient failure.
+
+    The tool's ``retry_if_result`` decides first; with ``retry_error_results`` an
+    error result whose text reads as throttling or overload counts too.
+    """
+    check = getattr(definition, "retry_if_result", None)
+    if callable(check):
+        try:
+            if check(result):
+                return True
+        except Exception:
+            logger.warning("retry_if_result for %s raised: %s", definition.name, traceback.format_exc())
+    return bool(retry.retry_error_results and result.is_error and is_transient_text(str(result.content)))
 
 
 def normalize_tool_registry(

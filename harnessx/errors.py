@@ -39,6 +39,16 @@ class UnknownExecutionKey(HarnessError, KeyError):
         return f"No pending tool has execution key {self.execution_key!r}"
 
 
+class TransientToolError(HarnessError):
+    """Raised by a tool handler to say the call failed for a reason that may clear on its own
+    (throttling, a flaky upstream, a lost connection) and did not take effect.
+
+    The engine retries the call under the tool's ``ToolRetry`` policy when its replay
+    policy is ``safe`` or ``idempotent``; a ``manual`` tool, or one out of attempts,
+    hands the message to the model as an error result instead.
+    """
+
+
 class RunError(HarnessError):
     """A run did not complete. ``result`` is the RunResult that describes why."""
 

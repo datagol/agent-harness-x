@@ -112,7 +112,8 @@ class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
     def __init__(self, client: AsyncAnthropic | None = None) -> None:
-        self.client = client or AsyncAnthropic()
+        # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
+        self.client = client or AsyncAnthropic(max_retries=0)
 
     def default_max_tokens(self, model: str) -> int:
         """Claude 4 models get a budget large enough for a file-sized reply but under the

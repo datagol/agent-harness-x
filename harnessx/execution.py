@@ -12,7 +12,7 @@ import math
 import uuid
 
 from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed, RunTruncated
-from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult
+from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult, ToolRetry
 
 
 class RunStatus(str, Enum):
@@ -66,12 +66,15 @@ class PendingTool:
     policy: str = "manual"
     concurrent: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    retry: ToolRetry | None = None  # the tool's retry policy; None on entries persisted before 0.4.3
 
     def __post_init__(self) -> None:
         if self.status not in ("approval", "uncertain") or not isinstance(self.execution_key, str):
             raise ValueError("Invalid pending tool operation")
         if isinstance(self.call, dict):
             object.__setattr__(self, "call", ToolCall(**self.call))
+        if isinstance(self.retry, dict):
+            object.__setattr__(self, "retry", ToolRetry.from_dict(self.retry))
 
     def to_dict(self) -> dict[str, Any]:
         """The persisted shape; unchanged since 0.3 (``timeout``, not ``timeout_seconds``)."""
@@ -83,6 +86,7 @@ class PendingTool:
             "policy": self.policy,
             "concurrent": self.concurrent,
             "timeout": self.timeout_seconds,
+            **({"retry": self.retry.to_dict()} if self.retry is not None else {}),
         }
 
     @classmethod
@@ -97,6 +101,7 @@ class PendingTool:
             policy=str(data.get("policy", "manual")),
             concurrent=bool(data.get("concurrent", False)),
             timeout_seconds=float(data.get("timeout", data.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))),
+            retry=ToolRetry.from_dict(data["retry"]) if data.get("retry") else None,
         )
 
     def __getitem__(self, key: str) -> Any:

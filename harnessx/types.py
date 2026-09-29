@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 import math
 import warnings
@@ -49,6 +49,12 @@ class ToolDefinition:
     concurrent: bool = True
     replay_policy: ReplayPolicy | str = "manual"
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    # Automatic re-execution after a transient failure; None means the registry
+    # default, else ToolRetry(). Applies only to safe and idempotent tools.
+    retry: ToolRetry | None = None
+    # Application check on a successful result: True asks for a retry (the call
+    # failed inside a 200). Never persisted; lives on the definition only.
+    retry_if_result: Callable[[ToolResult], bool] | None = None
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not self.name or any(c.isspace() for c in self.name):
@@ -67,6 +73,12 @@ class ToolDefinition:
             raise ConfigurationError("Invalid tool replay policy") from None
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ConfigurationError("Tool timeout must be finite and positive")
+        if isinstance(self.retry, dict):
+            self.retry = ToolRetry.from_dict(self.retry)
+        if self.retry is not None and not isinstance(self.retry, ToolRetry):
+            raise TypeError("Tool retry must be a ToolRetry")
+        if self.retry_if_result is not None and not callable(self.retry_if_result):
+            raise TypeError("Tool retry_if_result must be callable")
 
 
 @dataclass
@@ -305,6 +317,8 @@ class RetryPolicy:
     # Wall clock around one attempt. None derives it from the reply budget, so a
     # long reply is not cut off by a timeout sized for short ones.
     call_timeout_seconds: float | None = None
+    # Cap on one wait, whether from backoff or the server's Retry-After.
+    max_backoff_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or self.attempts < 1:
@@ -312,12 +326,70 @@ class RetryPolicy:
         _nonnegative_or_none(self.backoff_seconds, "backoff_seconds")
         if self.call_timeout_seconds is not None:
             _positive(self.call_timeout_seconds, "call_timeout_seconds")
+        _positive(self.max_backoff_seconds, "max_backoff_seconds")
 
     def effective_call_timeout(self, max_tokens: int | None) -> float:
         """The timeout for one model call: the explicit value, or one sized for ``max_tokens``."""
         if self.call_timeout_seconds is not None:
             return float(self.call_timeout_seconds)
         return call_timeout_for(max_tokens)
+
+    def wait_for(self, attempt: int, retry_after: float | None = None) -> float:
+        """Seconds to wait after ``attempt`` (1-based) failed.
+
+        Exponential backoff from ``backoff_seconds``, raised to the server's
+        ``retry_after`` when it sent one, capped at ``max_backoff_seconds``.
+        """
+        return _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
+
+
+def _backoff(base: float | None, cap: float, attempt: int, retry_after: float | None = None) -> float:
+    wait = float(base or 0.0) * (2 ** max(0, attempt - 1))
+    if retry_after is not None:
+        wait = max(wait, float(retry_after))
+    return min(wait, cap)
+
+
+@dataclass(frozen=True)
+class ToolRetry:
+    """Automatic re-execution of one tool call after a transient failure.
+
+    ``attempts`` is the total number of tries, so ``1`` disables retry; the
+    default matches what the engine always did for a failed safe tool. Retry
+    applies only to tools whose replay policy is ``safe`` or ``idempotent``: a
+    ``manual`` tool stops for recovery on an unknown outcome instead. A handler
+    asks for a retry by raising ``TransientToolError``; with
+    ``retry_error_results`` an error result whose text reads as throttling or
+    overload is retried too.
+    """
+
+    attempts: int = 3
+    backoff_seconds: float = 0.5  # base delay, doubled per attempt
+    max_backoff_seconds: float = 30.0
+    retry_error_results: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.attempts) is not int or self.attempts < 1:
+            raise ConfigurationError("attempts must be a positive integer (1 disables retry)")
+        _nonnegative_or_none(self.backoff_seconds, "backoff_seconds")
+        _positive(self.max_backoff_seconds, "max_backoff_seconds")
+        if type(self.retry_error_results) is not bool:
+            raise TypeError("retry_error_results must be a bool")
+
+    def wait_for(self, attempt: int) -> float:
+        """Seconds to wait after ``attempt`` (1-based) failed."""
+        return _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> ToolRetry:
+        """Rebuild from a run-state entry; a missing or empty mapping is the default policy."""
+        if not data:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 def call_timeout_for(max_tokens: int | None) -> float:
@@ -334,12 +406,17 @@ class ToolPolicy:
 
     default_timeout_seconds: float | None = None  # None: the registry's own default, else DEFAULT_TIMEOUT_SECONDS
     dedupe_calls: bool = False  # identical repeated calls within one run return the first result
+    retry: ToolRetry | None = None  # default for tools registered without a retry of their own
 
     def __post_init__(self) -> None:
         if self.default_timeout_seconds is not None:
             _positive(self.default_timeout_seconds, "default_timeout_seconds")
         if type(self.dedupe_calls) is not bool:
             raise TypeError("dedupe_calls must be a bool")
+        if isinstance(self.retry, dict):  # restored from a snapshot
+            object.__setattr__(self, "retry", ToolRetry.from_dict(self.retry))
+        if self.retry is not None and not isinstance(self.retry, ToolRetry):
+            raise TypeError("retry must be a ToolRetry")
 
 
 _LEGACY_FIELDS: dict[str, tuple[str, str]] = {

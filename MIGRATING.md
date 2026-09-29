@@ -265,3 +265,53 @@ over `Agent.run_stream()` since 0.3. `RunEvent(data=...)` is required (the
 `RunCancelled`, `ToolApprovalRequired`, `ToolExecutionContext`, `Registration`,
 `register_provider`, `evaluate_agent_async`, and `harnessx.durable`, a module
 that groups the runtime, backends, recorder, and their errors under one import.
+
+---
+
+## 0.4.3
+
+Retry seams. Nothing here is required: an agent that configures none of it
+behaves as it did in 0.4.1.
+
+**Vendor SDK retries are off on clients the harness builds.** `AnthropicProvider()`,
+`OpenAIProvider()`, `AzureOpenAIProvider(...)`, and `OpenRouterProvider(...)`
+now pass `max_retries=0` to the SDK. Retries used to be doubled: the SDK's two
+on top of `RetryPolicy.attempts`, invisible to the journal and to tracing. A
+persistent 503 cost up to six requests and reported two. If you relied on the
+SDK's own retries, raise `RetryPolicy.attempts` instead, or inject a client you
+configured yourself, which is left untouched.
+
+**Tool attempts follow a policy.** A failed `safe` or `idempotent` tool was
+retried up to three times with a fixed ramp. The bound is now `ToolRetry`,
+whose default matches the old behavior, and the wait is capped exponential
+backoff. The policy travels on the run state, so Temporal activities use the
+same bound; run states written before 0.4.3 fall back to the default.
+
+**A tool can ask to be retried.** Raise `TransientToolError` from a handler for
+a failure that may clear and did not take effect. Every other exception still
+becomes a one-line error result, unchanged. `manual` tools are never retried
+automatically, so a declared transient failure there goes to the model rather
+than repeating a possible side effect.
+
+**Retries are observable.** The new `RETRY` hook reports `kind`, `name`,
+`attempt`, `next_attempt`, `wait_seconds`, `error`, and `provider`, and the
+`LLM_RESPONSE` payload gained `provider`, naming the provider that served the
+call.
+
+**Internal helpers removed.** `providers.retry.call_with_retry` and
+`stream_with_retry` are gone; nothing in the SDK called them, and the engine's
+loop is the retry path. `providers.retry.is_transient` stays, and is what
+`LLMProvider.is_transient` returns by default.
+
+### New in 0.4.3
+
+| Name | Purpose |
+|---|---|
+| `ToolRetry` | Per-tool retry policy; also `ToolPolicy(retry=...)` for a registry default |
+| `TransientToolError` | A handler asking for a retry |
+| `ToolDefinition.retry_if_result` | Treat a successful result as a transient failure |
+| `RetryPolicy.max_backoff_seconds` | Cap on one wait, including a server's `Retry-After` |
+| `LLMProvider.is_transient`, `.retry_after` | Per-provider classification and `Retry-After` |
+| `FallbackProvider`, `Fallback` | An ordered chain of providers that looks like one |
+| `HookEvent.RETRY`, `RetryData` | Every retry, model or tool |
+| `MCPServerConfig.replay_policy`, `.retry` | Retry for bridged MCP tools |

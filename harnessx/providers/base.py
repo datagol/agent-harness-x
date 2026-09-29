@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
 from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
+from .retry import is_transient, retry_after_seconds
 
 
 DEFAULT_MAX_TOKENS = 8192  # conservative: accepted by every model the built-in providers know
@@ -26,6 +27,23 @@ class LLMProvider(ABC):
     def default_max_tokens(self, model: str) -> int:
         """The reply budget used when AgentConfig.max_tokens is None. Override per vendor."""
         return DEFAULT_MAX_TOKENS
+
+    def is_transient(self, exc: BaseException) -> bool:
+        """Whether one more attempt at the same request could succeed.
+
+        The engine's retry loop asks the provider that raised. The default
+        treats 429, 5xx, timeouts, and connection loss as transient and every
+        other 4xx as final; override to classify vendor-specific errors.
+        """
+        return is_transient(exc)
+
+    def retry_after(self, exc: BaseException) -> float | None:
+        """Seconds the server asked us to wait before retrying, when it said.
+
+        Read from ``Retry-After`` on the failure. The engine waits at least this
+        long, capped by ``RetryPolicy.max_backoff_seconds``.
+        """
+        return retry_after_seconds(exc)
 
     @abstractmethod
     async def create(

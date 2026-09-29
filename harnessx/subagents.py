@@ -62,6 +62,7 @@ def _copy_tools(registry: ToolRegistry) -> ToolRegistry:
     # Copy schemas and metadata, never deepcopy application-owned handlers.
     copied = normalize_tool_registry(registry.get_tools())
     copied._inherited_timeouts = registry._inherited_timeouts & set(copied.list_tools())
+    copied._inherited_retries = registry._inherited_retries & set(copied.list_tools())
     return copied
 
 

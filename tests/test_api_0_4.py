@@ -225,8 +225,10 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     )
     shape = asdict(config)
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
-    assert shape["retry"] == {"attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None}
-    assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True}
+    assert shape["retry"] == {
+        "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 30.0,
+    }
+    assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}
     assert not any(name in shape for name in ("max_iterations", "llm_max_attempts", "model_timeout_seconds"))
     with pytest.raises(FrozenInstanceError):
@@ -493,7 +495,8 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
         assert (await runtime.run("go")).ok
         assert (await runtime.run("fail")).failed
 
-    missing = set(HOOK_PAYLOADS) - set(observed) - {HookEvent.SKILL_INVOKED}
+    # SKILL_INVOKED needs a skill, RETRY a transient failure; both have their own tests.
+    missing = set(HOOK_PAYLOADS) - set(observed) - {HookEvent.SKILL_INVOKED, HookEvent.RETRY}
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():
         allowed = set(HOOK_PAYLOADS[event].__annotations__)  # forward refs stay strings
