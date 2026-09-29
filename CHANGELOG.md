@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Gemini tool schemas no longer carry JSON Schema keywords Gemini does not
+  define (`additionalProperties`, `$schema`), at any depth. `generateContent`
+  tolerates them; `cachedContents` rejects the request outright, so a single
+  such tool costs the caller explicit prompt caching with nothing but a
+  warning line to show for it. The tool in question is this package's own
+  `read_tool_result`, whose schema is generated from its signature and which
+  0.4.1 registers on **every** agent — so every Gemini agent on 0.4.1 lost
+  explicit caching. Found downstream on a workload where 99.96% of the prompt
+  prefix had been cached, the moment it upgraded.
+
 ## [0.4.1] - 2026-09-28
 
 Long replies. An agent that writes whole files hits the reply token budget,

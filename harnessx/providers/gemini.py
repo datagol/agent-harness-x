@@ -342,13 +342,39 @@ class GeminiProvider(LLMProvider):
 # ── Translation helpers ─────────────────────────────────────────────────────
 
 
+# JSON Schema keywords Gemini's Schema type does not define. Passing one
+# through is tolerated by generateContent and rejected outright by
+# cachedContents, so a tool carrying it silently costs the caller prompt
+# caching: "Unknown name \"additional_properties\" at
+# cached_content.tools[0].function_declarations[8].parameters".
+#
+# Declaration 8 there is this package's own read_tool_result, whose schema is
+# generated from its signature and includes additionalProperties, so every
+# Gemini agent built on 0.4 lost explicit caching without any sign of it
+# beyond one warning line.
+_UNSUPPORTED_SCHEMA_KEYS = ("additionalProperties", "$schema", "additional_properties")
+
+
+def _strip_unsupported(schema: Any) -> Any:
+    """A schema Gemini accepts, with unknown keywords removed at every depth."""
+    if isinstance(schema, dict):
+        return {
+            key: _strip_unsupported(value)
+            for key, value in schema.items()
+            if key not in _UNSUPPORTED_SCHEMA_KEYS
+        }
+    if isinstance(schema, list):
+        return [_strip_unsupported(item) for item in schema]
+    return schema
+
+
 def _to_gemini_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Anthropic tool params -> Gemini functionDeclarations."""
     return [
         {
             "name": t["name"],
             "description": t.get("description", ""),
-            "parameters": t.get("input_schema", {"type": "object"}),
+            "parameters": _strip_unsupported(t.get("input_schema", {"type": "object"})),
         }
         for t in tools or []
     ]

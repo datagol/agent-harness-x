@@ -578,3 +578,59 @@ class TestGeminiPromptCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_tool_schemas_drop_keywords_gemini_does_not_define():
+    """A tool carrying `additionalProperties` costs the caller prompt caching.
+
+    generateContent tolerates the unknown keyword; cachedContents rejects the
+    whole request with "Unknown name \"additional_properties\"". The tool that
+    triggered it in practice is this package's own `read_tool_result`, whose
+    schema is generated from its signature and registered on every agent — so
+    on 0.4 every Gemini agent lost explicit caching, with one warning line to
+    show for it.
+    """
+    from harnessx.providers.gemini import _to_gemini_tools
+
+    declarations = _to_gemini_tools([
+        {
+            "name": "read_tool_result",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "tool_use_id": {"type": "string"},
+                    "nested": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                },
+                "additionalProperties": False,
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+            },
+        }
+    ])
+    parameters = declarations[0]["parameters"]
+    assert "additionalProperties" not in parameters
+    assert "$schema" not in parameters
+    # Removed at every depth, not just the top level.
+    assert "additionalProperties" not in parameters["properties"]["nested"]
+    # Everything Gemini does define survives untouched.
+    assert parameters["type"] == "object"
+    assert parameters["properties"]["tool_use_id"] == {"type": "string"}
+    assert parameters["properties"]["nested"]["properties"] == {"x": {"type": "string"}}
+
+
+def test_the_built_in_read_tool_result_schema_is_gemini_safe():
+    """The regression this fixes, caught at the source rather than in a mock."""
+    from harnessx import Agent, AgentConfig
+
+    agent = Agent(
+        config=AgentConfig(model="gemini-3.6-flash", provider="gemini", system_prompt="x"),
+        provider=GeminiProvider(client=SimpleNamespace()),
+    )
+    declarations = _to_gemini_tools(agent.tools.get_tool_params())
+    assert declarations, "the built-in tool should be registered"
+    for declaration in declarations:
+        assert "additionalProperties" not in declaration["parameters"]
