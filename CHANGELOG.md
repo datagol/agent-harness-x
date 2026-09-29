@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.2] - 2026-09-29
+
+A patch release for one silent regression in 0.4.1.
 
 ### Fixed
 
@@ -214,6 +216,7 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
+[0.4.2]: https://github.com/datagol/agent-harness-x/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/datagol/agent-harness-x/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/datagol/agent-harness-x/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/datagol/agent-harness-x/compare/c382675...v0.3.0
