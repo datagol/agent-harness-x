@@ -124,13 +124,26 @@ async def use_retry_seams(agent: Agent) -> None:
 
     assert_type(agent.tools.get_tool("flaky").retry, ToolRetry | None)
 
+    # The usual way in: names in config, and the Agent builds and owns the chain.
+    config = AgentConfig(
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        fallbacks=[Fallback("openrouter", model="anthropic/claude-sonnet-4.6")],
+        retry=RetryPolicy(attempts=3, switch_after=2, cooldown_seconds=30),
+    )
+    assert_type(config.fallbacks, tuple[Fallback, ...])
+    assert_type(config.retry.switch_after, int)
+    assert_type(config.retry.cooldown_seconds, float)
+    Agent(config=config)
+
+    # The object API, for a member that has to be a live provider.
     chain = FallbackProvider(
         "anthropic",
-        Fallback("openrouter", model="anthropic/claude-sonnet-4.6"),
+        fallbacks=[Fallback("openrouter", model="anthropic/claude-sonnet-4.6")],
         switch_after=2,
         cooldown_seconds=30,
     )
-    assert_type(chain.members, tuple[Fallback, ...])
+    assert_type(chain.labels, tuple[str, ...])
     assert_type(chain.last_served, str | None)
     assert_type(chain.is_transient(RuntimeError("x")), bool)
     assert_type(chain.retry_after(RuntimeError("x")), float | None)

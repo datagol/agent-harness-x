@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
 from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
-from .retry import is_transient, retry_after_seconds
+from .retry import is_transient, retry_after_seconds, sdk_connection_failure
 
 
 DEFAULT_MAX_TOKENS = 8192  # conservative: accepted by every model the built-in providers know
@@ -35,7 +35,7 @@ class LLMProvider(ABC):
         treats 429, 5xx, timeouts, and connection loss as transient and every
         other 4xx as final; override to classify vendor-specific errors.
         """
-        return is_transient(exc)
+        return is_transient(exc) or sdk_connection_failure(exc)
 
     def retry_after(self, exc: BaseException) -> float | None:
         """Seconds the server asked us to wait before retrying, when it said.

@@ -75,6 +75,40 @@ def is_transient_text(text: str) -> bool:
     return any(marker in lowered for marker in _TRANSIENT_MARKERS)
 
 
+def sdk_connection_failure(exc: BaseException) -> bool:
+    """True when an SDK wrapped a transport failure that is worth another attempt.
+
+    The OpenAI and Anthropic SDKs raise ``APIConnectionError`` for a dropped
+    connection, a DNS failure or a refused socket. It carries no status, is not
+    an ``OSError``, and stringifies to "Connection error.", so nothing else here
+    recognizes it. Their own retry logic does, which is why the engine must:
+    harnessx builds those clients with ``max_retries=0`` and owns the count.
+
+    The exception is a proxy rejecting the tunnel with a 4xx. An egress proxy
+    that refuses a destination on policy grounds (NVIDIA OpenShell does this,
+    answering 403 to the CONNECT) fails the same way a flaky network does, and
+    retrying it only spends the budget to be refused again.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    connection_failure = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in ("APIConnectionError", "APITimeoutError"):
+            connection_failure = True
+        if _is_proxy_rejection(current):
+            return False
+        current = current.__cause__ or current.__context__
+    return connection_failure
+
+
+def _is_proxy_rejection(exc: BaseException) -> bool:
+    """A forward proxy refusing the tunnel with a 4xx, rather than a transport failure."""
+    if "proxy" not in type(exc).__name__.lower():
+        return False
+    return any(str(code) in str(exc) for code in range(400, 452))
+
+
 def retry_after_seconds(exc: BaseException) -> float | None:
     """The server's Retry-After for this failure in seconds, or None when it sent none.
 

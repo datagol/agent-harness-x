@@ -144,7 +144,8 @@ asyncio.run(main())
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=150_000`, `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None` |
-| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=30.0` caps one wait, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget |
+| `fallbacks` | `()` | Providers to try, in order, when the primary fails transiently: `Fallback(provider, model=None, max_tokens=None)` |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts, connection loss): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=30.0` caps one wait, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget, `switch_after=1` and `cooldown_seconds=0.0` govern failover |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
 | `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False`, `retry=None` (a `ToolRetry` applied to tools registered without one) |
 
@@ -1034,45 +1035,75 @@ configure are the seams it consults.
 | How many attempts, how long to wait | `AgentConfig.retry` for the model, `ToolRetry` per tool |
 | Which failures are worth retrying | `LLMProvider.is_transient(exc)`, overridable per provider |
 | How long the server asked us to wait | `LLMProvider.retry_after(exc)`, reading `Retry-After` |
-| What to call when one vendor is down | `FallbackProvider` |
+| What to call when one vendor is down | `AgentConfig.fallbacks` |
 | What happened | the `RETRY` hook, and the journal |
 
 Clients the harness builds itself pass `max_retries=0` to the vendor SDK, so a
 503 costs the attempts you configured and no more. An SDK client you construct
-and inject keeps whatever you set on it.
+and inject keeps whatever you set on it. Because the engine owns the count, it
+also recognizes the SDK's own connection errors, including the case where an
+egress proxy refuses a destination on policy grounds, which is a decision rather
+than a blip and is never retried.
 
 Middleware cannot retry: it transforms a request or a result and never re-issues
 a call. Put normalization there, and retry policy here.
 
 #### Failing over to another provider
 
-`FallbackProvider` is an ordered chain that looks like one provider:
+Name the primary in `provider`, and the providers to try after it in
+`fallbacks`:
 
 ```python
-from harnessx import Agent, AgentConfig, Fallback, FallbackProvider
+from harnessx import Agent, AgentConfig, Fallback, RetryPolicy
 
-provider = FallbackProvider(
-    "anthropic",                                                # primary, uses AgentConfig.model
-    Fallback("openrouter", model="anthropic/claude-sonnet-4.6"),  # same model, other vendor
-    Fallback("openai", model="gpt-5", max_tokens=16_000),         # last resort
-    switch_after=2,        # transient failures a member takes before the chain moves on
-    cooldown_seconds=60,   # and how long it then stays out of rotation
-)
-agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"), provider=provider)
+agent = Agent(config=AgentConfig(
+    model="claude-sonnet-4-6",
+    provider="anthropic",
+    fallbacks=[
+        Fallback("openrouter", model="anthropic/claude-sonnet-4.6"),  # same model, other vendor
+        Fallback("openai", model="gpt-5", max_tokens=16_000),         # last resort
+    ],
+    retry=RetryPolicy(switch_after=2, cooldown_seconds=60),
+))
+
+async with agent:          # the agent built the chain, so the agent closes it
+    ...
 ```
 
-Each member can carry its own model id and reply budget, because the same model
-is named differently on different vendors. A transient failure adds a strike to
-the current member; at `switch_after` the next one is tried inside the same
-call. A deterministic error (a bad request) raises at once, and a stream fails
-over only before its first chunk. When every member fails, `AgentConfig.retry`
-decides whether to walk the chain again. `LLM_RESPONSE` and `RETRY` hooks report
-which member served the call.
+Each fallback names its own model id, because the same model is spelled
+differently on different vendors; leave `model` unset to reuse
+`AgentConfig.model`. A transient failure adds a strike to the provider in use,
+and at `switch_after` the next one is tried inside the same call. A
+deterministic error such as a bad request raises at once, and a stream fails
+over only before its first chunk. When every provider fails, `attempts` decides
+whether to walk the chain again. The `LLM_RESPONSE` and `RETRY` hooks report
+which provider actually served the call, and so does LangSmith.
 
-Members given as names are built and closed by the chain; instances you pass in
-stay yours. To reach a chain from configuration alone, register it:
-`register_provider("resilient", lambda: FallbackProvider(...))`, then
-`AgentConfig(provider="resilient")`.
+Because the chain is configuration, it is serializable: durable runs and
+Temporal workers carry it like any other config, and there is nothing extra for
+you to close.
+
+#### When a provider has to be a live object
+
+A pre-configured SDK client cannot be named in config. Build the chain yourself
+and inject it, which also makes it yours to close:
+
+```python
+from harnessx import Agent, AgentConfig, Fallback, FallbackProvider, OpenAIProvider
+
+chain = FallbackProvider(
+    OpenAIProvider(client=my_client),
+    fallbacks=[Fallback("anthropic")],
+    switch_after=2,
+)
+async with Agent(config=AgentConfig(model="gpt-5", provider="openai"), provider=chain) as agent:
+    ...
+await chain.aclose()
+```
+
+Providers given as names are built and closed by the chain; instances you pass
+in stay yours. Setting both `fallbacks` in config and `provider=` is a
+`ConfigurationError`, since they would describe the same thing twice.
 
 ---
 

@@ -227,6 +227,7 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
     assert shape["retry"] == {
         "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 30.0,
+        "switch_after": 1, "cooldown_seconds": 0.0,
     }
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}

@@ -7,9 +7,12 @@ from enum import Enum
 import math
 import warnings
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, TypeVar
 
 from .errors import ConfigurationError
+
+if TYPE_CHECKING:  # type-only: providers import this module at runtime
+    from .providers.base import LLMProvider
 
 DEFAULT_TIMEOUT_SECONDS = 300.0  # model calls, tool calls, and sub-agent delegation
 
@@ -319,6 +322,11 @@ class RetryPolicy:
     call_timeout_seconds: float | None = None
     # Cap on one wait, whether from backoff or the server's Retry-After.
     max_backoff_seconds: float = 30.0
+    # Failover, when AgentConfig.fallbacks names other providers. Transient
+    # failures one provider may collect before the chain moves to the next, and
+    # how long a provider stays out of rotation after being passed over.
+    switch_after: int = 1
+    cooldown_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or self.attempts < 1:
@@ -327,6 +335,9 @@ class RetryPolicy:
         if self.call_timeout_seconds is not None:
             _positive(self.call_timeout_seconds, "call_timeout_seconds")
         _positive(self.max_backoff_seconds, "max_backoff_seconds")
+        if type(self.switch_after) is not int or self.switch_after < 1:
+            raise ConfigurationError("switch_after must be a positive integer")
+        _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
 
     def effective_call_timeout(self, max_tokens: int | None) -> float:
         """The timeout for one model call: the explicit value, or one sized for ``max_tokens``."""
@@ -401,6 +412,43 @@ def call_timeout_for(max_tokens: int | None) -> float:
 
 
 @dataclass(frozen=True)
+class Fallback:
+    """One provider to try when the ones before it fail, named in ``AgentConfig.fallbacks``.
+
+    ``provider`` is a built-in name or one passed to ``register_provider()``.
+    ``AgentConfig.fallbacks`` accepts names only, because the config is persisted
+    and compared; a live provider is allowed here for the object API, where you
+    pass the chain to ``FallbackProvider`` yourself.
+
+    ``model`` is this vendor's id for the model, since the same model is spelled
+    differently on different vendors; ``None`` reuses ``AgentConfig.model``.
+    ``max_tokens`` likewise overrides the reply budget for this provider only.
+    """
+
+    provider: str | LLMProvider
+    model: str | None = None
+    max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        from .providers.registry import is_known_provider
+
+        if isinstance(self.provider, str):
+            if not is_known_provider(self.provider):
+                raise ConfigurationError(
+                    f"Unknown fallback provider: {self.provider!r}; expected a built-in name "
+                    "or one passed to register_provider()"
+                )
+        elif not hasattr(self.provider, "create"):
+            raise ConfigurationError(
+                "Fallback provider must be a provider name or an LLMProvider"
+            )
+        if self.model is not None and (not isinstance(self.model, str) or not self.model):
+            raise ConfigurationError("Fallback model must be a nonempty string")
+        if self.max_tokens is not None:
+            _positive(self.max_tokens, "max_tokens", integer=True)
+
+
+@dataclass(frozen=True)
 class ToolPolicy:
     """Registry-wide tool options that an Agent applies to the registry it adopts."""
 
@@ -468,6 +516,9 @@ class AgentConfig:
 
     model: str = "claude-sonnet-4-6"
     provider: str = "anthropic"  # a built-in name or one passed to register_provider()
+    # Providers to try, in order, when the primary fails transiently. Empty means
+    # no failover. RetryPolicy.switch_after and .cooldown_seconds govern the chain.
+    fallbacks: tuple[Fallback, ...] = ()
     max_tokens: int | None = None  # reply token budget; None lets the provider choose for the model
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
@@ -482,6 +533,7 @@ class AgentConfig:
         provider: str = "anthropic",
         max_tokens: int | None = None,
         *,
+        fallbacks: Sequence[Fallback | Mapping[str, Any]] = (),
         system_prompt: str = "You are a helpful assistant.",
         temperature: float | None = None,
         limits: Limits | dict[str, Any] | None = None,
@@ -500,6 +552,9 @@ class AgentConfig:
         model_timeout_seconds: float | None = None,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.fallbacks = tuple(
+            item if isinstance(item, Fallback) else Fallback(**dict(item)) for item in fallbacks
+        )
         self.system_prompt, self.temperature = system_prompt, temperature
         self.limits = _coerce(Limits, limits, "limits")
         self.retry = _coerce(RetryPolicy, retry, "retry")
@@ -540,6 +595,15 @@ class AgentConfig:
     def __post_init__(self) -> None:
         from .providers.registry import is_known_provider
 
+        for item in self.fallbacks:
+            if not isinstance(item, Fallback):
+                raise ConfigurationError("AgentConfig.fallbacks must contain Fallback entries")
+            if not isinstance(item.provider, str):
+                raise ConfigurationError(
+                    "AgentConfig.fallbacks entries must name a provider: the config is "
+                    "persisted and compared, and a live provider cannot be. Build the chain "
+                    "with FallbackProvider and pass it as Agent(provider=...) instead"
+                )
         if not isinstance(self.provider, str) or not is_known_provider(self.provider):
             raise ConfigurationError(
                 f"Unknown provider: {self.provider!r}; expected a built-in name or one passed to register_provider()"

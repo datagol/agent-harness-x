@@ -72,6 +72,22 @@ _active_llm_run: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
 )
 
 
+def _serving_provider(agent: Any) -> str:
+    """The provider that served, or would serve, this call.
+
+    A FallbackProvider reports the member it last used, so a failed-over call is
+    labelled with the vendor that answered rather than the configured primary.
+    """
+    provider = getattr(agent, "provider", None)
+    served = getattr(provider, "last_served", None)
+    if served:
+        return str(served)
+    name = getattr(provider, "name", "") or ""
+    if name and name != "fallback":
+        return str(name)
+    return str(getattr(getattr(agent, "config", None), "provider", "") or "")
+
+
 def _usage_metadata(usage: Any) -> dict[str, Any] | None:
     """LangSmith's usage shape: totals plus cache and reasoning sub-counts.
 
@@ -382,7 +398,7 @@ class _LangSmithMiddleware(Middleware):
         parent = self._get_parent()
         if parent is not None:
             model_name = getattr(self._agent.config, "model", "llm")
-            provider_name = getattr(self._agent.config, "provider", "")
+            provider_name = _serving_provider(self._agent)
             llm_name = f"{provider_name}:{model_name}" if provider_name else model_name
 
             config = self._agent.config
@@ -431,9 +447,20 @@ class _LangSmithMiddleware(Middleware):
                 "stop_reason": getattr(response, "stop_reason", None),
             }
 
+            # Which provider actually answered is only known now: a failover
+            # chain picks a member per call, and the request-time guess was the
+            # primary. Correct it so a failed-over run is not priced or filtered
+            # as though the primary served it.
+            metadata: dict[str, Any] = {}
+            if usage_dict:
+                metadata["usage_metadata"] = usage_dict
+            served = _serving_provider(self._agent)
+            if served:
+                metadata["provider"] = metadata["ls_provider"] = served
+
             llm_run.end(
                 outputs=outputs,
-                metadata={"usage_metadata": usage_dict} if usage_dict else None,
+                metadata=metadata or None,
             )
             _safe_patch(llm_run)
 
