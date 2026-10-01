@@ -28,18 +28,35 @@ Everything here is optional: unconfigured agents behave as they did.
   it to wait. `Retry-After` (seconds or HTTP-date) is honored.
 - `RetryPolicy.max_backoff_seconds` (default 30) caps one wait, including one
   the server asked for, and `RetryPolicy.wait_for()` exposes the calculation.
-- `FallbackProvider(primary, *fallbacks, switch_after=1, cooldown_seconds=0)`
-  with `Fallback(provider, model=None, max_tokens=None)`: an ordered chain of
-  providers that looks like one provider. A transient failure strikes the
-  current member; at `switch_after` the next one is tried inside the same call,
-  with its own model id and reply budget. Deterministic errors never fail over,
-  and a stream fails over only before its first chunk.
+- `AgentConfig.fallbacks`, a tuple of `Fallback(provider, model=None,
+  max_tokens=None)`: providers to try, in order, when the primary fails
+  transiently. Each names its own model id, since the same model is spelled
+  differently on different vendors. The Agent builds the chain and owns it, so
+  there is nothing extra to close, and because it is configuration it is
+  serializable: durable runs and Temporal workers carry it like any other
+  config. `RetryPolicy.switch_after` and `.cooldown_seconds` govern how long a
+  provider is given before the chain moves on and how long it then sits out.
+  Deterministic errors never fail over, and a stream fails over only before its
+  first chunk. `FallbackProvider` remains for the case where a member has to be
+  a live object, such as a provider holding a pre-configured SDK client.
 - `HookEvent.RETRY` with a `RetryData` payload (`kind`, `name`, `attempt`,
   `next_attempt`, `wait_seconds`, `error`, `provider`), and `provider` on the
   `LLM_RESPONSE` payload.
 - `MCPServerConfig.replay_policy` and `.retry`. Bridged tools on a `safe` or
   `idempotent` server retry a throttled call three times by default, including
   when the server reports a 429 or 5xx inside a successful result.
+
+### Fixed
+
+- Connection loss is retried again. The SDKs raise `APIConnectionError` for a
+  dropped connection, which they retry themselves and which the engine's
+  classifier did not recognize, so turning the SDK's retries off left it with no
+  retry at all. A proxy refusing the tunnel with a 4xx stays final: that is a
+  policy decision, not a blip, and retrying it only spends the budget to be
+  refused again.
+- LangSmith labels a run with the provider that actually served it. After a
+  failover it reported the configured primary, misattributing exactly the runs
+  an operator is most likely to be looking at.
 
 ### Changed
 

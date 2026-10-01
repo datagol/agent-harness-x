@@ -372,3 +372,37 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProviderLabel(unittest.IsolatedAsyncioTestCase):
+    """A failed-over call must be labelled with the vendor that answered.
+
+    LangSmith prices and filters runs by ls_provider, so reporting the
+    configured primary after a failover misattributes exactly the runs an
+    operator is most likely to be looking at.
+    """
+
+    async def test_failover_is_labelled_with_the_member_that_served(self):
+        from harnessx.extensions.langsmith import _serving_provider
+
+        agent = Agent(
+            config=AgentConfig(model="m", provider="anthropic"),
+            provider=MockProvider([MockResponse(content=[MockTextBlock(text="hi")])]),
+        )
+        chain = agent.provider
+        chain.name = "fallback"          # it is a chain, not a vendor
+        chain.last_served = None
+        self.assertEqual(_serving_provider(agent), "anthropic", "falls back to the config")
+
+        chain.last_served = "openai"     # a call was served by the fallback member
+        self.assertEqual(_serving_provider(agent), "openai")
+        await agent.aclose()
+
+    async def test_a_plain_provider_reports_its_own_name(self):
+        from harnessx.extensions.langsmith import _serving_provider
+
+        provider = MockProvider([MockResponse(content=[MockTextBlock(text="hi")])])
+        provider.name = "openrouter"
+        agent = Agent(config=AgentConfig(model="m", provider="openrouter"), provider=provider)
+        self.assertEqual(_serving_provider(agent), "openrouter")
+        await agent.aclose()

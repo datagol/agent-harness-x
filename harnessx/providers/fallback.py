@@ -1,5 +1,10 @@
 """Failover across providers, packaged as one provider.
 
+Most callers never name this class. ``AgentConfig(fallbacks=[Fallback(...)])``
+is the usual way in, and the Agent builds and owns the chain. Construct one
+directly only when a member has to be a live object, such as a provider holding
+a pre-configured SDK client, which a config value cannot name.
+
 ``FallbackProvider`` walks an ordered chain of members. A member that fails
 transiently collects a strike; once its strikes reach ``switch_after`` the next
 member is tried within the same call, with its own model name and reply budget
@@ -16,61 +21,47 @@ chain again.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
-from ..types import PromptCacheHint, ProviderResponse, StreamChunk
+from ..types import Fallback, PromptCacheHint, ProviderResponse, StreamChunk
 from .base import LLMProvider, make_provider
 from .retry import is_transient, retry_after_seconds
 
-
-@dataclass(frozen=True)
-class Fallback:
-    """One member of a ``FallbackProvider`` chain.
-
-    ``provider`` is a built-in or registered name (built and owned by the chain)
-    or an instance (caller-owned). ``model`` and ``max_tokens`` override the
-    request's values for this member; ``None`` reuses them.
-    """
-
-    provider: LLMProvider | str
-    model: str | None = None
-    max_tokens: int | None = None
-
-    def __post_init__(self) -> None:
-        if isinstance(self.provider, str):
-            if not self.provider.strip():
-                raise ValueError("Fallback provider name must be nonempty")
-        elif not hasattr(self.provider, "create"):
-            raise TypeError("Fallback provider must be an LLMProvider or a provider name")
-        if self.model is not None and (not isinstance(self.model, str) or not self.model):
-            raise ValueError("Fallback model must be a nonempty string")
-        if self.max_tokens is not None and (type(self.max_tokens) is not int or self.max_tokens < 1):
-            raise ValueError("Fallback max_tokens must be a positive integer")
+# What a chain accepts as a member: a config record, a provider name, or a live
+# provider. Only the first two can appear in AgentConfig, which must serialize.
+MemberSpec = Fallback | LLMProvider | str
 
 
 class _Member:
-    __slots__ = ("spec", "provider", "label", "owned", "strikes", "skip_until")
+    __slots__ = ("provider", "label", "owned", "model", "max_tokens", "strikes", "skip_until")
 
-    def __init__(self, spec: Fallback) -> None:
-        self.spec = spec
-        if isinstance(spec.provider, str):
-            self.provider = make_provider(spec.provider)
-            self.label = spec.provider.lower()
+    def __init__(self, spec: MemberSpec) -> None:
+        self.model: str | None = None
+        self.max_tokens: int | None = None
+        if isinstance(spec, Fallback):
+            self.model, self.max_tokens = spec.model, spec.max_tokens
+            spec = spec.provider
+        if isinstance(spec, str):
+            if not spec.strip():
+                raise ValueError("Provider name must be nonempty")
+            self.provider = make_provider(spec)
+            self.label = spec.lower()
             self.owned = True
-        else:
-            self.provider = spec.provider
-            self.label = getattr(spec.provider, "name", "") or type(spec.provider).__name__
+        elif hasattr(spec, "create"):
+            self.provider = spec
+            self.label = getattr(spec, "name", "") or type(spec).__name__
             self.owned = False
+        else:
+            raise TypeError("A chain member must be a Fallback, a provider name, or an LLMProvider")
         self.strikes = 0
         self.skip_until = 0.0
 
     def request(self, request: dict[str, Any]) -> dict[str, Any]:
         mapped = dict(request)
-        if self.spec.model is not None:
-            mapped["model"] = self.spec.model
-        if self.spec.max_tokens is not None:
-            mapped["max_tokens"] = self.spec.max_tokens
+        if self.model is not None:
+            mapped["model"] = self.model
+        if self.max_tokens is not None:
+            mapped["max_tokens"] = self.max_tokens
         return mapped
 
     def transient(self, exc: BaseException) -> bool:
@@ -97,8 +88,9 @@ class FallbackProvider(LLMProvider):
 
     def __init__(
         self,
-        primary: LLMProvider | str | Fallback,
-        *fallbacks: LLMProvider | str | Fallback,
+        primary: MemberSpec,
+        *,
+        fallbacks: Sequence[MemberSpec] = (),
         switch_after: int = 1,
         cooldown_seconds: float = 0.0,
     ) -> None:
@@ -106,20 +98,26 @@ class FallbackProvider(LLMProvider):
             raise ValueError("switch_after must be a positive integer")
         if isinstance(cooldown_seconds, bool) or cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must be nonnegative")
-        specs = [m if isinstance(m, Fallback) else Fallback(m) for m in (primary, *fallbacks)]
-        self._members = [_Member(spec) for spec in specs]
+        self._members = [_Member(spec) for spec in (primary, *fallbacks)]
         self.switch_after = switch_after
         self.cooldown_seconds = float(cooldown_seconds)
         self.last_served: str | None = None
         self._failing: _Member | None = None
 
+    @classmethod
+    def from_config(cls, config: Any) -> FallbackProvider:
+        """Build the chain an ``AgentConfig`` describes: its provider, then its fallbacks."""
+        return cls(
+            config.provider,
+            fallbacks=config.fallbacks,
+            switch_after=config.retry.switch_after,
+            cooldown_seconds=config.retry.cooldown_seconds,
+        )
+
     # ── introspection ──────────────────────────────────────────────────────
     @property
-    def members(self) -> tuple[Fallback, ...]:
-        return tuple(m.spec for m in self._members)
-
-    @property
     def labels(self) -> tuple[str, ...]:
+        """Member names in order, the primary first."""
         return tuple(m.label for m in self._members)
 
     def _eligible(self) -> list[_Member]:

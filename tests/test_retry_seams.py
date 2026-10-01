@@ -32,7 +32,7 @@ from harnessx import (
 from harnessx import AgentRegistry
 from harnessx.backends import SQLiteBackend
 from harnessx.engine import new_state
-from harnessx.errors import ConfigurationError, HarnessError
+from harnessx.errors import ConfigurationError, HarnessError  # noqa: F401
 from harnessx.mcp import DEFAULT_MCP_RETRY, MCPConnection, MCPServerConfig, mcp_result_transient
 from harnessx.providers import LLMProvider
 from harnessx.providers.retry import is_transient_text, retry_after_seconds
@@ -201,7 +201,7 @@ async def test_a_provider_can_reclassify_failures():
 async def test_fallback_moves_to_the_next_member_within_one_call():
     primary = Scripted([_Boom(503)], label="primary")
     backup = Scripted([ProviderResponse(text="from backup")], label="backup")
-    chain = FallbackProvider(primary, Fallback(backup, model="backup-model", max_tokens=99))
+    chain = FallbackProvider(primary, fallbacks=[Fallback(backup, model="backup-model", max_tokens=99)])
     response = await chain.create(model="m", messages=[], system=None, tools=[], max_tokens=5)
     assert response.text == "from backup" and chain.last_served == "backup"
     assert backup.calls[0]["model"] == "backup-model" and backup.calls[0]["max_tokens"] == 99
@@ -212,7 +212,7 @@ async def test_fallback_moves_to_the_next_member_within_one_call():
 async def test_fallback_does_not_fail_over_a_deterministic_error():
     primary = Scripted([_Boom(400)], label="primary")
     backup = Scripted([ProviderResponse(text="never")], label="backup")
-    chain = FallbackProvider(primary, backup)
+    chain = FallbackProvider(primary, fallbacks=[backup])
     with pytest.raises(_Boom):
         await chain.create(model="m", messages=[], system=None, tools=[], max_tokens=5)
     assert backup.calls == [] and chain.is_transient(_Boom(400)) is False
@@ -222,7 +222,7 @@ async def test_fallback_does_not_fail_over_a_deterministic_error():
 async def test_switch_after_counts_strikes_across_calls_and_success_resets_them():
     primary = Scripted([_Boom(503), _Boom(503), ProviderResponse(text="p"), _Boom(503)], label="primary")
     backup = Scripted([ProviderResponse(text="b1"), ProviderResponse(text="b2")], label="backup")
-    chain = FallbackProvider(primary, backup, switch_after=2)
+    chain = FallbackProvider(primary, fallbacks=[backup], switch_after=2)
     request = dict(model="m", messages=[], system=None, tools=[], max_tokens=5)
     with pytest.raises(_Boom):
         await chain.create(**request)  # strike 1: the engine would retry
@@ -236,7 +236,7 @@ async def test_switch_after_counts_strikes_across_calls_and_success_resets_them(
 async def test_cooldown_keeps_a_struck_member_out_of_rotation():
     primary = Scripted([_Boom(503), ProviderResponse(text="never yet")], label="primary")
     backup = Scripted([ProviderResponse(text="b1"), ProviderResponse(text="b2")], label="backup")
-    chain = FallbackProvider(primary, backup, cooldown_seconds=60)
+    chain = FallbackProvider(primary, fallbacks=[backup], cooldown_seconds=60)
     request = dict(model="m", messages=[], system=None, tools=[], max_tokens=5)
     assert (await chain.create(**request)).text == "b1"
     assert (await chain.create(**request)).text == "b2", "primary is cooling down"
@@ -247,7 +247,7 @@ async def test_cooldown_keeps_a_struck_member_out_of_rotation():
 async def test_stream_fails_over_only_before_the_first_chunk():
     primary = Scripted([_Boom(503)], label="primary")
     backup = Scripted([ProviderResponse(text="streamed")], label="backup")
-    chain = FallbackProvider(primary, backup)
+    chain = FallbackProvider(primary, fallbacks=[backup])
     chunks = [c async for c in chain.stream(model="m", messages=[], system=None, tools=[], max_tokens=5)]
     assert [c.kind for c in chunks] == ["text_delta", "response"] and chain.last_served == "backup"
 
@@ -261,7 +261,7 @@ async def test_stream_fails_over_only_before_the_first_chunk():
 
             return gen()
 
-    chain = FallbackProvider(_Midway(label="primary"), Scripted([ProviderResponse(text="never")], label="backup"))
+    chain = FallbackProvider(_Midway(label="primary"), fallbacks=[Scripted([ProviderResponse(text="never")], label="backup")])
     delivered = []
     with pytest.raises(_Boom):
         async for chunk in chain.stream(model="m", messages=[], system=None, tools=[], max_tokens=5):
@@ -274,7 +274,7 @@ async def test_fallback_through_an_agent_reports_the_serving_member():
     primary = Scripted([_Boom(503), ProviderResponse(text="p")], label="primary")
     backup = Scripted([ProviderResponse(text="b")], label="backup")
     served: list[str] = []
-    agent = Agent(config=AgentConfig(model="m", retry=RetryPolicy(attempts=1)), provider=FallbackProvider(primary, backup))
+    agent = Agent(config=AgentConfig(model="m", retry=RetryPolicy(attempts=1)), provider=FallbackProvider(primary, fallbacks=[backup]))
     agent.hooks.on(HookEvent.LLM_RESPONSE, lambda ctx: served.append(ctx.data["provider"]))
     async with agent:
         assert (await agent.run("one")).output == "b"
@@ -287,8 +287,8 @@ async def test_fallback_owns_members_built_from_names_only(monkeypatch):
     built = Scripted(label="built")
     monkeypatch.setattr("harnessx.providers.fallback.make_provider", lambda name, **kw: built)
     injected = Scripted(label="injected")
-    chain = FallbackProvider("anthropic", injected)
-    assert chain.labels == ("anthropic", "injected") and chain.members[0].provider == "anthropic"
+    chain = FallbackProvider("anthropic", fallbacks=[injected])
+    assert chain.labels == ("anthropic", "injected")
     await chain.aclose()
     assert built.closed and not injected.closed
     assert await chain.count_tokens(model="m", messages=[], system=None, tools=[]) == 7
@@ -297,10 +297,12 @@ async def test_fallback_owns_members_built_from_names_only(monkeypatch):
 def test_fallback_validates_its_arguments():
     with pytest.raises(ValueError):
         FallbackProvider(Scripted(), switch_after=0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ConfigurationError):
         Fallback(Scripted(), max_tokens=0)
-    with pytest.raises(TypeError):
+    with pytest.raises(ConfigurationError):
         Fallback(object())  # type: ignore[arg-type]
+    with pytest.raises(ConfigurationError):
+        Fallback("no-such-vendor")
 
 
 # ── ToolRetry and TransientToolError ─────────────────────────────────────────
@@ -639,3 +641,121 @@ def test_owned_sdk_clients_do_not_retry_on_their_own(monkeypatch):
     assert OpenRouterProvider(api_key="k", max_retries=3).client.max_retries == 3
     azure = AzureOpenAIProvider(azure_endpoint="https://x.openai.azure.com", api_version="2024-06-01", api_key="k")
     assert azure.client.max_retries == 0
+
+
+# ── fallbacks as configuration ───────────────────────────────────────────────
+
+
+def test_fallbacks_are_config_and_survive_a_round_trip():
+    from harnessx.execution import wire
+
+    config = AgentConfig(
+        model="claude-sonnet-4-6", provider="anthropic",
+        fallbacks=[Fallback("openai", model="gpt-5", max_tokens=16_000)],
+        retry=RetryPolicy(attempts=3, switch_after=2, cooldown_seconds=60),
+    )
+    shape = wire(config)
+    assert shape["fallbacks"] == [{"provider": "openai", "model": "gpt-5", "max_tokens": 16_000}]
+    assert shape["retry"]["switch_after"] == 2 and shape["retry"]["cooldown_seconds"] == 60
+    # The Temporal worker compares persisted config to the worker's own.
+    assert wire(AgentConfig.from_dict(shape)) == shape
+    # Snapshots written before this release have no fallbacks key.
+    legacy = {k: v for k, v in shape.items() if k != "fallbacks"}
+    assert AgentConfig.from_dict(legacy).fallbacks == ()
+    # Plain dicts coerce, like the sub-policies.
+    assert AgentConfig(fallbacks=[{"provider": "openai"}]).fallbacks == (Fallback("openai"),)
+
+
+def test_config_rejects_what_it_cannot_persist_and_points_at_the_alternative():
+    with pytest.raises(ConfigurationError, match="Unknown fallback provider"):
+        AgentConfig(fallbacks=[Fallback("no-such-vendor")])
+    with pytest.raises(ConfigurationError, match="FallbackProvider"):
+        AgentConfig(fallbacks=[Fallback(Scripted())])  # a live provider cannot be persisted
+
+
+@pytest.mark.asyncio
+async def test_an_agent_builds_owns_and_closes_the_chain_its_config_describes(monkeypatch):
+    built: dict[str, Scripted] = {}
+    monkeypatch.setattr(
+        "harnessx.providers.fallback.make_provider",
+        lambda name, **kw: built.setdefault(name, Scripted([ProviderResponse(text="hi")], label=name)),
+    )
+    agent = Agent(config=AgentConfig(
+        model="m", provider="anthropic", fallbacks=[Fallback("openai", model="gpt-5")],
+        retry=RetryPolicy(switch_after=2, cooldown_seconds=5),
+    ))
+    assert isinstance(agent.provider, FallbackProvider)
+    assert agent.provider.labels == ("anthropic", "openai")
+    assert agent.provider.switch_after == 2 and agent.provider.cooldown_seconds == 5
+    async with agent:
+        assert (await agent.run("hi")).output == "hi"
+    # Built from config, so the agent owns it; nothing is left for the caller to close.
+    assert built["anthropic"].closed and built["openai"].closed
+
+
+def test_config_fallbacks_and_an_injected_provider_are_a_contradiction():
+    with pytest.raises(ConfigurationError, match="both describe what to call"):
+        Agent(config=AgentConfig(fallbacks=[Fallback("openai")]), provider=Scripted())
+
+
+@pytest.mark.asyncio
+async def test_a_configured_chain_fails_over_and_reports_the_member(monkeypatch):
+    primary = Scripted([_Boom(503)], label="anthropic")
+    backup = Scripted([ProviderResponse(text="from backup")], label="openai")
+    monkeypatch.setattr(
+        "harnessx.providers.fallback.make_provider",
+        lambda name, **kw: {"anthropic": primary, "openai": backup}[name],
+    )
+    served: list[str] = []
+    agent = Agent(config=AgentConfig(
+        model="m", provider="anthropic", fallbacks=[Fallback("openai", model="gpt-5")],
+        retry=RetryPolicy(attempts=1),
+    ))
+    agent.hooks.on(HookEvent.LLM_RESPONSE, lambda ctx: served.append(ctx.data["provider"]))
+    async with agent:
+        assert (await agent.run("hi")).output == "from backup"
+    assert served == ["openai"], "the member that answered, not the configured primary"
+    assert backup.calls[0]["model"] == "gpt-5"
+
+
+# ── connection loss versus a policy denial ───────────────────────────────────
+
+
+def _anthropic_errors():
+    anthropic = pytest.importorskip("anthropic")
+    import httpx
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    lost = anthropic.APIConnectionError(request=request)
+    lost.__cause__ = httpx.ConnectError("[Errno 54] Connection reset by peer")
+    denied = anthropic.APIConnectionError(request=request)
+    denied.__cause__ = httpx.ProxyError("403 Forbidden")
+    return anthropic, httpx, request, lost, denied
+
+
+def test_connection_loss_is_retried_but_a_proxy_refusing_on_policy_is_not():
+    """The SDK retries APIConnectionError; harnessx turned the SDK's retries off,
+    so the engine has to recognize it. An egress proxy answering 4xx to the
+    CONNECT is a policy decision, not a blip, and must stay final."""
+    anthropic, httpx, request, lost, denied = _anthropic_errors()
+    from harnessx.providers.anthropic import AnthropicProvider
+
+    provider = AnthropicProvider(client=anthropic.AsyncAnthropic(api_key="x"))
+    assert provider.is_transient(lost) is True
+    assert provider.is_transient(denied) is False
+    assert provider.is_transient(anthropic.APITimeoutError(request=request)) is True
+    assert provider.is_transient(
+        anthropic.APIStatusError("bad", response=httpx.Response(400, request=request), body=None)
+    ) is False
+    assert provider.is_transient(
+        anthropic.RateLimitError("slow", response=httpx.Response(429, request=request), body=None)
+    ) is True
+
+
+def test_the_shared_classifier_alone_still_does_not_know_sdk_wrappers():
+    """is_transient stays a pure status/text classifier; the SDK-specific
+    knowledge lives behind the provider seam."""
+    _, _, _, lost, _ = _anthropic_errors()
+    from harnessx.providers.retry import is_transient as shared, sdk_connection_failure
+
+    assert shared(lost) is False and sdk_connection_failure(lost) is True

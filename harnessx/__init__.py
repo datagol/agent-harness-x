@@ -35,7 +35,7 @@ from .memory import (
 )
 from .messages import Message, ContentBlock
 from .permissions import CliPermissionManager, CostLimitError, GuardrailsEngine, MaxIterationsError, PermissionManager
-from .providers import AnthropicProvider, Fallback, FallbackProvider, LLMProvider, make_provider, register_provider
+from .providers import AnthropicProvider, FallbackProvider, LLMProvider, make_provider, register_provider
 from .runtime import AgentRuntime, RunHandle
 from .recorder import IncidentRecorder, ExportPolicy, BundleLimits, IncidentError, VerificationReport, Playback, export_incident
 from ._journal import RecordingError
@@ -51,6 +51,7 @@ from .types import (
     DEFAULT_TIMEOUT_SECONDS,
     AgentConfig,
     CheckpointData,
+    Fallback,
     Limits,
     PermissionLevel,
     PromptCacheHint,

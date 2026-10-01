@@ -296,7 +296,15 @@ than repeating a possible side effect.
 **Retries are observable.** The new `RETRY` hook reports `kind`, `name`,
 `attempt`, `next_attempt`, `wait_seconds`, `error`, and `provider`, and the
 `LLM_RESPONSE` payload gained `provider`, naming the provider that served the
-call.
+call. LangSmith reads it, so a failed-over run is labelled with the vendor that
+answered rather than the configured primary.
+
+**Connection loss is retried again.** This is a fix to the change above, not a
+new behaviour. The vendor SDKs raise `APIConnectionError` for a dropped
+connection and retry it themselves; turning their retries off left it
+unrecognized by the engine's classifier and so unretried. It is transient once
+more. The exception is an egress proxy refusing the tunnel with a 4xx, which is
+a policy decision rather than a blip and stays final.
 
 **Internal helpers removed.** `providers.retry.call_with_retry` and
 `stream_with_retry` are gone; nothing in the SDK called them, and the engine's
@@ -312,6 +320,8 @@ loop is the retry path. `providers.retry.is_transient` stays, and is what
 | `ToolDefinition.retry_if_result` | Treat a successful result as a transient failure |
 | `RetryPolicy.max_backoff_seconds` | Cap on one wait, including a server's `Retry-After` |
 | `LLMProvider.is_transient`, `.retry_after` | Per-provider classification and `Retry-After` |
-| `FallbackProvider`, `Fallback` | An ordered chain of providers that looks like one |
+| `AgentConfig.fallbacks`, `Fallback` | Providers to try when the primary fails; the Agent builds and owns the chain |
+| `RetryPolicy.switch_after`, `.cooldown_seconds` | How long a provider is given before the chain moves on, and how long it sits out |
+| `FallbackProvider` | The chain itself, for the case where a member has to be a live object |
 | `HookEvent.RETRY`, `RetryData` | Every retry, model or tool |
 | `MCPServerConfig.replay_policy`, `.retry` | Retry for bridged MCP tools |

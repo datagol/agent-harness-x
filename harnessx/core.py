@@ -85,7 +85,7 @@ class Agent:
         self._busy = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
-        self.provider = provider if provider is not None else make_provider(self.config.provider)
+        self.provider = provider if provider is not None else _provider_from_config(self.config)
         self._owns_memory = memory is None
         self.memory = memory or ConversationMemory(max_result_chars=self.config.limits.max_result_chars)
         self._register_result_reader()
@@ -313,6 +313,19 @@ class Agent:
         return self._session_id
 
 
+def _provider_from_config(config: AgentConfig) -> LLMProvider:
+    """The provider an AgentConfig describes: one vendor, or a failover chain.
+
+    The Agent built it, so the Agent closes it; nothing is left for the caller
+    to close. An injected provider stays caller-owned, as it always has.
+    """
+    if config.fallbacks:
+        from .providers.fallback import FallbackProvider
+
+        return FallbackProvider.from_config(config)
+    return make_provider(config.provider)
+
+
 def _check_provider_binding(config: AgentConfig | None, provider: LLMProvider | None) -> None:
     """Reject only a genuine contradiction: two different built-in names.
 
@@ -321,6 +334,11 @@ def _check_provider_binding(config: AgentConfig | None, provider: LLMProvider | 
     """
     if provider is None:
         return
+    if config is not None and config.fallbacks:
+        raise ConfigurationError(
+            "AgentConfig.fallbacks and an injected provider both describe what to call; "
+            "keep the fallbacks in the config, or build the chain yourself with FallbackProvider"
+        )
     injected = getattr(provider, "name", "") or ""
     configured = config.provider if config is not None else "anthropic"
     if injected in BUILTIN_PROVIDERS and configured in BUILTIN_PROVIDERS and injected != configured:
