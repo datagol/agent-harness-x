@@ -340,6 +340,16 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
         if response["tool_calls"] and not truncated:
             state["phase"] = "prepare_tools"
         else:
+            if response["tool_calls"]:
+                # Refused above, but the assistant turn carrying them is already
+                # in the transcript, so each one still needs an answer or the
+                # next request is malformed.
+                state = close_open_tool_calls(
+                    state,
+                    "Not executed: the reply was cut off at the token budget, so "
+                    "these arguments may be incomplete. Call the tool again with "
+                    "a shorter reply.",
+                )
             state.update(
                 phase="finish",
                 output=response["text"],
@@ -460,29 +470,58 @@ def model_timeout_from_wire(config: Mapping[str, Any] | None) -> float:
     return call_timeout_for(config.get("max_tokens"))
 
 
+def close_open_tool_calls(state: dict, unanswered: str) -> dict:
+    """Answer every tool call in the last assistant turn that has no result yet.
+
+    An assistant message carrying a ``tool_use`` block that nothing answers is
+    not a transcript a provider will accept: Anthropic rejects the next request
+    outright, and the session is wedged with no way forward. Any path that stops
+    after the assistant turn is saved has to close the calls it leaves open --
+    cancellation, a reply truncated at the token budget, or a mid-turn failure.
+
+    Results already recorded are kept, so a tool that did run reports what it
+    did; the rest get ``unanswered``. Pure, because ``transition`` is.
+    """
+    messages = state.get("messages", [])
+    if not messages or messages[-1].get("role") != "assistant":
+        return state
+    content = messages[-1].get("content")
+    if not isinstance(content, list):
+        return state
+    calls = [b for b in content if b.get("type") == "tool_use"]
+    if not calls:
+        return state
+
+    recorded = {t["call"]["id"]: t for t in state.get("tools", [])}
+    answered = {
+        b.get("tool_use_id")
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    }
+    results = []
+    for call in calls:
+        if call["id"] in answered:
+            continue
+        entry = recorded.get(call["id"], {})
+        result = entry.get("result") or entry.get("raw_result")
+        results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": call["id"],
+                "content": result["content"] if result else unanswered,
+                "is_error": result.get("is_error", False) if result else True,
+            }
+        )
+    if results:
+        state["messages"] = [*messages, {"role": "user", "content": results}]
+    return state
+
+
 def cancel_state(state: dict) -> dict:
     """Close incomplete tool protocol messages while retaining uncertain effects."""
     state["status"] = "cancelled"
-    messages = state.get("messages", [])
-    if messages and messages[-1].get("role") == "assistant":
-        calls = [
-            b for b in messages[-1].get("content", []) if b.get("type") == "tool_use"
-        ]
-        if calls:
-            results = []
-            recorded = {t["call"]["id"]: t for t in state.get("tools", [])}
-            for call in calls:
-                entry = recorded.get(call["id"], {})
-                result = entry.get("result") or entry.get("raw_result")
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call["id"],
-                        "content": result["content"]
-                        if result
-                        else "Run cancelled; execution outcome may be unknown.",
-                        "is_error": result.get("is_error", False) if result else True,
-                    }
-                )
-            state["messages"] = [*messages, {"role": "user", "content": results}]
-    return state
+    return close_open_tool_calls(
+        state, "Run cancelled; execution outcome may be unknown."
+    )

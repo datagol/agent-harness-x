@@ -12,6 +12,7 @@ from harnessx import Agent, AgentConfig, HookEvent, PermissionLevel, ProviderRes
 from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
 from harnessx.builtin.planning import render
+from harnessx.hooks import Middleware
 from harnessx.providers import LLMProvider
 from harnessx.types import LoopGuard, ToolResult
 
@@ -31,8 +32,34 @@ class Scripted(LLMProvider):
         return 0
 
 
-def _state(response: dict) -> dict:
-    return {"phase": "model", "status": "running", "response": response}
+def _state(response: dict, *, messages=None, tools=None) -> dict:
+    state: dict[str, Any] = {"phase": "model", "status": "running", "response": response}
+    if messages is not None:
+        state["messages"] = messages
+    if tools is not None:
+        state["tools"] = tools
+    return state
+
+
+def _assistant_turn(*call_ids):
+    return {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": i, "name": "probe", "input": {}} for i in call_ids],
+    }
+
+
+def _unanswered(messages):
+    """Tool-use ids in the transcript that nothing answers."""
+    used, answered = set(), set()
+    for m in messages:
+        for b in m.get("content") or []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                used.add(b["id"])
+            elif b.get("type") == "tool_result":
+                answered.add(b["tool_use_id"])
+    return used - answered
 
 
 # ── the turn ends on tool calls, not on the stop reason ──────────────────────
@@ -59,6 +86,51 @@ def test_a_truncated_reply_never_executes_its_tool_calls():
     }
     advanced = transition(_state(response), "model", {})
     assert advanced["phase"] == "finish" and advanced["stop_reason"] == "max_tokens"
+
+
+def test_a_truncated_reply_still_answers_the_tool_calls_it_refused():
+    """Refusing to run them does not remove the assistant turn that carries
+    them. An unanswered tool_use wedges the session: Anthropic rejects the next
+    request outright, and only a fake provider lets it pass."""
+    response = {
+        "text": "part", "stop_reason": "max_tokens",
+        "tool_calls": [{"id": "c1", "name": "probe", "input": {}}],
+    }
+    advanced = transition(
+        _state(response, messages=[_assistant_turn("c1")], tools=[]), "model", {}
+    )
+    assert not _unanswered(advanced["messages"])
+    answer = advanced["messages"][-1]["content"][0]
+    assert answer["is_error"] and "token budget" in answer["content"]
+
+
+def test_closing_open_calls_keeps_the_results_that_do_exist():
+    from harnessx.execution import close_open_tool_calls
+
+    state = {
+        "messages": [_assistant_turn("c1", "c2")],
+        "tools": [{"call": {"id": "c1"}, "result": {"content": "ran fine", "is_error": False}}],
+    }
+    closed = close_open_tool_calls(state, "never ran")
+    answers = {b["tool_use_id"]: b for b in closed["messages"][-1]["content"]}
+    assert answers["c1"]["content"] == "ran fine" and not answers["c1"]["is_error"]
+    assert answers["c2"]["content"] == "never ran" and answers["c2"]["is_error"]
+
+
+def test_closing_open_calls_twice_does_not_answer_twice():
+    from harnessx.execution import close_open_tool_calls
+
+    state = {"messages": [_assistant_turn("c1")], "tools": []}
+    once = close_open_tool_calls(state, "never ran")
+    twice = close_open_tool_calls(dict(once), "never ran")
+    assert len(twice["messages"]) == len(once["messages"])
+
+
+def test_closing_open_calls_leaves_a_turn_with_nothing_open_alone():
+    from harnessx.execution import close_open_tool_calls
+
+    state = {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]}
+    assert close_open_tool_calls(state, "never ran")["messages"] == state["messages"]
 
 
 def test_a_reply_with_no_tool_calls_still_finishes():
@@ -771,3 +843,29 @@ async def test_a_tool_heavy_conversation_over_budget_does_condense():
     assert await memory.needs_condensing(
         _Counter(999_999), "m", "", [], max_context_tokens=14_000, reply_tokens=20_000
     ), "over budget with a valid cut point: condensing must be reported as needed"
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_failure_leaves_a_transcript_a_provider_will_accept():
+    """The generic failure handler marked the run failed and left the assistant
+    turn's tool calls unanswered, so resuming the session sent a malformed
+    request. Pre-existing; the truncation guard widened the same hole."""
+    provider = Scripted([
+        ProviderResponse(tool_calls=[ToolCall("c1", "probe", {})], stop_reason="tool_use"),
+    ])
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    agent.tools.register_with_schema(
+        "probe", "probe", {"type": "object", "properties": {}}, lambda: "ok",
+        permission=PermissionLevel.ALLOW,
+    )
+
+    class Dies(Middleware):
+        async def before_tool_execution(self, tool_call):
+            raise RuntimeError("the worker died")
+
+    agent.middleware.add(Dies())
+    async with agent:
+        result = await agent.run("go")
+
+    assert result.status.value == "failed"
+    assert not _unanswered(agent.memory.get_messages())

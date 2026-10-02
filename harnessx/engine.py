@@ -17,6 +17,7 @@ from .execution import (
     _tool_context,
     ToolApprovalRequired,
     cancel_state,
+    close_open_tool_calls,
     next_command,
     result_from_state,
     transition,
@@ -775,6 +776,12 @@ async def drive(agent, state, emit, *, commit=None, control=None):
         state.update(
             status="failed", error={"type": type(exc).__name__, "message": str(exc)}
         )
+        # A failure after the assistant turn was saved leaves its tool calls
+        # unanswered, and the session cannot be resumed from that transcript.
+        state = close_open_tool_calls(
+            state, f"Not executed: the run failed first ({type(exc).__name__})."
+        )
+        agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
         await emit_hook(agent, HookEvent.ERROR, error=str(exc))
         await persist([ev(E.ERROR, str(exc))], journal=records("command.failed", {
             "phase": state["phase"], "type": type(exc).__name__, "message": str(exc),
