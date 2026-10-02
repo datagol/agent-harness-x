@@ -874,18 +874,19 @@ def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:
 
     guard = agent.config.limits.loop_guard
     history = list(state.get("call_history") or [])
-    if not guard.applies(durable=bool(state.get("durable"))):
+    if not guard.applies():
         return history, None
 
+    # Every completed call is evidence, whatever its replay policy and whether
+    # it succeeded. Progress is already encoded in the signature, which covers
+    # the result as well as the arguments: an edit that changes a file, or a
+    # test whose output changes, produces a different signature and so breaks
+    # the cycle on its own. Clearing the history on success instead -- which is
+    # what Hermes does, because its signatures carry no result -- switched the
+    # guard off for every tool not declared ``safe``, which is the default.
     for entry in state["tools"]:
         result = entry.get("result") or {}
         call = entry["call"]
-        # A successful call to a tool that is not declared repeat-safe has had
-        # an effect, so whatever came before is no longer evidence of a loop.
-        # Re-running a test after an edit is the shape this protects.
-        if not result.get("is_error") and entry.get("policy") != "safe":
-            history = []
-            continue
         history.append(call_signature(call["name"], call.get("input"), str(result.get("content", ""))))
 
     if len(history) > guard.history:

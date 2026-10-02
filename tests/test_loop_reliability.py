@@ -3,6 +3,7 @@ Hermes, Pi and Deep Agents. See doc/agent-loop-reliability.md."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -12,7 +13,7 @@ from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
 from harnessx.builtin.planning import render
 from harnessx.providers import LLMProvider
-from harnessx.types import ToolResult
+from harnessx.types import LoopGuard, ToolResult
 
 
 class Scripted(LLMProvider):
@@ -430,7 +431,7 @@ def test_a_signature_changes_when_the_answer_does():
     assert call_signature("t", {"a": 1, "b": 2}, "x") == call_signature("t", {"b": 2, "a": 1}, "x")
 
 
-def _looping_agent(tool_names, *, replay_policy="safe", turns=10):
+def _looping_agent(tool_names, *, replay_policy="safe", turns=10, handler=None):
     class Looper(LLMProvider):
         name = "looper"
 
@@ -453,7 +454,8 @@ def _looping_agent(tool_names, *, replay_policy="safe", turns=10):
     agent = Agent(config=AgentConfig(model="m"), provider=provider)
     for name in tool_names:
         agent.tools.register_with_schema(
-            name, name, {"type": "object", "properties": {}}, lambda: "nothing changed",
+            name, name, {"type": "object", "properties": {}},
+            handler or (lambda: "nothing changed"),
             permission=PermissionLevel.ALLOW, replay_policy=replay_policy,
         )
     return agent, provider
@@ -481,10 +483,39 @@ async def test_an_unattended_run_is_told_when_it_is_going_in_circles(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_direct_run_is_left_alone_by_default():
-    """Someone at a terminal can see a loop and stop it. An unattended run
-    cannot, which is the only reason the guard defaults on there."""
+@pytest.mark.parametrize("replay_policy", ["manual", "idempotent", "safe"])
+async def test_the_guard_watches_every_tool_whatever_its_replay_policy(tmp_path, replay_policy):
+    """``manual`` is the default policy, so an agent stuck on ``bash`` or
+    ``write_file`` is the common case rather than the exotic one. Clearing the
+    history on any non-safe success switched the guard off for exactly those."""
+    agent, _provider = _looping_agent(["check", "poll"], replay_policy=replay_policy)
+    seen: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
+
+    await _run_durable(agent, tmp_path)
+
+    assert seen, f"{replay_policy} tools go unwatched"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_run_is_watched_too():
+    """``durable`` means the state is checkpointed, not that nobody is looking.
+    A cron job calling ``Agent.run`` is unattended; an interactive tool using
+    ``AgentRuntime`` has a person right there. So the guard does not key on it."""
     agent, _provider = _looping_agent(["check", "poll"])
+    seen: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
+    async with agent:
+        await agent.run("go")
+    assert seen
+
+
+@pytest.mark.asyncio
+async def test_opting_out_is_one_flag():
+    agent, _provider = _looping_agent(["check", "poll"])
+    agent.config = replace(
+        agent.config, limits=replace(agent.config.limits, loop_guard=LoopGuard(enabled=False))
+    )
     seen: list[dict[str, Any]] = []
     agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
     async with agent:
@@ -493,26 +524,32 @@ async def test_a_direct_run_is_left_alone_by_default():
 
 
 @pytest.mark.asyncio
-async def test_progress_clears_the_history_so_edit_then_rerun_is_not_a_loop(tmp_path):
+async def test_a_cycle_needs_identical_results_as_well_as_identical_arguments(tmp_path):
     """The shape this protects: change something, re-run the check, repeat. It
-    looks exactly like a loop and must never be reported as one."""
-    agent, _provider = _looping_agent(["edit", "verify"], replay_policy="manual")
+    looks like a loop from the call names alone, and must never be reported as
+    one. Progress is encoded in the signature, which covers the result, so no
+    separate progress rule is needed to tell the two apart."""
+    laps = iter(range(100))
+
+    def moving():
+        return f"lap {next(laps)}"
+
+    agent, _provider = _looping_agent(["edit", "verify"], replay_policy="manual", handler=moving)
     seen: list[dict[str, Any]] = []
     agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
 
     await _run_durable(agent, tmp_path)
 
-    assert not seen, "a successful call that is not repeat-safe counts as progress"
+    assert not seen, "a result that keeps changing is progress, not a cycle"
 
 
 def test_the_guard_decides_its_own_posture():
-    from harnessx.types import LoopGuard
-
-    assert LoopGuard().applies(durable=True) and not LoopGuard().applies(durable=False)
-    assert LoopGuard(enabled=True).applies(durable=False)
-    assert not LoopGuard(enabled=False).applies(durable=True)
+    assert LoopGuard().applies()
+    assert not LoopGuard(enabled=False).applies()
     with pytest.raises(Exception):
         LoopGuard(threshold=1)
+    with pytest.raises(TypeError):
+        LoopGuard(enabled=None)
 
 
 # ── a task list the model keeps seeing ──────────────────────────────────────

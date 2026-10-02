@@ -438,26 +438,27 @@ class LoopGuard:
     result the model reads; it never fails the run, which is what
     ``Limits.max_iterations`` is for.
 
-    ``enabled`` defaults to None, meaning on for durable runs and off otherwise.
-    A person at a terminal can see a loop and interrupt it; an unattended run
-    cannot, and burns its whole budget instead.
+    On by default. A trip needs identical arguments *and* identical results for
+    ``threshold`` laps running, which is a genuine loop rather than a slow
+    agent, and the only consequence is a note on the tool result the model
+    reads. ``LoopGuard(enabled=False)`` opts out.
     """
 
-    enabled: bool | None = None
+    enabled: bool = True
     max_period: int = 4
     threshold: int = 3
     history: int = 64
 
     def __post_init__(self) -> None:
-        if self.enabled is not None and type(self.enabled) is not bool:
-            raise TypeError("enabled must be a bool or None")
+        if type(self.enabled) is not bool:
+            raise TypeError("enabled must be a bool")
         _positive(self.max_period, "max_period", integer=True)
         _positive(self.history, "history", integer=True)
         if type(self.threshold) is not int or self.threshold < 2:
             raise ConfigurationError("threshold must be an integer of 2 or more")
 
-    def applies(self, *, durable: bool) -> bool:
-        return durable if self.enabled is None else self.enabled
+    def applies(self) -> bool:
+        return self.enabled
 
 
 @dataclass(frozen=True)
