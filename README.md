@@ -521,6 +521,14 @@ register_filesystem_tools(
 )
 ```
 
+The bundle is `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`,
+`list_directory` and `generate_file`. `edit_file` replaces an exact string and
+refuses an ambiguous match rather than editing the wrong occurrence, which is
+what makes it safe to prefer over rewriting a file whole: an agent building a
+long artifact writes the first chunk and grows it a section at a time, instead
+of spending the reply budget on bytes it already wrote. `delete` requires
+`recursive=True` for a non-empty tree and will not remove the root itself.
+
 The root must exist. Scoped operations reject symlinks in files and parent
 directories using descriptor-relative, no-follow access on POSIX. This is an
 application boundary, not an OS sandbox for arbitrary code: hard links, mounts,
