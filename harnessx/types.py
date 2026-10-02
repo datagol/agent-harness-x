@@ -296,8 +296,13 @@ class Limits:
     max_cost_dollars: float | None = None
     input_cost_per_m: float | None = None
     output_cost_per_m: float | None = None
+    loop_guard: LoopGuard = field(default_factory=lambda: LoopGuard())
 
     def __post_init__(self) -> None:
+        if isinstance(self.loop_guard, dict):  # restored from a snapshot
+            object.__setattr__(self, "loop_guard", LoopGuard(**self.loop_guard))
+        if not isinstance(self.loop_guard, LoopGuard):
+            raise TypeError("loop_guard must be a LoopGuard")
         if type(self.max_iterations) is not int or self.max_iterations < 0:
             raise ConfigurationError("max_iterations must be nonnegative (0 means unlimited)")
         _positive(self.max_context_tokens, "max_context_tokens", integer=True)
@@ -422,6 +427,37 @@ def call_timeout_for(max_tokens: int | None) -> float:
     if not max_tokens:
         return DEFAULT_TIMEOUT_SECONDS
     return max(DEFAULT_TIMEOUT_SECONDS, max_tokens * 3600 / 128_000 + 60)
+
+
+@dataclass(frozen=True)
+class LoopGuard:
+    """Noticing when an agent has stopped making progress.
+
+    Watches for a repeating cycle of tool calls, up to ``max_period`` long,
+    repeated ``threshold`` times with the same results. A trip annotates the
+    result the model reads; it never fails the run, which is what
+    ``Limits.max_iterations`` is for.
+
+    ``enabled`` defaults to None, meaning on for durable runs and off otherwise.
+    A person at a terminal can see a loop and interrupt it; an unattended run
+    cannot, and burns its whole budget instead.
+    """
+
+    enabled: bool | None = None
+    max_period: int = 4
+    threshold: int = 3
+    history: int = 64
+
+    def __post_init__(self) -> None:
+        if self.enabled is not None and type(self.enabled) is not bool:
+            raise TypeError("enabled must be a bool or None")
+        _positive(self.max_period, "max_period", integer=True)
+        _positive(self.history, "history", integer=True)
+        if type(self.threshold) is not int or self.threshold < 2:
+            raise ConfigurationError("threshold must be an integer of 2 or more")
+
+    def applies(self, *, durable: bool) -> bool:
+        return durable if self.enabled is None else self.enabled
 
 
 @dataclass(frozen=True)

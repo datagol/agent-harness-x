@@ -10,7 +10,7 @@ import pytest
 from harnessx import Agent, AgentConfig, HookEvent, PermissionLevel, ProviderResponse, ToolCall
 from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
-from harnessx.providers import LLMProvider
+from harnessx.providers import LLMProvider  # noqa: F401
 from harnessx.types import ToolResult
 
 
@@ -395,3 +395,120 @@ def test_permanent_and_overflow_failures_are_not_retried(message, status, retrie
 
     error = type("E", (Exception,), {"status_code": status})(message)
     assert is_transient(error) is retried
+
+
+# ── an agent that stopped making progress is told so ────────────────────────
+
+
+def test_the_detector_catches_alternation_not_just_repetition():
+    """A,B,A,B defeats a consecutive-identical counter entirely, which is what
+    OpenCode's doom-loop check is. Cycles are the right unit."""
+    from harnessx.loopguard import detect_cycle
+
+    assert detect_cycle(["a", "a", "a"]) == 1
+    assert detect_cycle(["a", "a"]) is None, "two is not yet a pattern"
+    assert detect_cycle(["a", "b", "a", "b", "a", "b"]) == 2
+    assert detect_cycle(["a", "b", "a", "b"]) is None
+    assert detect_cycle(["a", "b", "c", "a", "b", "c", "a", "b", "c"]) == 3
+    assert detect_cycle(["a", "a", "b", "a", "a"]) is None, "progress breaks the run"
+    assert detect_cycle([]) is None
+    assert detect_cycle(["a"] * 9, max_period=4, threshold=2) == 1
+
+
+def test_a_signature_changes_when_the_answer_does():
+    """Polling is the same call repeatedly, and is only a loop while the answer
+    stays the same."""
+    from harnessx.loopguard import call_signature
+
+    same = call_signature("poll", {"id": 1}, "pending")
+    assert call_signature("poll", {"id": 1}, "pending") == same
+    assert call_signature("poll", {"id": 1}, "ready") != same, "a new answer is progress"
+    assert call_signature("poll", {"id": 2}, "pending") != same
+    assert call_signature("check", {"id": 1}, "pending") != same
+    # Argument order must not matter.
+    assert call_signature("t", {"a": 1, "b": 2}, "x") == call_signature("t", {"b": 2, "a": 1}, "x")
+
+
+def _looping_agent(tool_names, *, replay_policy="safe", turns=10):
+    class Looper(LLMProvider):
+        name = "looper"
+
+        def __init__(self):
+            self.n = 0
+
+        async def create(self, **kwargs):
+            self.n += 1
+            if self.n > turns:
+                return ProviderResponse(text="giving up")
+            which = tool_names[(self.n - 1) % len(tool_names)]
+            return ProviderResponse(
+                tool_calls=[ToolCall(f"c{self.n}", which, {})], stop_reason="tool_use"
+            )
+
+        async def count_tokens(self, **kwargs):
+            return 0
+
+    provider = Looper()
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    for name in tool_names:
+        agent.tools.register_with_schema(
+            name, name, {"type": "object", "properties": {}}, lambda: "nothing changed",
+            permission=PermissionLevel.ALLOW, replay_policy=replay_policy,
+        )
+    return agent, provider
+
+
+async def _run_durable(agent, tmp_path):
+    from harnessx import AgentRuntime, SQLiteBackend
+
+    backend = await SQLiteBackend.connect(tmp_path / "r.db")
+    async with backend, AgentRuntime(agent, backend=backend) as runtime:
+        return await runtime.run("go")
+
+
+@pytest.mark.asyncio
+async def test_an_unattended_run_is_told_when_it_is_going_in_circles(tmp_path):
+    agent, _provider = _looping_agent(["check", "poll"])
+    seen: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
+
+    await _run_durable(agent, tmp_path)
+
+    assert seen and seen[0]["period"] == 2, "the alternating pair is the cycle"
+    notices = [m for m in agent.memory.get_messages() if "[harness]" in str(m.get("content"))]
+    assert notices, "the notice has to reach the model, not just a hook"
+
+
+@pytest.mark.asyncio
+async def test_a_direct_run_is_left_alone_by_default():
+    """Someone at a terminal can see a loop and stop it. An unattended run
+    cannot, which is the only reason the guard defaults on there."""
+    agent, _provider = _looping_agent(["check", "poll"])
+    seen: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
+    async with agent:
+        await agent.run("go")
+    assert not seen
+
+
+@pytest.mark.asyncio
+async def test_progress_clears_the_history_so_edit_then_rerun_is_not_a_loop(tmp_path):
+    """The shape this protects: change something, re-run the check, repeat. It
+    looks exactly like a loop and must never be reported as one."""
+    agent, _provider = _looping_agent(["edit", "verify"], replay_policy="manual")
+    seen: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.REPETITION, lambda ctx: seen.append(dict(ctx.data)))
+
+    await _run_durable(agent, tmp_path)
+
+    assert not seen, "a successful call that is not repeat-safe counts as progress"
+
+
+def test_the_guard_decides_its_own_posture():
+    from harnessx.types import LoopGuard
+
+    assert LoopGuard().applies(durable=True) and not LoopGuard().applies(durable=False)
+    assert LoopGuard(enabled=True).applies(durable=False)
+    assert not LoopGuard(enabled=False).applies(durable=True)
+    with pytest.raises(Exception):
+        LoopGuard(threshold=1)

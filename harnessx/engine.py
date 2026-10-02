@@ -136,6 +136,7 @@ def new_state(agent, message, *, run_id=None, durable=False):
         "tools": [],
         "attempt": 0,
         "usage_incomplete": False,
+        "call_history": [],
     }
 
 
@@ -426,11 +427,22 @@ async def command(agent, state, name, emit, *, record=None):
 
     if name == "collect_tools":
         results = [ToolResult(**t["result"]) for t in state["tools"]]
+        history, notice = watch_for_repetition(agent, state)
+        if notice:
+            # Annotate the result the model is about to read. Telling the model
+            # it is repeating usually stops it; ending the run is what
+            # max_iterations is for.
+            results = [replace(results[0], content=f"{notice}\n\n{results[0].content}"), *results[1:]]
+            await emit_hook(
+                agent, HookEvent.REPETITION,
+                period=notice_period(notice), laps=agent.config.limits.loop_guard.threshold,
+                tool=state["tools"][0]["call"]["name"],
+            )
         agent.memory.add_tool_results(results)
         await emit_hook(
             agent, HookEvent.LOOP_ITERATION_END, iteration=state["iterations"]
         )
-        return {**await snapshot(agent), "tools": []}
+        return {**await snapshot(agent), "tools": [], "call_history": history}
 
     if name == "finish":
         for ext in agent.extensions:
@@ -819,6 +831,44 @@ def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> st
 def _preview(value, limit: int = 200) -> str:
     text = str(value if value is not None else "")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:
+    """Track completed calls and report a cycle that has stopped producing news.
+
+    Returns the history to persist and, when a cycle is detected, the notice to
+    put in front of the model's next read.
+    """
+    from .loopguard import call_signature, detect_cycle, repetition_notice
+
+    guard = agent.config.limits.loop_guard
+    history = list(state.get("call_history") or [])
+    if not guard.applies(durable=bool(state.get("durable"))):
+        return history, None
+
+    for entry in state["tools"]:
+        result = entry.get("result") or {}
+        call = entry["call"]
+        # A successful call to a tool that is not declared repeat-safe has had
+        # an effect, so whatever came before is no longer evidence of a loop.
+        # Re-running a test after an edit is the shape this protects.
+        if not result.get("is_error") and entry.get("policy") != "safe":
+            history = []
+            continue
+        history.append(call_signature(call["name"], call.get("input"), str(result.get("content", ""))))
+
+    if len(history) > guard.history:
+        history = history[-guard.history:]
+
+    period = detect_cycle(history, max_period=guard.max_period, threshold=guard.threshold)
+    if period is None:
+        return history, None
+    # Start again, so one cycle is reported once rather than on every call after.
+    return [], repetition_notice(period, guard.threshold)
+
+
+def notice_period(notice: str) -> int:
+    return 1 if "This exact call" in notice else int(notice.split("cycle of ")[1].split()[0])
 
 
 def retryable(agent, exc):

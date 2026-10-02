@@ -31,6 +31,7 @@ class HookEvent(Enum):
     CHECKPOINT = "checkpoint"
     RETRY = "retry"
     CONTEXT_CONDENSED = "context_condensed"
+    REPETITION = "repetition"
     ERROR = "error"
 
 
@@ -69,6 +70,14 @@ class ContextCondensedData(TypedDict):
     messages_dropped: int
     summary_chars: int
     summarized: bool  # False when the model summary failed and the fallback ran
+
+
+class RepetitionData(TypedDict):
+    """A repeating cycle of tool calls stopped producing new results."""
+
+    period: int  # 1 is the same call repeated; 2 is A, B, A, B
+    laps: int
+    tool: str
 
 
 class RetryData(TypedDict):
@@ -124,7 +133,7 @@ class CheckpointEventData(TypedDict):
 HookData = Union[
     AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
     ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, SandboxExecData,
-    CheckpointEventData, RetryData, ContextCondensedData,
+    CheckpointEventData, RetryData, ContextCondensedData, RepetitionData,
 ]
 
 HOOK_PAYLOADS: dict[HookEvent, type] = {
@@ -142,6 +151,7 @@ HOOK_PAYLOADS: dict[HookEvent, type] = {
     HookEvent.CHECKPOINT: CheckpointEventData,
     HookEvent.RETRY: RetryData,
     HookEvent.CONTEXT_CONDENSED: ContextCondensedData,
+    HookEvent.REPETITION: RepetitionData,
 }
 
 

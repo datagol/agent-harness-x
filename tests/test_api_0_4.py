@@ -500,6 +500,7 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
     # failure, an overflowing history. Each has its own test.
     missing = set(HOOK_PAYLOADS) - set(observed) - {
         HookEvent.SKILL_INVOKED, HookEvent.RETRY, HookEvent.CONTEXT_CONDENSED,
+        HookEvent.REPETITION,
     }
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():
