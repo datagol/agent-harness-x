@@ -4,6 +4,70 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] - 2026-10-02
+
+Loop reliability. Read four other agent harnesses -- OpenCode, Pi, Hermes and
+LangChain Deep Agents -- and fixed what the comparison exposed in ours. Nothing
+here needs configuring; the defaults change behavior for the better and each one
+can be switched off.
+
+### Added
+
+- `LoopGuard`, on by default, in `Limits(loop_guard=...)`. Watches for a
+  repeating cycle of tool calls up to `max_period` long, `threshold` times
+  running with the same arguments *and* the same results. A trip annotates the
+  tool result the model reads and fires `HookEvent.REPETITION`; it never fails
+  the run, which is what `Limits.max_iterations` is for.
+  `LoopGuard(enabled=False)` opts out.
+- A task list the model keeps and keeps seeing: `write_todos` and `read_todos`,
+  registered by default, with `AgentConfig(planning=False)` to opt out. The list
+  is rebuilt from the agent and merged into the tail of each request rather than
+  written into the system prompt, so ticking a task off never invalidates the
+  prompt cache, and condensing cannot summarize the list away. OpenCode persists
+  todos and never re-injects them, which is how an agent ends up believing in a
+  plan it can no longer read.
+- `edit_file`, `delete`, `glob` and `grep` in the filesystem bundle, bringing it
+  to parity with what Deep Agents, OpenCode and Hermes give a model. `edit_file`
+  refuses an ambiguous match rather than editing the wrong occurrence, which is
+  what makes it safe to prefer over rewriting a file whole. All four go through
+  the existing no-symlink-follow containment layer.
+- A `compact` phase. Condensing is now a real summary made by the agent's own
+  model, as its own command, rather than character-level truncation; the lossy
+  truncation remains as the fallback. Capped at `MAX_CONDENSATIONS` per turn, so
+  a summary that fails to shrink the history cannot re-trigger forever --
+  OpenCode has exactly that open as issue 15533.
+
+### Fixed
+
+- Tool calls are honored whatever the stop reason says. Providers return
+  `end_turn` or `stop` while still carrying tool calls; ending the turn there
+  dropped them silently and the run looked like the model had ignored its tools.
+- A reply cut off at `max_tokens` never executes its tool calls, whose arguments
+  may have been truncated mid-JSON and can parse while being incomplete.
+- No path leaves a `tool_use` block unanswered in the transcript. Anthropic
+  rejects the next request outright and the session is wedged; a fake provider
+  accepts it, which is why this went unnoticed. Cancellation already did this
+  correctly, so the block is now shared by the truncation guard and the generic
+  failure handler as `close_open_tool_calls`.
+- The loop guard watches every tool. It cleared its signature history on any
+  successful call to a tool whose replay policy was not `safe`, and the default
+  policy is `manual` -- so an agent stuck on `bash` or `write_file` was
+  invisible to it.
+- Condensing could never fire in an agentic conversation. The trim boundary
+  demanded a user message with no `tool_result` preceded by an assistant message
+  with no `tool_use`, which never occurs mid-tool-use; a six-round tool
+  conversation offered 0 safe boundaries where it should offer 9.
+- The summary call is accounted for and retried like any other model call. It
+  never called `track_usage`, so its tokens were invisible to
+  `Limits.max_cost_dollars`; and it was wrapped in its own try/except inside the
+  command, so the driver's retry never fired once.
+- The task reminder no longer produces two consecutive user turns on the wire.
+- Model retries now carry jitter, so concurrent agents that hit one rate limit
+  stop walking into the next one in lockstep. Permanently failing requests are
+  no longer retried.
+- Near-miss tool names are repaired rather than failed, and invalid arguments
+  come back to the model as one actionable line instead of stalling the run.
+
 ## [0.4.3] - 2026-09-29
 
 Retry seams. The engine has always had one retry loop; 0.4.3 keeps it there and
