@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Any
 from .bash import register_bash_tools, run_bash
 from .file_output import make_downloadable
 from .filesystem import (
+    delete,
+    edit_file,
     generate_file,
+    glob,
+    grep,
     list_directory,
     read_file,
     register_filesystem_tools,
@@ -56,7 +60,8 @@ def register_all_tools(
     Returns:
         List of registered tool names.
     """
-    filesystem_names = ["read_file", "write_file", "list_directory", "generate_file"]
+    filesystem_names = ["read_file", "write_file", "edit_file", "delete", "glob", "grep",
+                        "list_directory", "generate_file"]
     selected = select_tools(registry, filesystem_names + ["run_bash", "fetch_url", "save_memory", "recall_memories"],
                             include, exclude, replace=replace)
     registered: list[str] = []
@@ -116,6 +121,10 @@ __all__ = [
     "generate_file",
     "read_file",
     "write_file",
+    "edit_file",
+    "delete",
+    "glob",
+    "grep",
     "list_directory",
     "run_bash",
     "fetch_url",
