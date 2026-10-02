@@ -1,0 +1,114 @@
+"""A task list the agent keeps, and keeps seeing.
+
+Long runs lose the thread. The usual remedy is to let the agent write down what
+it intends to do and tick items off, which works only if the list is still in
+front of it fifty iterations later. OpenCode persists todos to a table and never
+puts them back into the conversation, so the list survives in storage while
+quietly vanishing from the model's view, taken out by the same compaction that
+truncates every other tool result. An agent that believes it has a plan it can
+no longer read is worse off than one with no plan at all.
+
+So two halves. The tools write the list onto the run state, where it is
+checkpointed with every phase and comes back on a durable resume. And the engine
+rebuilds a short reminder at the tail of the conversation each turn, which the
+condensation step preserves verbatim.
+
+The reminder goes at the tail, not into the system prompt. The system prompt
+heads the cacheable prefix, so rewriting it every time a task is ticked off would
+invalidate the prompt cache for the whole conversation.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from harnessx.types import PermissionLevel
+from ._registration import select_tools
+
+if TYPE_CHECKING:
+    from harnessx.tools import ToolRegistry
+
+STATUSES = ("pending", "in_progress", "completed")
+MAX_TODOS = 50
+MAX_CONTENT_CHARS = 200
+
+_MARK = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+
+
+def _agent():
+    """The agent running the current tool call, when there is one."""
+    from harnessx.execution import current_agent
+
+    return current_agent()
+
+
+def normalize(todos: Any) -> list[dict[str, str]]:
+    """Validate and clean a list the model supplied. Raises ValueError on junk."""
+    if not isinstance(todos, list):
+        raise ValueError("todos must be a list of {content, status} objects")
+    if len(todos) > MAX_TODOS:
+        raise ValueError(f"too many todos: {len(todos)}, the limit is {MAX_TODOS}")
+    cleaned: list[dict[str, str]] = []
+    for index, item in enumerate(todos):
+        if not isinstance(item, dict):
+            raise ValueError(f"todo {index} must be an object with content and status")
+        content = str(item.get("content", "")).strip()
+        if not content:
+            raise ValueError(f"todo {index} has no content")
+        status = str(item.get("status", "pending")).strip().lower()
+        if status not in STATUSES:
+            raise ValueError(f"todo {index} has status {status!r}; use one of {', '.join(STATUSES)}")
+        cleaned.append({"content": content[:MAX_CONTENT_CHARS], "status": status})
+    active = [item for item in cleaned if item["status"] == "in_progress"]
+    if len(active) > 1:
+        raise ValueError("only one todo may be in_progress at a time")
+    return cleaned
+
+
+def render(todos: list[dict[str, str]]) -> str:
+    """The reminder the model reads each turn."""
+    if not todos:
+        return ""
+    lines = [f"  {_MARK.get(item['status'], '[ ]')} {item['content']}" for item in todos]
+    done = sum(1 for item in todos if item["status"] == "completed")
+    return f"[Task list, {done}/{len(todos)} complete]\n" + "\n".join(lines)
+
+
+def register_planning_tools(
+    registry: ToolRegistry, *, include: list[str] | None = None,
+    exclude: list[str] | None = None, permission: PermissionLevel | None = None,
+    replace: bool = False,
+) -> list[str]:
+    """Register the task-list tools. The list itself lives on the run state."""
+    names = select_tools(registry, ["write_todos", "read_todos"], include, exclude, replace=replace)
+    if not names:
+        return []
+
+    async def write_todos(todos: list[dict]) -> str:
+        """Record the task list, replacing it entirely.
+
+        Send the whole list every time, including items already completed. Keep
+        exactly one item in_progress while you work on it.
+
+        Args:
+            todos: Objects of {"content": str, "status": "pending"|"in_progress"|"completed"}.
+        """
+        cleaned = normalize(todos)
+        agent = _agent()
+        if agent is not None:
+            agent.todos = cleaned
+        done = sum(1 for item in cleaned if item["status"] == "completed")
+        return f"Task list recorded: {done}/{len(cleaned)} complete."
+
+    async def read_todos() -> str:
+        """Read the current task list."""
+        agent = _agent()
+        return render(getattr(agent, "todos", []) or []) or "The task list is empty."
+
+    handlers = {"write_todos": write_todos, "read_todos": read_todos}
+    for name in names:
+        registry.register_tool(
+            handlers[name], name=name, permission=permission,
+            concurrent=False, replay_policy="safe", replace=replace,
+        )
+    return names

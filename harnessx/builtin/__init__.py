@@ -14,6 +14,7 @@ from .filesystem import (
     write_file,
 )
 from .memory import recall_memories, register_memory_tools, save_memory
+from .planning import register_planning_tools
 from .web import fetch_url, register_web_tools
 from ._registration import select_tools
 
@@ -110,6 +111,7 @@ __all__ = [
     "register_bash_tools",
     "register_web_tools",
     "register_memory_tools",
+    "register_planning_tools",
     # Standalone tools
     "generate_file",
     "read_file",

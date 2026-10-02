@@ -299,6 +299,21 @@ def current_tool_context() -> ToolExecutionContext:
     return context
 
 
+_agent_context: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "harness_agent", default=None
+)
+
+
+def current_agent() -> Any | None:
+    """The agent running the current tool call, or None outside a run.
+
+    Built-in tools that keep run-scoped state use this to reach it. Application
+    tools should close over what they need instead; this is not a service
+    locator for arbitrary agent access.
+    """
+    return _agent_context.get()
+
+
 def next_command(state: dict) -> str:
     """Pure, shared by the in-process driver and Temporal workflow replay."""
     if state["status"] != "running":

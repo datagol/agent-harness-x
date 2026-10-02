@@ -10,7 +10,8 @@ import pytest
 from harnessx import Agent, AgentConfig, HookEvent, PermissionLevel, ProviderResponse, ToolCall
 from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
-from harnessx.providers import LLMProvider  # noqa: F401
+from harnessx.builtin.planning import render
+from harnessx.providers import LLMProvider
 from harnessx.types import ToolResult
 
 
@@ -512,3 +513,118 @@ def test_the_guard_decides_its_own_posture():
     assert not LoopGuard(enabled=False).applies(durable=True)
     with pytest.raises(Exception):
         LoopGuard(threshold=1)
+
+
+# ── a task list the model keeps seeing ──────────────────────────────────────
+
+
+TODOS = [
+    {"content": "research", "status": "completed"},
+    {"content": "write the report", "status": "in_progress"},
+    {"content": "ship", "status": "pending"},
+]
+
+
+def test_a_task_list_is_validated_before_it_is_believed():
+    from harnessx.builtin.planning import normalize
+
+    assert len(normalize(TODOS)) == 3
+    assert "[x] research" in render(normalize(TODOS))
+    assert "1/3 complete" in render(normalize(TODOS))
+    assert render([]) == ""
+
+    for bad, because in [
+        ([{"content": "a", "status": "in_progress"}, {"content": "b", "status": "in_progress"}],
+         "two items cannot both be in progress"),
+        ([{"content": "", "status": "pending"}], "an item needs content"),
+        ([{"content": "a", "status": "done"}], "status must be one of the three"),
+        ("not a list", "the whole thing must be a list"),
+    ]:
+        with pytest.raises(ValueError):
+            normalize(bad)
+        assert because
+
+
+def _planning_agent(script):
+    provider = Scripted(script)
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    agent.tools.load_builtin("planning", permission=PermissionLevel.ALLOW)
+    return agent, provider
+
+
+@pytest.mark.asyncio
+async def test_the_list_is_sent_with_every_later_request():
+    """OpenCode persists todos and never re-injects them, so compaction eats the
+    tool result and the list silently vanishes from the model's view. An agent
+    that believes it has a plan it can no longer read is worse off than one with
+    no plan."""
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
+        ProviderResponse(text="planned"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+        await agent.run("carry on")
+
+    tail = provider.calls[-1]["messages"][-1]
+    assert tail["role"] == "user", "never an assistant turn"
+    assert "write the report" in str(tail["content"])
+    assert "1/3 complete" in str(tail["content"])
+
+
+@pytest.mark.asyncio
+async def test_the_reminder_stays_out_of_the_system_prompt():
+    """The system prompt heads the cacheable prefix, so putting the list there
+    would invalidate the prompt cache every time a task is ticked off."""
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
+        ProviderResponse(text="planned"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+        await agent.run("carry on")
+
+    systems = {str(call["system"]) for call in provider.calls}
+    assert len(systems) == 1, "the system prompt must not change as the list changes"
+    assert "write the report" not in systems.pop()
+
+
+@pytest.mark.asyncio
+async def test_the_list_outlives_condensing():
+    """Condensing rewrites history. The list is rebuilt from the agent each
+    turn, so it cannot be summarized away."""
+    from harnessx import Limits
+
+    provider = _Overflowing()
+    agent = Agent(
+        config=AgentConfig(model="m", max_tokens=1000, limits=Limits(max_context_tokens=10_000)),
+        provider=provider,
+    )
+    agent.tools.load_builtin("planning", permission=PermissionLevel.ALLOW)
+    agent.todos = list(TODOS)
+
+    async with agent:
+        for turn in range(5):
+            await agent.run(f"turn {turn}")
+
+    assert provider.summary_calls, "this test is only meaningful if condensing happened"
+    assert agent.todos == TODOS, "the list is held on the agent, not in the transcript"
+    assert "write the report" in render(agent.todos)
+
+
+@pytest.mark.asyncio
+async def test_no_reminder_when_nothing_is_planned():
+    agent, provider = _planning_agent([ProviderResponse(text="done")])
+    async with agent:
+        await agent.run("just answer")
+    assert "Task list" not in str(provider.calls[-1]["messages"])
+
+
+def test_the_bundle_is_opt_in():
+    from harnessx import ToolRegistry
+
+    assert "write_todos" not in ToolRegistry().list_tools()
+    registry = ToolRegistry()
+    assert set(registry.load_builtin("planning")) == {"write_todos", "read_todos"}

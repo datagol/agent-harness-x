@@ -13,6 +13,7 @@ from .execution import (
     RunEvent,
     RunEventType as E,
     ToolExecutionContext,
+    _agent_context,
     _tool_context,
     ToolApprovalRequired,
     cancel_state,
@@ -96,6 +97,7 @@ async def snapshot(agent) -> dict:
                 "extensions": extensions,
                 "total_usage": agent.guardrails.total_usage,
                 "lifetime_iterations": agent.guardrails.lifetime_iterations,
+                "todos": list(getattr(agent, "todos", []) or []),
             }
         ),
     )
@@ -111,6 +113,7 @@ async def restore(agent, state):
     agent.guardrails._total_usage = TokenUsage(**state.get("total_usage", {}))
     agent.guardrails._iteration_count = state.get("iterations", 0)
     agent.guardrails._lifetime_iterations = state.get("lifetime_iterations", 0)
+    agent.todos = copy.deepcopy(state.get("todos", []) or [])
     for ext in agent.extensions:
         if ext.name in state.get("extensions", {}):
             await ext.on_load_session(
@@ -137,6 +140,9 @@ def new_state(agent, message, *, run_id=None, durable=False):
         "attempt": 0,
         "usage_incomplete": False,
         "call_history": [],
+        # Carried between runs in a session, the way messages are: a task list
+        # that reset every turn would be no better than not having one.
+        "todos": copy.deepcopy(getattr(agent, "todos", []) or []),
     }
 
 
@@ -206,6 +212,7 @@ async def command(agent, state, name, emit, *, record=None):
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools
         )
+        messages = with_task_reminder(agent, messages)
         return {
             **await snapshot(agent),
             "iterations": agent.guardrails.iteration_count,
@@ -478,6 +485,7 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         state["session_id"], state["run_id"], entry["execution_key"], entry["attempt"]
     )
     token = _tool_context.set(context)
+    agent_token = _agent_context.set(agent)
     try:
         if record:
             await record("tool.dispatched", {"call": entry["call"]}, entry)
@@ -495,6 +503,7 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         return wire(result)
     finally:
         _tool_context.reset(token)
+        _agent_context.reset(agent_token)
 
 
 async def finish_tool(agent, entry):
@@ -831,6 +840,28 @@ def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> st
 def _preview(value, limit: int = 200) -> str:
     text = str(value if value is not None else "")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def with_task_reminder(agent, messages: list[dict]) -> list[dict]:
+    """Append the current task list, when there is one.
+
+    At the tail rather than in the system prompt: the system prompt heads the
+    cacheable prefix, so rewriting it every time a task is ticked off would
+    invalidate the prompt cache for the whole conversation. Appending leaves the
+    prefix untouched.
+
+    Rebuilt from the agent each turn, so the model always reads the current list
+    rather than whichever copy survived condensing.
+    """
+    todos = getattr(agent, "todos", None)
+    if not todos:
+        return messages
+    from .builtin.planning import render
+
+    reminder = render(todos)
+    if not reminder:
+        return messages
+    return [*messages, {"role": "user", "content": reminder}]
 
 
 def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:

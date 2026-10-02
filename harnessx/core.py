@@ -101,6 +101,9 @@ class Agent:
         )
         self._session_id = str(uuid.uuid4())
         self.prompt_providers: list[Any] = []
+        # The task list the planning tools maintain. Snapshotted with the run, so
+        # it survives a durable resume; empty unless the bundle is loaded.
+        self.todos: list[dict[str, str]] = []
         self.session_metadata: dict[str, Any] = {}
 
         if skills is not None:
