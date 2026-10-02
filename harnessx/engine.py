@@ -888,6 +888,21 @@ def with_task_reminder(agent, messages: list[dict]) -> list[dict]:
     reminder = render(todos)
     if not reminder:
         return messages
+    # Merge into the last message when it is already user-role, rather than
+    # appending a second one. A tool-result message is user-role too, so
+    # appending produced two consecutive user turns on every agentic turn.
+    # Anthropic tolerates that; other providers are stricter, and a declared
+    # fallback can be any of them.
+    if messages and messages[-1].get("role") == "user":
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            merged = {**last, "content": f"{content}\n\n{reminder}"}
+        elif isinstance(content, list):
+            merged = {**last, "content": [*content, {"type": "text", "text": reminder}]}
+        else:
+            return [*messages, {"role": "user", "content": reminder}]
+        return [*messages[:-1], merged]
     return [*messages, {"role": "user", "content": reminder}]
 
 

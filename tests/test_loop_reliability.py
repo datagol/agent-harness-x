@@ -767,6 +767,46 @@ async def test_the_list_is_sent_with_every_later_request():
 
 
 @pytest.mark.asyncio
+async def test_no_request_ever_carries_two_user_turns_in_a_row():
+    """A tool-result message is user-role, so appending the reminder after one
+    produced ['user', 'assistant', 'user', 'user']. Anthropic tolerates it;
+    other providers do not, and a declared fallback can be any of them."""
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c2", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
+        ProviderResponse(text="planned"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+        await agent.run("carry on")
+
+    for call in provider.calls:
+        roles = [m["role"] for m in call["messages"]]
+        assert all(a != b for a, b in zip(roles, roles[1:])), roles
+
+
+@pytest.mark.asyncio
+async def test_the_reminder_rides_along_with_the_tool_result_it_follows():
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
+        ProviderResponse(text="planned"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+
+    tail = provider.calls[-1]["messages"][-1]
+    kinds = [b["type"] for b in tail["content"]]
+    assert kinds == ["tool_result", "text"], "merged into the message, not appended after it"
+    assert "1/3 complete" in tail["content"][-1]["text"]
+    # The transcript itself is untouched; the reminder is outbound only.
+    stored = [m for m in agent.memory.get_messages() if isinstance(m.get("content"), list)]
+    assert all(
+        b["type"] != "text" for m in stored for b in m["content"] if m["role"] == "user"
+    ), "the merge must not write the reminder back into memory"
+
+
+@pytest.mark.asyncio
 async def test_the_reminder_stays_out_of_the_system_prompt():
     """The system prompt heads the cacheable prefix, so putting the list there
     would invalidate the prompt cache every time a task is ticked off."""
