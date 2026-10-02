@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from harnessx import Agent, AgentConfig, HookEvent, PermissionLevel, ProviderResponse, ToolCall
+from harnessx import Agent, AgentConfig, HookEvent, Limits, PermissionLevel, ProviderResponse, ToolCall
 from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
 from harnessx.builtin.planning import render
@@ -302,6 +302,91 @@ async def test_a_failed_summary_falls_back_instead_of_failing_the_run():
 
     assert events and events[-1]["summarized"] is False
     assert "condensed" in str(agent.memory.get_messages()[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_summary_is_retried_before_the_run_gives_up_on_it():
+    """`compact` was added to the driver's retryable commands and then wrapped
+    in its own try/except, so the exception never reached the driver and the
+    retry never fired. The fallback belongs after the attempts, not instead."""
+    from harnessx import RetryPolicy
+
+    provider = _Overflowing(fail_summary=True)
+    agent = Agent(
+        config=AgentConfig(
+            model="m", max_tokens=1000,
+            limits=Limits(max_context_tokens=10_000),
+            retry=RetryPolicy(attempts=3, backoff_seconds=0.001, max_backoff_seconds=0.001),
+        ),
+        provider=provider,
+    )
+    waits: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.RETRY, lambda ctx: waits.append(dict(ctx.data)))
+
+    async with agent:
+        for turn in range(4):
+            result = await agent.run(f"turn {turn}")
+
+    assert result.ok, "the run still survives a summary that never succeeds"
+    assert len(provider.summary_calls) >= 3, "every attempt is spent before the fallback"
+    assert len(waits) >= 2 and {w["kind"] for w in waits} == {"model"}
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_succeeds_on_the_second_try_is_kept():
+    from harnessx import RetryPolicy
+
+    class Flaky(_Overflowing):
+        async def create(self, **kwargs):
+            if self._is_summary(kwargs) and not self.summary_calls:
+                self.summary_calls.append(kwargs)
+                raise RuntimeError("summarizer unavailable")
+            return await super().create(**kwargs)
+
+    provider = Flaky()
+    agent = Agent(
+        config=AgentConfig(
+            model="m", max_tokens=1000,
+            limits=Limits(max_context_tokens=10_000),
+            retry=RetryPolicy(attempts=3, backoff_seconds=0.001, max_backoff_seconds=0.001),
+        ),
+        provider=provider,
+    )
+    events: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.CONTEXT_CONDENSED, lambda ctx: events.append(dict(ctx.data)))
+    async with agent:
+        for turn in range(4):
+            await agent.run(f"turn {turn}")
+
+    assert events[0]["summarized"] is True
+    assert "TASK: ship it" in str(agent.memory.get_messages()[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_summary_tokens_are_counted_like_any_other_model_call():
+    """The summary is a real call to the agent's model. Leaving its tokens out
+    of the accounting hid that spend from `Limits.max_cost_dollars`."""
+    from harnessx.types import TokenUsage
+
+    class Metered(_Overflowing):
+        async def create(self, **kwargs):
+            response = await super().create(**kwargs)
+            cost = 500 if self._is_summary(kwargs) else 10
+            return ProviderResponse(
+                text=response.text, tool_calls=response.tool_calls,
+                stop_reason=response.stop_reason,
+                usage=TokenUsage(input_tokens=cost, output_tokens=cost),
+            )
+
+    provider = Metered()
+    agent = _overflowing_agent(provider)
+    async with agent:
+        for turn in range(4):
+            result = await agent.run(f"turn {turn}")
+
+    assert provider.summary_calls, "the summary ran, or this proves nothing"
+    assert result.usage.input_tokens >= 500, "summary tokens reach RunResult.usage"
+    assert agent.guardrails._total_usage.input_tokens >= 500, "and the cost guardrail"
 
 
 @pytest.mark.asyncio

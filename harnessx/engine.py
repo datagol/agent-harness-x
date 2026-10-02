@@ -235,15 +235,15 @@ async def command(agent, state, name, emit, *, record=None):
 
     if name == "compact":
         dropped, split_point = agent.memory.pending_condensation()
-        summary = ""
+        summary, usage = "", state["usage"]
         if split_point:
-            try:
-                summary = await summarize_history(agent, dropped)
-            except Exception:
-                # A failed summary must not fail the run. Fall back to the
-                # character-level condensation, which is lossy but always works.
-                logger.warning("history summarization failed; condensing without a model", exc_info=True)
-                summary = ""
+            if not state.get("condense_without_model"):
+                # A failure here propagates, so the driver retries it under
+                # RetryPolicy like any other model call. Catching it inside the
+                # command is what defeated that retry entirely; the lossy
+                # fallback runs only once the attempts are spent.
+                summary, summary_usage = await summarize_history(agent, dropped)
+                usage = {k: usage.get(k, 0) + v for k, v in asdict(summary_usage).items()}
             if summary:
                 agent.memory.apply_condensation(summary, split_point)
             else:
@@ -261,7 +261,9 @@ async def command(agent, state, name, emit, *, record=None):
         return {
             **await snapshot(agent),
             "phase": "prepare_model",
+            "usage": usage,
             "condensations": state.get("condensations", 0) + 1,
+            "condense_without_model": False,
         }
 
     if name == "model":
@@ -716,7 +718,7 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     state["status"] = "awaiting_input"
                     break
                 name = "collect_tools"
-            if name == "model":
+            if name in ("model", "compact"):
                 if state["attempt"]:
                     state["usage_incomplete"] = True
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
@@ -742,7 +744,18 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    if name not in ("model", "compact") or not retryable(agent, exc) or state["attempt"] >= retry.attempts:
+                    spent = not retryable(agent, exc) or state["attempt"] >= retry.attempts
+                    if name == "compact" and spent:
+                        # A failed summary must not fail the run. Condense at the
+                        # character level instead: lossy, but it always works.
+                        logger.warning(
+                            "history summarization failed after %d attempt(s); "
+                            "condensing without a model", state["attempt"], exc_info=True,
+                        )
+                        state["condense_without_model"] = True
+                        buffered_events.clear()
+                        continue
+                    if name not in ("model", "compact") or spent:
                         raise
                     wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
                     await emit_hook(
@@ -798,11 +811,16 @@ async def drive(agent, state, emit, *, commit=None, control=None):
     return result
 
 
-async def summarize_history(agent, dropped: list[dict]) -> str:
-    """Summarize the messages a condensation is about to drop, using the agent's model."""
+async def summarize_history(agent, dropped: list[dict]) -> tuple[str, TokenUsage]:
+    """Summarize the messages a condensation is about to drop, using the agent's model.
+
+    Returns the summary and what it cost. The summary is a real model call, so
+    its tokens go through `track_usage` and into `RunResult.usage` like any
+    other; leaving them out hid spend from `Limits.max_cost_dollars`.
+    """
     transcript = render_for_summary(dropped)
     if not transcript.strip():
-        return ""
+        return "", TokenUsage()
     budget = min(2_000, agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model))
     response = await agent.provider.create(
         model=agent.config.model,
@@ -812,7 +830,9 @@ async def summarize_history(agent, dropped: list[dict]) -> str:
         max_tokens=budget,
         temperature=agent.config.temperature,
     )
-    return (getattr(response, "text", "") or "").strip()
+    usage = getattr(response, "usage", None) or TokenUsage()
+    agent.guardrails.track_usage(usage)
+    return (getattr(response, "text", "") or "").strip(), usage
 
 
 def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> str:
