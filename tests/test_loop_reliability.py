@@ -994,3 +994,31 @@ async def test_a_mid_turn_failure_leaves_a_transcript_a_provider_will_accept():
 
     assert result.status.value == "failed"
     assert not _unanswered(agent.memory.get_messages())
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_condensation_that_also_fails_raises_rather_than_looping():
+    """The fallback is tried once. Retrying it on its own failure would spin in
+    the driver forever with nothing to show for it."""
+    from harnessx import RetryPolicy
+
+    provider = _Overflowing(fail_summary=True)
+    agent = Agent(
+        config=AgentConfig(
+            model="m", max_tokens=1000,
+            limits=Limits(max_context_tokens=10_000),
+            retry=RetryPolicy(attempts=2, backoff_seconds=0.001, max_backoff_seconds=0.001),
+        ),
+        provider=provider,
+    )
+
+    async def refuse(*args, **kwargs):
+        raise RuntimeError("cannot trim either")
+
+    agent.memory.trim_if_needed = refuse
+
+    async with agent:
+        for turn in range(4):
+            result = await agent.run(f"turn {turn}")
+    assert result.status.value == "failed"
+    assert "cannot trim either" in str(result.error)

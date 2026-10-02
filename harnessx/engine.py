@@ -745,13 +745,15 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                         })
                     retry = agent.config.retry
                     spent = not retryable(agent, exc) or state["attempt"] >= retry.attempts
-                    if name == "compact" and spent:
+                    if name == "compact" and spent and not state.get("condense_without_model"):
                         # A failed summary must not fail the run. Condense at the
                         # character level instead: lossy, but it always works.
                         logger.warning(
                             "history summarization failed after %d attempt(s); "
                             "condensing without a model", state["attempt"], exc_info=True,
                         )
+                        # Set before retrying, and checked above, so a fallback
+                        # that itself fails raises rather than looping here.
                         state["condense_without_model"] = True
                         buffered_events.clear()
                         continue
