@@ -167,6 +167,7 @@ async def command(agent, state, name, emit, *, record=None):
         await agent.memory.trim_if_needed(
             agent.provider, agent.config.model, system, tools,
             max_context_tokens=agent.config.limits.max_context_tokens,
+            reply_tokens=agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model),
         )
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools

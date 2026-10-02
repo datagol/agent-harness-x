@@ -313,7 +313,14 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
         state["phase"] = "model"
     elif command == "model":
         response = state["response"]
-        if response["stop_reason"] == "tool_use" and response["tool_calls"]:
+        # Trust the tool calls, not the stop reason. Providers return "end_turn"
+        # or "stop" while still carrying tool calls; ending the turn there drops
+        # them silently and the run looks like the model ignored its tools.
+        # A reply cut off at max_tokens is the exception: its tool arguments may
+        # have been truncated mid-JSON and can parse while being incomplete, so
+        # those calls are never executed.
+        truncated = response["stop_reason"] == "max_tokens"
+        if response["tool_calls"] and not truncated:
             state["phase"] = "prepare_tools"
         else:
             state.update(

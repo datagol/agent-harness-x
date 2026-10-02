@@ -249,11 +249,14 @@ class ConversationMemory:
         system: str | None,
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
+        reply_tokens: int = 0,
     ) -> bool:
-        """If token count approaches limit, summarize older messages.
+        """If the next request would not fit, condense older messages.
 
-        Uses the provider's count_tokens; falls back to a size heuristic when
-        counting fails. Returns True if trimming was performed.
+        The budget is the context window minus the reply the model is about to
+        write, because the provider reserves output from the same window: a
+        request can sit under a threshold measured against the raw window and
+        still overflow. Returns True if the history was condensed.
         """
         if len(self._messages) < 6:
             return False
@@ -266,9 +269,14 @@ class ConversationMemory:
                 messages=self.get_messages(),
             )
         except Exception:
-            token_count = len(str(self._messages)) // 3
+            # A failed count used to fall back to a character heuristic, which
+            # silently disabled the guard whenever it read low. Treat an unknown
+            # count as over budget: condensing early is cheap, overflowing is not.
+            logger.warning("count_tokens failed; condensing history as a precaution", exc_info=True)
+            token_count = None
 
-        if token_count < max_context_tokens * 0.8:
+        budget = max(1, max_context_tokens - max(0, reply_tokens))
+        if token_count is not None and token_count < budget * 0.8:
             return False
 
         # Find a clean boundary that preserves alternating roles and tool call pairs
@@ -281,11 +289,20 @@ class ConversationMemory:
 
         summary_text = self._create_summary(to_summarize)
 
-        self._messages = [
-            Message("user", f"[Previous conversation summary]\n{summary_text}"),
-            Message("assistant", [{"type": "text", "text": "Understood, I have the context from our previous conversation. How can I help?"}]),
-            *to_keep,
-        ]
+        # Never synthesize an assistant turn. An assistant message is the
+        # model's own voice, so putting words there mid-run changes what the
+        # model believes it just said, and the previous text ("How can I help?")
+        # read as an instruction to stop working on an autonomous task.
+        #
+        # Prepend the note to the first kept message when that message is the
+        # user's, rather than inserting one. That keeps roles alternating and
+        # adds no message the conversation did not already have.
+        note = f"[Earlier conversation, condensed]\n{summary_text}"
+        first = to_keep[0] if to_keep else None
+        if first is not None and first.role == "user" and isinstance(first.content, str):
+            self._messages = [Message("user", f"{note}\n\n{first.content}"), *to_keep[1:]]
+        else:
+            self._messages = [Message("user", note), *to_keep]
         return True
 
     def _find_safe_trim_boundary(self, min_keep: int = 4) -> int:
