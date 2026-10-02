@@ -687,7 +687,9 @@ async def test_llm_request_hook_carries_the_request_as_sent():
     payload = seen[0]
     assert payload["system"].startswith("Be terse.") and payload["model"] == config.model
     assert (payload["max_tokens"], payload["temperature"], payload["stream"]) == (99, 0.2, False)
-    assert payload["message_count"] == 1 and payload["tool_count"] == 1 and isinstance(payload["prefix_key"], str)  # the built-in reader
+    assert payload["message_count"] == 1 and isinstance(payload["prefix_key"], str)
+    # read_tool_result plus the two planning tools, all registered by the Agent itself.
+    assert payload["tool_count"] == 3
 
 
 @pytest.mark.asyncio

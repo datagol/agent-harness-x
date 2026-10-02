@@ -565,6 +565,9 @@ class AgentConfig:
 
     model: str = "claude-sonnet-4-6"
     provider: str = "anthropic"  # a built-in name or one passed to register_provider()
+    # Give the agent a task list it writes and the harness keeps showing it.
+    # Set False for an agent whose work is never multi-step.
+    planning: bool = True
     # Providers to try, in order, when the primary fails transiently. Empty means
     # no failover. RetryPolicy.switch_after and .cooldown_seconds govern the chain.
     fallbacks: tuple[Fallback, ...] = ()
@@ -582,6 +585,7 @@ class AgentConfig:
         provider: str = "anthropic",
         max_tokens: int | None = None,
         *,
+        planning: bool = True,
         fallbacks: Sequence[Fallback | Mapping[str, Any]] = (),
         system_prompt: str = "You are a helpful assistant.",
         temperature: float | None = None,
@@ -601,6 +605,7 @@ class AgentConfig:
         model_timeout_seconds: float | None = None,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.planning = planning
         self.fallbacks = tuple(
             item if isinstance(item, Fallback) else Fallback(**dict(item)) for item in fallbacks
         )
@@ -644,6 +649,8 @@ class AgentConfig:
     def __post_init__(self) -> None:
         from .providers.registry import is_known_provider
 
+        if type(self.planning) is not bool:
+            raise TypeError("planning must be a bool")
         for item in self.fallbacks:
             if not isinstance(item, Fallback):
                 raise ConfigurationError("AgentConfig.fallbacks must contain Fallback entries")

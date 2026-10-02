@@ -89,6 +89,7 @@ class Agent:
         self._owns_memory = memory is None
         self.memory = memory or ConversationMemory(max_result_chars=self.config.limits.max_result_chars)
         self._register_result_reader()
+        self._register_planning_tools()
         self.permissions = permissions or PermissionManager()
         self.hooks = hooks or HookManager()
         self.middleware = middleware or MiddlewarePipeline()
@@ -118,6 +119,27 @@ class Agent:
         # existing (and on skill bodies having been appended to the system
         # prompt). Stored for later teardown via aclose().
         self.extensions = install_extensions(self, extensions)
+
+    def _register_planning_tools(self) -> None:
+        """Give the agent a task list, unless the application opted out or has its own.
+
+        On by default because a multi-step agent that cannot write down what it
+        is doing loses the thread, and the tools are useless to one that never
+        needs them: the reminder only appears once a list exists.
+        """
+        if not self.config.planning:
+            return
+        from .builtin.planning import register_planning_tools
+
+        wanted = [
+            name for name in ("write_todos", "read_todos")
+            if not self.tools.has_tool(name)
+            or getattr(self.tools.get_tool(name).handler, "__harnessx_builtin__", False)
+        ]
+        if wanted:
+            register_planning_tools(
+                self.tools, include=wanted, permission=PermissionLevel.ALLOW, replace=True,
+            )
 
     def _register_result_reader(self) -> None:
         """Give the model a way back into tool results that were too large for the context.

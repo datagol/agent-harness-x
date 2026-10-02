@@ -546,10 +546,9 @@ def test_a_task_list_is_validated_before_it_is_believed():
 
 
 def _planning_agent(script):
+    # Planning is on by default; nothing to load.
     provider = Scripted(script)
-    agent = Agent(config=AgentConfig(model="m"), provider=provider)
-    agent.tools.load_builtin("planning", permission=PermissionLevel.ALLOW)
-    return agent, provider
+    return Agent(config=AgentConfig(model="m"), provider=provider), provider
 
 
 @pytest.mark.asyncio
@@ -602,7 +601,6 @@ async def test_the_list_outlives_condensing():
         config=AgentConfig(model="m", max_tokens=1000, limits=Limits(max_context_tokens=10_000)),
         provider=provider,
     )
-    agent.tools.load_builtin("planning", permission=PermissionLevel.ALLOW)
     agent.todos = list(TODOS)
 
     async with agent:
@@ -622,12 +620,51 @@ async def test_no_reminder_when_nothing_is_planned():
     assert "Task list" not in str(provider.calls[-1]["messages"])
 
 
-def test_the_bundle_is_opt_in():
+def test_planning_is_on_by_default_and_can_be_turned_off():
     from harnessx import ToolRegistry
+    from harnessx.providers import LLMProvider
 
+    class Quiet(LLMProvider):
+        name = "quiet"
+
+        async def create(self, **kwargs):
+            raise AssertionError("not called")
+
+        async def count_tokens(self, **kwargs):
+            return 0
+
+    on = Agent(provider=Quiet())
+    assert {"write_todos", "read_todos"} <= set(on.tools.list_tools())
+
+    off = Agent(config=AgentConfig(planning=False), provider=Quiet())
+    assert not {"write_todos", "read_todos"} & set(off.tools.list_tools())
+
+    # A registry on its own stays bare; the Agent is what adds them.
     assert "write_todos" not in ToolRegistry().list_tools()
+    assert set(ToolRegistry().load_builtin("planning")) == {"write_todos", "read_todos"}
+
+
+def test_an_application_tool_of_the_same_name_wins():
+    from harnessx import ToolRegistry
+    from harnessx.providers import LLMProvider
+
+    class Quiet(LLMProvider):
+        name = "quiet"
+
+        async def create(self, **kwargs):
+            raise AssertionError("not called")
+
+        async def count_tokens(self, **kwargs):
+            return 0
+
     registry = ToolRegistry()
-    assert set(registry.load_builtin("planning")) == {"write_todos", "read_todos"}
+    registry.register_with_schema(
+        "write_todos", "the application's own", {"type": "object", "properties": {}},
+        lambda: "mine", permission=PermissionLevel.ALLOW,
+    )
+    agent = Agent(tools=registry, provider=Quiet())
+    assert agent.tools.get_tool("write_todos").description == "the application's own"
+    assert "read_todos" in agent.tools.list_tools(), "the other default is still added"
 
 
 # ── a tool-heavy conversation can actually be condensed ─────────────────────

@@ -87,6 +87,10 @@ def register_planning_tools(
     async def write_todos(todos: list[dict]) -> str:
         """Record the task list, replacing it entirely.
 
+        Use this for work with several distinct steps, and keep it current as you
+        go. Skip it for anything you can finish in one or two steps: a task list
+        for trivial work is noise.
+
         Send the whole list every time, including items already completed. Keep
         exactly one item in_progress while you work on it.
 
@@ -107,8 +111,12 @@ def register_planning_tools(
 
     handlers = {"write_todos": write_todos, "read_todos": read_todos}
     for name in names:
+        handler = handlers[name]
+        # Tagged so an Agent can tell its own default apart from one the
+        # application registered under the same name, and leave that one alone.
+        handler.__harnessx_builtin__ = True  # type: ignore[attr-defined]
         registry.register_tool(
-            handlers[name], name=name, permission=permission,
+            handler, name=name, permission=permission,
             concurrent=False, replay_policy="safe", replace=replace,
         )
     return names
