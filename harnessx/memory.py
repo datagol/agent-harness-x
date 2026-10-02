@@ -357,39 +357,44 @@ class ConversationMemory:
         return True
 
     def _find_safe_trim_boundary(self, min_keep: int = 4) -> int:
-        """Walk backwards to find a safe boundary where no tool call/result pairs are severed."""
+        """The latest index the history can be cut at without breaking a pair.
+
+        The only hard rule the providers impose is that a tool_use and its
+        tool_result stay together. So a cut is valid when the dropped prefix is
+        self-contained: every tool call it makes is also answered inside it.
+        Anything else, including a tail that starts with an assistant turn, is
+        fine, because the condensed note is prepended as a user message.
+
+        The previous rule also demanded the cut land on a plain user message
+        preceded by a plain assistant message. In an agentic conversation almost
+        every user message carries a tool result and almost every assistant
+        message makes a tool call, so no such point existed and condensing
+        silently never ran for precisely the runs that needed it.
+        """
         total = len(self._messages)
         if total <= min_keep:
             return 0
-
-        split_idx = total - min_keep
-        while split_idx > 0:
-            msg = self._messages[split_idx]
-            prev_msg = self._messages[split_idx - 1]
-
-            # Check if msg is a user message containing tool results
-            is_tool_result = False
-            content = msg.get("content")
-            if isinstance(content, list):
-                is_tool_result = any(
-                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-                )
-
-            # Safe boundary: target message is a user message that does NOT contain tool results,
-            # and the previous message was an assistant message without tool use.
-            if msg.get("role") == "user" and not is_tool_result:
-                if prev_msg.get("role") == "assistant":
-                    prev_content = prev_msg.get("content")
-                    prev_has_tool_use = False
-                    if isinstance(prev_content, list):
-                        prev_has_tool_use = any(
-                            isinstance(b, dict) and b.get("type") == "tool_use" for b in prev_content
-                        )
-                    if not prev_has_tool_use:
-                        return split_idx
-            split_idx -= 1
-
+        for split_idx in range(total - min_keep, 0, -1):
+            if self._prefix_is_self_contained(split_idx):
+                return split_idx
         return 0
+
+    def _prefix_is_self_contained(self, split_idx: int) -> bool:
+        """True when no tool call before ``split_idx`` is answered after it."""
+        called: set[str] = set()
+        answered: set[str] = set()
+        for message in self._messages[:split_idx]:
+            content = message.content
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("id"):
+                    called.add(str(block["id"]))
+                elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                    answered.add(str(block["tool_use_id"]))
+        return called <= answered
 
     def _create_summary(self, messages: list[dict[str, Any]]) -> str:
         """Create a simple text summary of messages."""

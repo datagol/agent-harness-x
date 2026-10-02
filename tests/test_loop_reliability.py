@@ -628,3 +628,72 @@ def test_the_bundle_is_opt_in():
     assert "write_todos" not in ToolRegistry().list_tools()
     registry = ToolRegistry()
     assert set(registry.load_builtin("planning")) == {"write_todos", "read_todos"}
+
+
+# ── a tool-heavy conversation can actually be condensed ─────────────────────
+
+
+def _tool_heavy(rounds: int = 6) -> ConversationMemory:
+    """The shape every agentic run has: each user turn carries a tool result,
+    each assistant turn makes a tool call."""
+    memory = ConversationMemory()
+    memory.add_user_message("do the research")
+    for index in range(rounds):
+        memory.add_assistant_message(
+            [{"type": "tool_use", "id": f"t{index}", "name": "search", "input": {}}]
+        )
+        memory.add_tool_results([ToolResult(tool_call_id=f"t{index}", content="results " * 50)])
+    memory.add_assistant_message([{"type": "text", "text": "done"}])
+    return memory
+
+
+def test_a_tool_heavy_conversation_has_somewhere_to_cut():
+    """The old rule wanted a plain user message preceded by a plain assistant
+    message. In an agentic run no such point exists, so condensing silently
+    never ran for precisely the conversations that needed it."""
+    memory = _tool_heavy()
+    assert memory._find_safe_trim_boundary(min_keep=4) > 0
+
+
+def test_condensing_never_separates_a_tool_call_from_its_result():
+    """The one rule the providers actually impose."""
+    memory = _tool_heavy()
+    dropped, split = memory.pending_condensation()
+    assert split > 0 and dropped
+
+    def ids(kind: str, key: str) -> set[str]:
+        found = set()
+        for message in dropped:
+            content = message["content"]
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == kind:
+                    found.add(str(block[key]))
+        return found
+
+    assert ids("tool_use", "id") <= ids("tool_result", "tool_use_id"), (
+        "every call in the dropped prefix must be answered inside it"
+    )
+
+    memory.apply_condensation("SUMMARY", split)
+    kept = memory.get_messages()
+    answered = {
+        str(block["tool_use_id"])
+        for message in kept
+        for block in (message["content"] if isinstance(message["content"], list) else [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    called = {
+        str(block["id"])
+        for message in kept
+        for block in (message["content"] if isinstance(message["content"], list) else [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    assert answered <= called, "the kept tail must not start with an orphaned tool result"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_heavy_conversation_over_budget_does_condense():
+    memory = _tool_heavy()
+    assert await memory.needs_condensing(
+        _Counter(999_999), "m", "", [], max_context_tokens=14_000, reply_tokens=20_000
+    ), "over budget with a valid cut point: condensing must be reported as needed"
