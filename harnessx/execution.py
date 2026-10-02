@@ -310,7 +310,9 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
     """Only completed commands advance execution; in-flight tools retain intent."""
     state = {**state, **outcome}
     if command == "prepare_model":
-        state["phase"] = "model"
+        # Normally the model call is next, but preparing may decide the history
+        # has to be condensed first and say so in its outcome.
+        state["phase"] = outcome.get("phase", "model")
     elif command == "model":
         response = state["response"]
         # Trust the tool calls, not the stop reason. Providers return "end_turn"

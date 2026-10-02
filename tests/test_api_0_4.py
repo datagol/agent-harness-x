@@ -496,8 +496,11 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
         assert (await runtime.run("go")).ok
         assert (await runtime.run("fail")).failed
 
-    # SKILL_INVOKED needs a skill, RETRY a transient failure; both have their own tests.
-    missing = set(HOOK_PAYLOADS) - set(observed) - {HookEvent.SKILL_INVOKED, HookEvent.RETRY}
+    # These need conditions a plain run does not meet: a skill, a transient
+    # failure, an overflowing history. Each has its own test.
+    missing = set(HOOK_PAYLOADS) - set(observed) - {
+        HookEvent.SKILL_INVOKED, HookEvent.RETRY, HookEvent.CONTEXT_CONDENSED,
+    }
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():
         allowed = set(HOOK_PAYLOADS[event].__annotations__)  # forward refs stay strings

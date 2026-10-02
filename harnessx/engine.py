@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import uuid
 from dataclasses import asdict
+
 
 from .execution import (
     RunEvent,
@@ -27,6 +29,31 @@ from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .tools import retry_wanted
 from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult, ToolRetry
 from ._journal import RecordingError, record as journal_record
+
+logger = logging.getLogger(__name__)
+
+# How many times one turn may condense its history. A summary that fails to
+# shrink the history enough would otherwise re-trigger every iteration, which is
+# the compaction loop OpenCode has open as issue 15533.
+MAX_CONDENSATIONS = 3
+
+# Asking for the summary. Deliberately told to preserve decisions and open work
+# rather than narrate, because the model reads this instead of the transcript.
+SUMMARY_SYSTEM = (
+    "You condense an agent's conversation so it can keep working with less context. "
+    "Write a dense factual record, not a narrative."
+)
+SUMMARY_INSTRUCTION = (
+    "Condense the conversation above into a record the agent can continue from.\n\n"
+    "Preserve, in this order and only where present:\n"
+    "- The task as it currently stands, including any revisions to it.\n"
+    "- Decisions made and the reasons, especially ones that constrain what comes next.\n"
+    "- Facts established: file paths, identifiers, values, command results.\n"
+    "- Work completed, and work still outstanding.\n"
+    "- Anything that failed, and what was learned from it.\n\n"
+    "Omit pleasantries and restatements. Do not invent anything not present above. "
+    "Do not address the reader or offer help."
+)
 
 
 def default_max_tokens(provider, model: str) -> int:
@@ -164,11 +191,17 @@ async def command(agent, state, name, emit, *, record=None):
         )
         tools = agent.tools.get_tool_params()
         system = agent._build_system_prompt()
-        await agent.memory.trim_if_needed(
+        reply_tokens = agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model)
+        # Condensing costs a model call, so it is its own phase rather than a
+        # side effect here: journaled, retried and observable like any other.
+        # `condensations` bounds it, because a summary that does not shrink the
+        # history enough would otherwise re-trigger on the very next iteration.
+        if state.get("condensations", 0) < MAX_CONDENSATIONS and await agent.memory.needs_condensing(
             agent.provider, agent.config.model, system, tools,
             max_context_tokens=agent.config.limits.max_context_tokens,
-            reply_tokens=agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model),
-        )
+            reply_tokens=reply_tokens,
+        ):
+            return {**await snapshot(agent), "phase": "compact", "iterations": agent.guardrails.iteration_count}
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools
         )
@@ -189,6 +222,37 @@ async def command(agent, state, name, emit, *, record=None):
                 )
             ),
             "attempt": 0,
+        }
+
+    if name == "compact":
+        dropped, split_point = agent.memory.pending_condensation()
+        summary = ""
+        if split_point:
+            try:
+                summary = await summarize_history(agent, dropped)
+            except Exception:
+                # A failed summary must not fail the run. Fall back to the
+                # character-level condensation, which is lossy but always works.
+                logger.warning("history summarization failed; condensing without a model", exc_info=True)
+                summary = ""
+            if summary:
+                agent.memory.apply_condensation(summary, split_point)
+            else:
+                await agent.memory.trim_if_needed(
+                    agent.provider, agent.config.model, agent._build_system_prompt(),
+                    agent.tools.get_tool_params(),
+                    max_context_tokens=agent.config.limits.max_context_tokens,
+                    reply_tokens=agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model),
+                )
+        await emit_hook(
+            agent, HookEvent.CONTEXT_CONDENSED,
+            messages_dropped=len(dropped), summary_chars=len(summary),
+            summarized=bool(summary),
+        )
+        return {
+            **await snapshot(agent),
+            "phase": "prepare_model",
+            "condensations": state.get("condensations", 0) + 1,
         }
 
     if name == "model":
@@ -637,12 +701,12 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     outcome = await command(agent, state, name, command_emit, record=recorder)
                     break
                 except Exception as exc:
-                    if name == "model":
+                    if name in ("model", "compact"):
                         await record("model.failed", {
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    if name != "model" or not retryable(agent, exc) or state["attempt"] >= retry.attempts:
+                    if name not in ("model", "compact") or not retryable(agent, exc) or state["attempt"] >= retry.attempts:
                         raise
                     wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
                     await emit_hook(
@@ -690,6 +754,57 @@ async def drive(agent, state, emit, *, commit=None, control=None):
         events.insert(0, ev(E.TURN_COMPLETE, result.stop_reason))
     await persist(events)
     return result
+
+
+async def summarize_history(agent, dropped: list[dict]) -> str:
+    """Summarize the messages a condensation is about to drop, using the agent's model."""
+    transcript = render_for_summary(dropped)
+    if not transcript.strip():
+        return ""
+    budget = min(2_000, agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model))
+    response = await agent.provider.create(
+        model=agent.config.model,
+        messages=[{"role": "user", "content": f"{transcript}\n\n{SUMMARY_INSTRUCTION}"}],
+        system=SUMMARY_SYSTEM,
+        tools=[],
+        max_tokens=budget,
+        temperature=agent.config.temperature,
+    )
+    return (getattr(response, "text", "") or "").strip()
+
+
+def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> str:
+    """Flatten messages into labelled lines for the summarizer.
+
+    Tool output is capped per block: the summary needs to know a tool ran and
+    roughly what it said, not to carry its payload into another model call.
+    """
+    lines: list[str] = []
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+        if isinstance(content, str):
+            if content.strip():
+                lines.append(f"[{role}] {content[:max_block_chars]}")
+            continue
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and block.get("text", "").strip():
+                lines.append(f"[{role}] {block['text'][:max_block_chars]}")
+            elif kind == "tool_use":
+                lines.append(f"[{role} tool call] {block.get('name', '?')}({_preview(block.get('input'))})")
+            elif kind == "tool_result":
+                body = str(block.get("content", ""))[:max_block_chars]
+                label = "tool error" if block.get("is_error") else "tool result"
+                lines.append(f"[{label}] {body}")
+    return "\n".join(lines)
+
+
+def _preview(value, limit: int = 200) -> str:
+    text = str(value if value is not None else "")
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def retryable(agent, exc):

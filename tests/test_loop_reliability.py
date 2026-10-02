@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from harnessx import Agent, AgentConfig, PermissionLevel, ProviderResponse, ToolCall
+from harnessx import Agent, AgentConfig, HookEvent, PermissionLevel, ProviderResponse, ToolCall
 from harnessx.execution import transition
 from harnessx.memory import ConversationMemory
 from harnessx.providers import LLMProvider
@@ -154,3 +154,119 @@ async def test_a_short_conversation_is_left_alone():
     memory.add_user_message("hello")
     memory.add_assistant_message([{"type": "text", "text": "hi"}])
     assert not await memory.trim_if_needed(_Counter(10_000), "m", "", [], max_context_tokens=1)
+
+
+# ── condensing is a real summary, made by the model, as its own loop phase ───
+
+
+class _Overflowing(LLMProvider):
+    """Always reports an overflowing history, so condensing is always due."""
+
+    name = "overflowing"
+
+    def __init__(self, *, summary="TASK: ship it. DONE: a, b. NEXT: c.", fail_summary=False):
+        self.summary = summary
+        self.fail_summary = fail_summary
+        self.summary_calls: list[dict[str, Any]] = []
+        self.turns = 0
+
+    def _is_summary(self, kwargs) -> bool:
+        return bool(kwargs.get("system")) and "condense" in kwargs["system"]
+
+    async def create(self, **kwargs):
+        if self._is_summary(kwargs):
+            self.summary_calls.append(kwargs)
+            if self.fail_summary:
+                raise RuntimeError("summarizer unavailable")
+            return ProviderResponse(text=self.summary)
+        self.turns += 1
+        return ProviderResponse(text=f"reply {self.turns}")
+
+    async def count_tokens(self, **kwargs):
+        return 50_000
+
+
+def _overflowing_agent(provider, **limits):
+    from harnessx import Limits
+
+    return Agent(
+        config=AgentConfig(model="m", max_tokens=1000, limits=Limits(max_context_tokens=10_000, **limits)),
+        provider=provider,
+    )
+
+
+@pytest.mark.asyncio
+async def test_condensing_calls_the_model_and_keeps_its_summary():
+    provider = _Overflowing()
+    agent = _overflowing_agent(provider)
+    events: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.CONTEXT_CONDENSED, lambda ctx: events.append(dict(ctx.data)))
+
+    async with agent:
+        for turn in range(4):
+            await agent.run(f"turn {turn}")
+
+    assert provider.summary_calls, "the summary is a real model call, not string truncation"
+    assert events and events[0]["summarized"] is True
+    first = str(agent.memory.get_messages()[0]["content"])
+    assert "TASK: ship it" in first, "the model's summary is what the agent carries forward"
+    assert "condensed" in first
+
+
+@pytest.mark.asyncio
+async def test_a_failed_summary_falls_back_instead_of_failing_the_run():
+    """A summary that cannot be produced must not take the run down with it."""
+    provider = _Overflowing(fail_summary=True)
+    agent = _overflowing_agent(provider)
+    events: list[dict[str, Any]] = []
+    agent.hooks.on(HookEvent.CONTEXT_CONDENSED, lambda ctx: events.append(dict(ctx.data)))
+
+    async with agent:
+        for turn in range(4):
+            result = await agent.run(f"turn {turn}")
+            assert result.ok, "the run survives a failed summarization"
+
+    assert events and events[-1]["summarized"] is False
+    assert "condensed" in str(agent.memory.get_messages()[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_condensing_cannot_loop_forever_within_one_turn():
+    """A summary that does not shrink the history would otherwise re-trigger on
+    the very next iteration. OpenCode has exactly this open as issue 15533."""
+    from harnessx.engine import MAX_CONDENSATIONS
+
+    provider = _Overflowing(summary="x" * 50)
+    agent = _overflowing_agent(provider)
+    async with agent:
+        await agent.run("go")
+    assert len(provider.summary_calls) <= MAX_CONDENSATIONS
+
+
+@pytest.mark.asyncio
+async def test_a_history_that_fits_is_never_condensed():
+    class Roomy(_Overflowing):
+        async def count_tokens(self, **kwargs):
+            return 10
+
+    provider = Roomy()
+    agent = _overflowing_agent(provider)
+    async with agent:
+        await agent.run("go")
+    assert not provider.summary_calls
+
+
+def test_the_summary_transcript_labels_roles_and_caps_tool_output():
+    from harnessx.engine import render_for_summary
+
+    rendered = render_for_summary([
+        {"role": "user", "content": "do the thing"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "grep", "input": {"q": "x"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "y" * 10_000}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "boom", "is_error": True}]},
+    ], max_block_chars=100)
+
+    assert "[user] do the thing" in rendered
+    assert "[assistant tool call] grep(" in rendered
+    assert "[tool error] boom" in rendered
+    assert "y" * 101 not in rendered, "tool payloads must not ride into another model call"

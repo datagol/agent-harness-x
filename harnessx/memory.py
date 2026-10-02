@@ -242,6 +242,75 @@ class ConversationMemory:
     def message_count(self) -> int:
         return len(self._messages)
 
+    async def needs_condensing(
+        self,
+        provider: Any,
+        model: str,
+        system: str | None,
+        tools: list[dict[str, Any]],
+        max_context_tokens: int = 150_000,
+        reply_tokens: int = 0,
+    ) -> bool:
+        """Whether the next request would not fit, so history must be condensed.
+
+        Separate from doing it, because a real summary costs a model call and
+        the engine wants that as its own loop phase: journaled, retried and
+        observable like any other call.
+        """
+        if len(self._messages) < 6:
+            return False
+        token_count = await self._count(provider, model, system, tools)
+        budget = max(1, max_context_tokens - max(0, reply_tokens))
+        if token_count is not None and token_count < budget * 0.8:
+            return False
+        return self._find_safe_trim_boundary(min_keep=4) > 0
+
+    async def _count(self, provider, model, system, tools) -> int | None:
+        try:
+            return await provider.count_tokens(
+                model=model,
+                system=system or None,
+                tools=tools or [],
+                messages=self.get_messages(),
+            )
+        except Exception:
+            # A failed count used to fall back to a character heuristic, which
+            # silently disabled the guard whenever it read low. None means
+            # unknown, and the caller treats unknown as over budget: condensing
+            # early is cheap, overflowing is not.
+            logger.warning("count_tokens failed; treating history as over budget", exc_info=True)
+            return None
+
+    def pending_condensation(self) -> tuple[list[dict[str, Any]], int]:
+        """The messages a condensation would drop, and where the kept tail starts."""
+        split_point = self._find_safe_trim_boundary(min_keep=4)
+        if split_point == 0:
+            return [], 0
+        return [dict(message) for message in self._messages[:split_point]], split_point
+
+    def apply_condensation(self, summary_text: str, split_point: int) -> bool:
+        """Replace everything before ``split_point`` with a condensed note."""
+        if split_point <= 0 or split_point > len(self._messages):
+            return False
+        to_keep = self._messages[split_point:]
+        self._messages = self._condensed(summary_text, to_keep)
+        return True
+
+    def _condensed(self, summary_text: str, to_keep: list[Message]) -> list[Message]:
+        # Never synthesize an assistant turn. An assistant message is the
+        # model's own voice, so putting words there mid-run changes what the
+        # model believes it just said, and the previous text ("How can I help?")
+        # read as an instruction to stop working on an autonomous task.
+        #
+        # Prepend the note to the first kept message when that message is the
+        # user's, rather than inserting one. That keeps roles alternating and
+        # adds no message the conversation did not already have.
+        note = f"[Earlier conversation, condensed]\n{summary_text}"
+        first = to_keep[0] if to_keep else None
+        if first is not None and first.role == "user" and isinstance(first.content, str):
+            return [Message("user", f"{note}\n\n{first.content}"), *to_keep[1:]]
+        return [Message("user", note), *to_keep]
+
     async def trim_if_needed(
         self,
         provider: Any,
@@ -261,20 +330,7 @@ class ConversationMemory:
         if len(self._messages) < 6:
             return False
 
-        try:
-            token_count = await provider.count_tokens(
-                model=model,
-                system=system or None,
-                tools=tools or [],
-                messages=self.get_messages(),
-            )
-        except Exception:
-            # A failed count used to fall back to a character heuristic, which
-            # silently disabled the guard whenever it read low. Treat an unknown
-            # count as over budget: condensing early is cheap, overflowing is not.
-            logger.warning("count_tokens failed; condensing history as a precaution", exc_info=True)
-            token_count = None
-
+        token_count = await self._count(provider, model, system, tools)
         budget = max(1, max_context_tokens - max(0, reply_tokens))
         if token_count is not None and token_count < budget * 0.8:
             return False
@@ -297,12 +353,7 @@ class ConversationMemory:
         # Prepend the note to the first kept message when that message is the
         # user's, rather than inserting one. That keeps roles alternating and
         # adds no message the conversation did not already have.
-        note = f"[Earlier conversation, condensed]\n{summary_text}"
-        first = to_keep[0] if to_keep else None
-        if first is not None and first.role == "user" and isinstance(first.content, str):
-            self._messages = [Message("user", f"{note}\n\n{first.content}"), *to_keep[1:]]
-        else:
-            self._messages = [Message("user", note), *to_keep]
+        self._messages = self._condensed(summary_text, to_keep)
         return True
 
     def _find_safe_trim_boundary(self, min_keep: int = 4) -> int:
