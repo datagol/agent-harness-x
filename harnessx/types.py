@@ -327,6 +327,9 @@ class RetryPolicy:
     # how long a provider stays out of rotation after being passed over.
     switch_after: int = 1
     cooldown_seconds: float = 0.0
+    # Proportional randomness on each wait. Without it, concurrent agents that
+    # hit one rate limit retry in lockstep and hit it again together.
+    jitter: float = 0.25
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or self.attempts < 1:
@@ -335,6 +338,8 @@ class RetryPolicy:
         if self.call_timeout_seconds is not None:
             _positive(self.call_timeout_seconds, "call_timeout_seconds")
         _positive(self.max_backoff_seconds, "max_backoff_seconds")
+        if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
+            raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
             raise ConfigurationError("switch_after must be a positive integer")
         _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
@@ -345,13 +350,21 @@ class RetryPolicy:
             return float(self.call_timeout_seconds)
         return call_timeout_for(max_tokens)
 
-    def wait_for(self, attempt: int, retry_after: float | None = None) -> float:
+    def wait_for(self, attempt: int, retry_after: float | None = None, *, rand: Any = None) -> float:
         """Seconds to wait after ``attempt`` (1-based) failed.
 
         Exponential backoff from ``backoff_seconds``, raised to the server's
-        ``retry_after`` when it sent one, capped at ``max_backoff_seconds``.
+        ``retry_after`` when it sent one, spread by ``jitter``, and capped at
+        ``max_backoff_seconds``.
         """
-        return _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
+        wait = _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
+        if not self.jitter or wait <= 0:
+            return wait
+        import random
+
+        draw = (rand or random.random)()
+        # Spread downward only: never wait longer than the cap or the server asked.
+        return max(0.0, wait * (1 - self.jitter * draw))
 
 
 def _backoff(base: float | None, cap: float, attempt: int, retry_after: float | None = None) -> float:

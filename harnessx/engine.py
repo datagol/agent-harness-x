@@ -6,7 +6,7 @@ import asyncio
 import copy
 import logging
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 
 from .execution import (
@@ -370,10 +370,24 @@ async def command(agent, state, name, emit, *, record=None):
                 "retry": ToolRetry().to_dict(),
             }
             try:
-                definition = agent.tools.get_tool(call.name)
-                from jsonschema import validate
+                definition, corrected = agent.tools.resolve_tool(call.name)
+                if corrected != call.name:
+                    # A case-only miss is a typo, not a different intent.
+                    logger.info("repaired tool name %r -> %r", call.name, corrected)
+                    call = replace(call, name=corrected)
+                    entry["call"] = wire(call)
+                from jsonschema import ValidationError, validate
 
-                validate(call.input, definition.input_schema)
+                try:
+                    validate(call.input, definition.input_schema)
+                except ValidationError as invalid:
+                    # Hand the model one actionable line, the way a tool error
+                    # reads, so it can reissue the call rather than stall.
+                    location = ".".join(str(part) for part in invalid.absolute_path)
+                    where = f" at {location!r}" if location else ""
+                    raise ValueError(
+                        f"Invalid arguments for {call.name!r}{where}: {invalid.message}"
+                    ) from None
                 entry.update(
                     policy=definition.replay_policy,
                     concurrent=definition.concurrent,

@@ -270,3 +270,128 @@ def test_the_summary_transcript_labels_roles_and_caps_tool_output():
     assert "[assistant tool call] grep(" in rendered
     assert "[tool error] boom" in rendered
     assert "y" * 101 not in rendered, "tool payloads must not ride into another model call"
+
+
+# ── a near-miss tool call is repaired, not refused ───────────────────────────
+
+
+def _agent_with_search(script):
+    provider = Scripted(script)
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    ran: list[str] = []
+
+    @agent.tools.register(permission=PermissionLevel.ALLOW)
+    def search_web(query: str) -> str:
+        """Search the web."""
+        ran.append(query)
+        return "found"
+
+    return agent, provider, ran
+
+
+def _last_tool_text(provider: Scripted) -> str:
+    last = provider.calls[-1]["messages"][-1]
+    content = last["content"]
+    block = content[0] if isinstance(content, list) else content
+    return str(block.get("content") if isinstance(block, dict) else block)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_name_wrong_only_in_case_is_corrected_and_runs():
+    """Models miss a tool name by case far more often than by intent. Refusing
+    the call teaches the model nothing it can act on."""
+    agent, _provider, ran = _agent_with_search([
+        ProviderResponse(tool_calls=[ToolCall("c1", "Search_Web", {"query": "x"})], stop_reason="tool_use"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        assert (await agent.run("go")).ok
+    assert ran == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_name_is_not_guessed():
+    """Two tools differing only by case means the correction is not obvious, so
+    the model is told rather than sent somewhere it did not ask for."""
+    provider = Scripted([
+        ProviderResponse(tool_calls=[ToolCall("c1", "DOIT", {})], stop_reason="tool_use"),
+        ProviderResponse(text="done"),
+    ])
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    agent.tools.register_with_schema("doit", "a", {"type": "object", "properties": {}},
+                                     lambda: "a", permission=PermissionLevel.ALLOW)
+    agent.tools.register_with_schema("DoIt", "b", {"type": "object", "properties": {}},
+                                     lambda: "b", permission=PermissionLevel.ALLOW)
+    async with agent:
+        assert (await agent.run("go")).ok
+    assert "No tool named 'DOIT'" in _last_tool_text(provider)
+
+
+@pytest.mark.asyncio
+async def test_bad_arguments_come_back_as_one_actionable_line():
+    agent, provider, ran = _agent_with_search([
+        ProviderResponse(tool_calls=[ToolCall("c1", "search_web", {"quary": "x"})], stop_reason="tool_use"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        assert (await agent.run("go")).ok
+    message = _last_tool_text(provider)
+    assert ran == [], "a call that does not validate must not reach the handler"
+    assert "Invalid arguments for 'search_web'" in message
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_tool_is_told_what_does_exist():
+    agent, provider, _ran = _agent_with_search([
+        ProviderResponse(tool_calls=[ToolCall("c1", "nonexistent", {})], stop_reason="tool_use"),
+        ProviderResponse(text="done"),
+    ])
+    async with agent:
+        assert (await agent.run("go")).ok
+    message = _last_tool_text(provider)
+    assert "No tool named 'nonexistent'" in message and "search_web" in message
+
+
+# ── retry waits are spread, and permanent failures are not retried ──────────
+
+
+def test_jitter_spreads_waits_downward_and_never_past_the_cap():
+    """Concurrent agents sharing a rate limit must not retry in lockstep. The
+    spread is downward only, so it cannot exceed the cap or a server's
+    Retry-After."""
+    from harnessx import RetryPolicy
+
+    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=5, jitter=0.25)
+    assert policy.wait_for(3, rand=lambda: 0.0) == 4.0, "no draw means the full backoff"
+    assert policy.wait_for(3, rand=lambda: 1.0) == 3.0, "a full draw removes the jitter fraction"
+    assert policy.wait_for(10, rand=lambda: 0.0) <= 5.0, "still capped"
+    assert policy.wait_for(1, retry_after=3, rand=lambda: 1.0) <= 3.0, "never longer than asked"
+
+    exact = RetryPolicy(backoff_seconds=1, jitter=0)
+    assert exact.wait_for(3) == 4.0, "jitter=0 restores exact backoff"
+
+    with pytest.raises(Exception):
+        RetryPolicy(jitter=1.5)
+
+
+@pytest.mark.parametrize(
+    ("message", "status", "retried"),
+    [
+        ("Rate limit exceeded", 429, True),
+        ("You exceeded your current quota", 429, False),
+        ("billing: payment required", 429, False),
+        ("Your credit balance is too low", 429, False),
+        ("prompt is too long: 250000 tokens", 400, False),
+        ("maximum context length exceeded", 429, False),
+        ("ThrottlingException: Too many tokens", 429, True),
+        ("service unavailable", 503, True),
+    ],
+)
+def test_permanent_and_overflow_failures_are_not_retried(message, status, retried):
+    """A quota or billing 429 is not throttling: it will still be exhausted
+    after any backoff, so the whole ladder is spent to be refused again. An
+    overflowing request needs condensing, not another attempt."""
+    from harnessx.providers.retry import is_transient
+
+    error = type("E", (Exception,), {"status_code": status})(message)
+    assert is_transient(error) is retried

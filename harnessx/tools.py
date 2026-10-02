@@ -491,6 +491,25 @@ class ToolRegistry:
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
 
+    def resolve_tool(self, name: str) -> tuple[ToolDefinition, str]:
+        """Find a tool, correcting a name the model nearly got right.
+
+        Models misspell a tool name by case far more often than by anything
+        else. Failing the call teaches nothing the model can act on, and the
+        repair is unambiguous as long as exactly one tool matches. Returns the
+        definition and the corrected name.
+        """
+        if name in self._tools:
+            return self._tools[name], name
+        if isinstance(name, str):
+            folded = name.strip().casefold()
+            matches = [known for known in self._tools if known.casefold() == folded]
+            if len(matches) == 1:
+                return self._tools[matches[0]], matches[0]
+        raise ToolNotFoundError(
+            f"No tool named {name!r}. Available tools: {', '.join(sorted(self._tools)) or 'none'}"
+        )
+
     async def execute(
         self, tool_call: ToolCall, *, permissions: PermissionManager | None = None,
     ) -> ToolResult:

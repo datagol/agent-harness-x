@@ -340,7 +340,8 @@ class TestProviderAgnosticStreaming(unittest.IsolatedAsyncioTestCase):
         tool_results = [e.data for e in events if e.type == RunEventType.TOOL_RESULT]
         self.assertEqual(len(tool_results), 1)
         self.assertTrue(tool_results[0].is_error)
-        self.assertIn("not found", tool_results[0].content)
+        self.assertIn("No tool named", tool_results[0].content)
+        self.assertIn("Available tools", tool_results[0].content)
 
     async def test_anthropic_provider_temperature_fallback(self):
         """Verify AnthropicProvider handles SDK versions or models rejecting temperature."""

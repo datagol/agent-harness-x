@@ -145,7 +145,8 @@ def test_transient_text_recognizes_throttling_phrases():
 
 
 def test_wait_for_backs_off_honors_retry_after_and_caps():
-    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=5)
+    # jitter=0 so the backoff maths is asserted exactly; jitter has its own test.
+    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=5, jitter=0)
     assert policy.wait_for(1) == 1 and policy.wait_for(2) == 2 and policy.wait_for(3) == 4
     assert policy.wait_for(4) == 5, "capped"
     assert policy.wait_for(1, retry_after=3) == 3, "the server's hint wins over a shorter backoff"
@@ -160,7 +161,10 @@ async def test_model_retry_emits_the_hook_and_honors_the_servers_retry_after():
     provider = Scripted([_Boom(429, headers={"retry-after": "4"}), ProviderResponse(text="ok")])
     seen: list[dict[str, Any]] = []
     agent = Agent(
-        config=AgentConfig(model="m", retry=RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.01)),
+        config=AgentConfig(
+            model="m",
+            retry=RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.01, jitter=0),
+        ),
         provider=provider,
     )
     agent.hooks.on(HookEvent.RETRY, lambda ctx: seen.append(dict(ctx.data)))
