@@ -26,6 +26,14 @@ can be switched off.
   prompt cache, and condensing cannot summarize the list away. OpenCode persists
   todos and never re-injects them, which is how an agent ends up believing in a
   plan it can no longer read.
+- `LLMProvider` is an async context manager, so `async with provider:` closes
+  the clients it built. An Agent closes only a provider it built itself, so one
+  you construct and inject has always been yours to close; until now
+  `contextlib.aclosing` was the only spelling, and that is meant for async
+  generators. It matters most for a `FallbackProvider` built from names, which
+  holds one SDK client per member.
+- `LoopGuard` is exported from `harnessx`, beside `Limits` and `RetryPolicy`.
+  It was the only config dataclass left in `harnessx.types`.
 - `edit_file`, `delete`, `glob` and `grep` in the filesystem bundle, bringing it
   to parity with what Deep Agents, OpenCode and Hermes give a model. `edit_file`
   refuses an ambiguous match rather than editing the wrong occurrence, which is

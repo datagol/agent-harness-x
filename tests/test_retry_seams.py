@@ -287,6 +287,32 @@ async def test_fallback_through_an_agent_reports_the_serving_member():
 
 
 @pytest.mark.asyncio
+async def test_async_with_closes_a_chains_own_members(monkeypatch):
+    """A provider you construct is yours to close, and `async with` is how.
+
+    Every other resource the SDK hands you closes this way: the MCP manager,
+    the backends, the Agent. A provider holding one SDK client per fallback
+    member was the odd one out, leaving `contextlib.aclosing` as the only
+    spelling, which is meant for async generators."""
+    built = Scripted(label="built")
+    monkeypatch.setattr("harnessx.providers.fallback.make_provider", lambda name, **kw: built)
+    injected = Scripted(label="injected")
+
+    async with FallbackProvider("anthropic", fallbacks=[injected]) as chain:
+        assert chain.labels == ("anthropic", "injected")
+    assert built.closed, "the chain closes what it built"
+    assert not injected.closed, "and leaves what you passed in alone"
+
+
+@pytest.mark.asyncio
+async def test_async_with_returns_the_provider_itself():
+    provider = Scripted()
+    async with provider as entered:
+        assert entered is provider
+    assert provider.closed
+
+
+@pytest.mark.asyncio
 async def test_fallback_owns_members_built_from_names_only(monkeypatch):
     built = Scripted(label="built")
     monkeypatch.setattr("harnessx.providers.fallback.make_provider", lambda name, **kw: built)

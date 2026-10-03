@@ -1096,18 +1096,26 @@ you to close.
 A pre-configured SDK client cannot be named in config. Build the chain yourself
 and inject it, which also makes it yours to close:
 
+`OpenAIProvider` lives in `harnessx.providers` and needs the `openai` extra;
+each vendor provider is gated on its own SDK being installed.
+
 ```python
-from harnessx import Agent, AgentConfig, Fallback, FallbackProvider, OpenAIProvider
+from harnessx import Agent, AgentConfig, Fallback, FallbackProvider
+from harnessx.providers import OpenAIProvider
 
 chain = FallbackProvider(
     OpenAIProvider(client=my_client),
     fallbacks=[Fallback("anthropic")],
     switch_after=2,
 )
-async with Agent(config=AgentConfig(model="gpt-5", provider="openai"), provider=chain) as agent:
+async with chain, Agent(config=AgentConfig(model="gpt-5", provider="openai"), provider=chain) as agent:
     ...
-await chain.aclose()
 ```
+
+A provider is an async context manager, so `async with` closes the clients the
+chain built. Everything else the SDK hands you closes the same way: the MCP
+manager, the backends, the Agent. Naming the provider in `AgentConfig` instead
+leaves it to the agent, which then owns and closes it, and is one line shorter.
 
 Providers given as names are built and closed by the chain; instances you pass
 in stay yours. Setting both `fallbacks` in config and `provider=` is a

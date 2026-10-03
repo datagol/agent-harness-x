@@ -8,7 +8,7 @@ harness's canonical ProviderResponse and RunEvent models.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Self
 
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
@@ -92,6 +92,24 @@ class LLMProvider(ABC):
         if resp.text:
             yield StreamChunk(kind="text_delta", data=resp.text)
         yield StreamChunk(kind="response", data=resp)
+
+    async def __aenter__(self) -> Self:
+        """Close this provider's client on the way out.
+
+        An Agent closes only a provider it built itself, so one you construct
+        and inject is yours to close. ``async with`` is how::
+
+            async with FallbackProvider("anthropic", fallbacks=[Fallback("openai")]) as provider:
+                async with Agent(provider=provider) as agent:
+                    ...
+
+        Naming the provider in ``AgentConfig`` instead leaves it to the agent,
+        which then owns and closes it.
+        """
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.aclose()
 
     async def aclose(self) -> None:
         """Close the provider's owned client. Injected providers are caller-owned."""
