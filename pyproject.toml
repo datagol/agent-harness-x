@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harnessx"
-version = "0.4.3"
+version = "0.4.4"
 description = "A lightweight, production-grade LLM agent toolkit in Python: streaming, MCP, lazy skills, memory, and sandboxing."
 readme = "README.md"
 requires-python = ">=3.11"

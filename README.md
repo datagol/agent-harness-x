@@ -521,6 +521,14 @@ register_filesystem_tools(
 )
 ```
 
+The bundle is `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`,
+`list_directory` and `generate_file`. `edit_file` replaces an exact string and
+refuses an ambiguous match rather than editing the wrong occurrence, which is
+what makes it safe to prefer over rewriting a file whole: an agent building a
+long artifact writes the first chunk and grows it a section at a time, instead
+of spending the reply budget on bytes it already wrote. `delete` requires
+`recursive=True` for a non-empty tree and will not remove the root itself.
+
 The root must exist. Scoped operations reject symlinks in files and parent
 directories using descriptor-relative, no-follow access on POSIX. This is an
 application boundary, not an OS sandbox for arbitrary code: hard links, mounts,
@@ -661,9 +669,32 @@ asyncio.run(main())
 
 Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
 `TOOL_CALL_COMPLETE`, `TOOL_RESULT`, `THINKING_DELTA`, `TURN_COMPLETE`,
-`ERROR`, `ATTEMPT_RESET`, and `RUN_RESULT`. Durable runs also emit approval and
-recovery events. Text deltas are provisional; discard an interrupted attempt's
-text when `ATTEMPT_RESET` arrives.
+`ERROR`, `ATTEMPT_RESET`, `WAITING`, and `RUN_RESULT`. Durable runs also emit
+approval and recovery events. Text deltas are provisional; discard an
+interrupted attempt's text when `ATTEMPT_RESET` arrives.
+
+### When the model is slow rather than broken
+
+A provider under load answers correctly and late. Nothing fails, so nothing
+retries and nothing is logged, and a streaming interface shows the user
+nothing for as long as it takes — which reads as a hung agent, not a slow one.
+
+`WAITING` events say so, carrying `{"on": "model", "seconds": 12.0}`:
+
+```python
+config = AgentConfig(
+    model="...",
+    progress=ProgressPolicy(first_after_seconds=5, repeat_every_seconds=8),
+)
+...
+elif event.type == RunEventType.WAITING:
+    print(f"still working ({event.data['seconds']:.0f}s)")
+```
+
+They are notices, not deadlines: nothing is cancelled, and the call stays
+bounded by `RetryPolicy.call_timeout_seconds`. `ProgressPolicy(
+first_after_seconds=None)` turns them off. The `on` field also admits
+`"tool"`, which no call emits yet.
 
 Usage stats accumulate on the guardrails engine:
 
@@ -1088,18 +1119,26 @@ you to close.
 A pre-configured SDK client cannot be named in config. Build the chain yourself
 and inject it, which also makes it yours to close:
 
+`OpenAIProvider` lives in `harnessx.providers` and needs the `openai` extra;
+each vendor provider is gated on its own SDK being installed.
+
 ```python
-from harnessx import Agent, AgentConfig, Fallback, FallbackProvider, OpenAIProvider
+from harnessx import Agent, AgentConfig, Fallback, FallbackProvider
+from harnessx.providers import OpenAIProvider
 
 chain = FallbackProvider(
     OpenAIProvider(client=my_client),
     fallbacks=[Fallback("anthropic")],
     switch_after=2,
 )
-async with Agent(config=AgentConfig(model="gpt-5", provider="openai"), provider=chain) as agent:
+async with chain, Agent(config=AgentConfig(model="gpt-5", provider="openai"), provider=chain) as agent:
     ...
-await chain.aclose()
 ```
+
+A provider is an async context manager, so `async with` closes the clients the
+chain built. Everything else the SDK hands you closes the same way: the MCP
+manager, the backends, the Agent. Naming the provider in `AgentConfig` instead
+leaves it to the agent, which then owns and closes it, and is one line shorter.
 
 Providers given as names are built and closed by the chain; instances you pass
 in stay yours. Setting both `fallbacks` in config and `provider=` is a

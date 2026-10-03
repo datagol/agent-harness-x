@@ -293,7 +293,7 @@ def test_bundle_collision_preflight_does_not_partially_register():
         registry.load_builtin("filesystem")
     assert registry.list_tools() == ["write_file"]
     registry.load_builtin("filesystem", replace=True)
-    assert len(registry.list_tools()) == 4
+    assert len(registry.list_tools()) == 8
 
 
 @pytest.mark.asyncio
@@ -409,3 +409,134 @@ async def test_example_calculator_rejects_code_and_reports_tool_errors():
     registry.register_tool(calculate, permission=PermissionLevel.ALLOW)
     for expression in ("().__class__", "__import__('os')", "'a' * 3", "2 ** 100000", "1 / 0", "1e999", "True + 1"):
         assert (await call(registry, "calculate", expression=expression)).is_error
+
+
+# ── edit_file, delete, glob, grep ────────────────────────────────────────────
+
+
+async def _call(registry, name, **arguments):
+    return (await registry.execute(ToolCall("1", name, arguments))).content.strip()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_requires_a_unique_match_unless_told_otherwise(workspace):
+    (workspace / "dup.txt").write_text("x = 1\ny = 2\nx = 1\n")
+    registry = scoped(workspace)
+
+    ambiguous = await _call(registry, "edit_file", path="dup.txt", old_string="x = 1", new_string="x = 9")
+    assert "matches 2 times" in ambiguous, "a silent partial edit is worse than a refusal"
+    assert (workspace / "dup.txt").read_text().count("x = 1") == 2, "nothing was written"
+
+    assert "2 occurrence" in await _call(
+        registry, "edit_file", path="dup.txt", old_string="x = 1", new_string="x = 9", replace_all=True
+    )
+    assert (workspace / "dup.txt").read_text() == "x = 9\ny = 2\nx = 9\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_a_missing_or_pointless_edit(workspace):
+    (workspace / "a.txt").write_text("hello\n")
+    registry = scoped(workspace)
+    assert "was not found" in await _call(registry, "edit_file", path="a.txt", old_string="nope", new_string="x")
+    assert "identical" in await _call(registry, "edit_file", path="a.txt", old_string="hello", new_string="hello")
+    assert "nonempty" in await _call(registry, "edit_file", path="a.txt", old_string="", new_string="x")
+    assert (workspace / "a.txt").read_text() == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_is_confined_and_refuses_symlinks(workspace, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    (workspace / "link.txt").symlink_to(outside)
+    registry = scoped(workspace)
+
+    assert "escapes base directory" in await _call(
+        registry, "edit_file", path="../outside.txt", old_string="secret", new_string="x"
+    )
+    assert "symlink" in await _call(registry, "edit_file", path="link.txt", old_string="secret", new_string="x")
+    assert outside.read_text() == "secret\n"
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_files_links_and_trees_but_never_the_root(workspace):
+    (workspace / "file.txt").write_text("x")
+    (workspace / "tree").mkdir()
+    (workspace / "tree/nested").mkdir()
+    (workspace / "tree/nested/deep.txt").write_text("y")
+    (workspace / "empty").mkdir()
+    registry = scoped(workspace)
+
+    assert "Deleted file.txt" in await _call(registry, "delete", path="file.txt")
+    assert not (workspace / "file.txt").exists()
+
+    assert "empty directory" in await _call(registry, "delete", path="empty")
+    assert not (workspace / "empty").exists()
+
+    refused = await _call(registry, "delete", path="tree")
+    assert "not empty" in refused.lower(), refused
+    assert (workspace / "tree/nested/deep.txt").exists(), "a non-empty tree needs recursive=True"
+
+    assert "2 entries" in await _call(registry, "delete", path="tree", recursive=True)
+    assert not (workspace / "tree").exists()
+
+    assert "base directory" in await _call(registry, "delete", path=".")
+    assert workspace.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_a_symlink_without_touching_its_target(workspace, tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("keep me\n")
+    (workspace / "link.txt").symlink_to(target)
+    registry = scoped(workspace)
+
+    assert "symlink" in await _call(registry, "delete", path="link.txt")
+    assert not (workspace / "link.txt").is_symlink()
+    assert target.read_text() == "keep me\n", "the link was removed, not what it pointed at"
+
+
+@pytest.mark.asyncio
+async def test_glob_matches_by_name_and_relative_path_and_skips_links(workspace, tmp_path):
+    (workspace / "pkg").mkdir()
+    (workspace / "pkg/a.py").write_text("")
+    (workspace / "pkg/b.txt").write_text("")
+    (workspace / "top.py").write_text("")
+    (workspace / "escape").symlink_to(tmp_path)
+    registry = scoped(workspace)
+
+    matched = await _call(registry, "glob", pattern="*.py")
+    assert "pkg/a.py" in matched and "top.py" in matched and "b.txt" not in matched
+    assert "pkg/" in await _call(registry, "glob", pattern="pkg*")
+    assert "No matches" in await _call(registry, "glob", pattern="*.rs")
+    assert "escape" not in matched, "a symlinked directory is never traversed"
+
+
+@pytest.mark.asyncio
+async def test_grep_reports_path_and_line_and_honors_include(workspace):
+    (workspace / "a.py").write_text("import os\nvalue = 1\n")
+    (workspace / "b.md").write_text("value = 1\n")
+    registry = scoped(workspace)
+
+    hits = await _call(registry, "grep", pattern=r"value = \d")
+    assert "a.py:2:" in hits and "b.md:1:" in hits
+
+    only_markdown = await _call(registry, "grep", pattern="value", include="*.md")
+    assert "b.md" in only_markdown and "a.py" not in only_markdown
+
+    assert "No matches" in await _call(registry, "grep", pattern="nowhere")
+    assert "Invalid regular expression" in await _call(registry, "grep", pattern="(unclosed")
+
+
+@pytest.mark.asyncio
+async def test_grep_does_not_read_through_a_symlink(workspace, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOPSECRET\n")
+    (workspace / "link.txt").symlink_to(secret)
+    registry = scoped(workspace)
+    assert "No matches" in await _call(registry, "grep", pattern="TOPSECRET")
+
+
+def test_the_builtin_bundle_offers_the_full_file_tool_set():
+    registry = ToolRegistry()
+    names = register_filesystem_tools(registry, permission=PermissionLevel.ALLOW)
+    assert set(names) >= {"read_file", "write_file", "edit_file", "delete", "glob", "grep", "list_directory"}

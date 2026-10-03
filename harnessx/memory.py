@@ -242,6 +242,75 @@ class ConversationMemory:
     def message_count(self) -> int:
         return len(self._messages)
 
+    async def needs_condensing(
+        self,
+        provider: Any,
+        model: str,
+        system: str | None,
+        tools: list[dict[str, Any]],
+        max_context_tokens: int = 150_000,
+        reply_tokens: int = 0,
+    ) -> bool:
+        """Whether the next request would not fit, so history must be condensed.
+
+        Separate from doing it, because a real summary costs a model call and
+        the engine wants that as its own loop phase: journaled, retried and
+        observable like any other call.
+        """
+        if len(self._messages) < 6:
+            return False
+        token_count = await self._count(provider, model, system, tools)
+        budget = max(1, max_context_tokens - max(0, reply_tokens))
+        if token_count is not None and token_count < budget * 0.8:
+            return False
+        return self._find_safe_trim_boundary(min_keep=4) > 0
+
+    async def _count(self, provider, model, system, tools) -> int | None:
+        try:
+            return await provider.count_tokens(
+                model=model,
+                system=system or None,
+                tools=tools or [],
+                messages=self.get_messages(),
+            )
+        except Exception:
+            # A failed count used to fall back to a character heuristic, which
+            # silently disabled the guard whenever it read low. None means
+            # unknown, and the caller treats unknown as over budget: condensing
+            # early is cheap, overflowing is not.
+            logger.warning("count_tokens failed; treating history as over budget", exc_info=True)
+            return None
+
+    def pending_condensation(self) -> tuple[list[dict[str, Any]], int]:
+        """The messages a condensation would drop, and where the kept tail starts."""
+        split_point = self._find_safe_trim_boundary(min_keep=4)
+        if split_point == 0:
+            return [], 0
+        return [dict(message) for message in self._messages[:split_point]], split_point
+
+    def apply_condensation(self, summary_text: str, split_point: int) -> bool:
+        """Replace everything before ``split_point`` with a condensed note."""
+        if split_point <= 0 or split_point > len(self._messages):
+            return False
+        to_keep = self._messages[split_point:]
+        self._messages = self._condensed(summary_text, to_keep)
+        return True
+
+    def _condensed(self, summary_text: str, to_keep: list[Message]) -> list[Message]:
+        # Never synthesize an assistant turn. An assistant message is the
+        # model's own voice, so putting words there mid-run changes what the
+        # model believes it just said, and the previous text ("How can I help?")
+        # read as an instruction to stop working on an autonomous task.
+        #
+        # Prepend the note to the first kept message when that message is the
+        # user's, rather than inserting one. That keeps roles alternating and
+        # adds no message the conversation did not already have.
+        note = f"[Earlier conversation, condensed]\n{summary_text}"
+        first = to_keep[0] if to_keep else None
+        if first is not None and first.role == "user" and isinstance(first.content, str):
+            return [Message("user", f"{note}\n\n{first.content}"), *to_keep[1:]]
+        return [Message("user", note), *to_keep]
+
     async def trim_if_needed(
         self,
         provider: Any,
@@ -249,26 +318,21 @@ class ConversationMemory:
         system: str | None,
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
+        reply_tokens: int = 0,
     ) -> bool:
-        """If token count approaches limit, summarize older messages.
+        """If the next request would not fit, condense older messages.
 
-        Uses the provider's count_tokens; falls back to a size heuristic when
-        counting fails. Returns True if trimming was performed.
+        The budget is the context window minus the reply the model is about to
+        write, because the provider reserves output from the same window: a
+        request can sit under a threshold measured against the raw window and
+        still overflow. Returns True if the history was condensed.
         """
         if len(self._messages) < 6:
             return False
 
-        try:
-            token_count = await provider.count_tokens(
-                model=model,
-                system=system or None,
-                tools=tools or [],
-                messages=self.get_messages(),
-            )
-        except Exception:
-            token_count = len(str(self._messages)) // 3
-
-        if token_count < max_context_tokens * 0.8:
+        token_count = await self._count(provider, model, system, tools)
+        budget = max(1, max_context_tokens - max(0, reply_tokens))
+        if token_count is not None and token_count < budget * 0.8:
             return False
 
         # Find a clean boundary that preserves alternating roles and tool call pairs
@@ -281,47 +345,56 @@ class ConversationMemory:
 
         summary_text = self._create_summary(to_summarize)
 
-        self._messages = [
-            Message("user", f"[Previous conversation summary]\n{summary_text}"),
-            Message("assistant", [{"type": "text", "text": "Understood, I have the context from our previous conversation. How can I help?"}]),
-            *to_keep,
-        ]
+        # Never synthesize an assistant turn. An assistant message is the
+        # model's own voice, so putting words there mid-run changes what the
+        # model believes it just said, and the previous text ("How can I help?")
+        # read as an instruction to stop working on an autonomous task.
+        #
+        # Prepend the note to the first kept message when that message is the
+        # user's, rather than inserting one. That keeps roles alternating and
+        # adds no message the conversation did not already have.
+        self._messages = self._condensed(summary_text, to_keep)
         return True
 
     def _find_safe_trim_boundary(self, min_keep: int = 4) -> int:
-        """Walk backwards to find a safe boundary where no tool call/result pairs are severed."""
+        """The latest index the history can be cut at without breaking a pair.
+
+        The only hard rule the providers impose is that a tool_use and its
+        tool_result stay together. So a cut is valid when the dropped prefix is
+        self-contained: every tool call it makes is also answered inside it.
+        Anything else, including a tail that starts with an assistant turn, is
+        fine, because the condensed note is prepended as a user message.
+
+        The previous rule also demanded the cut land on a plain user message
+        preceded by a plain assistant message. In an agentic conversation almost
+        every user message carries a tool result and almost every assistant
+        message makes a tool call, so no such point existed and condensing
+        silently never ran for precisely the runs that needed it.
+        """
         total = len(self._messages)
         if total <= min_keep:
             return 0
-
-        split_idx = total - min_keep
-        while split_idx > 0:
-            msg = self._messages[split_idx]
-            prev_msg = self._messages[split_idx - 1]
-
-            # Check if msg is a user message containing tool results
-            is_tool_result = False
-            content = msg.get("content")
-            if isinstance(content, list):
-                is_tool_result = any(
-                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-                )
-
-            # Safe boundary: target message is a user message that does NOT contain tool results,
-            # and the previous message was an assistant message without tool use.
-            if msg.get("role") == "user" and not is_tool_result:
-                if prev_msg.get("role") == "assistant":
-                    prev_content = prev_msg.get("content")
-                    prev_has_tool_use = False
-                    if isinstance(prev_content, list):
-                        prev_has_tool_use = any(
-                            isinstance(b, dict) and b.get("type") == "tool_use" for b in prev_content
-                        )
-                    if not prev_has_tool_use:
-                        return split_idx
-            split_idx -= 1
-
+        for split_idx in range(total - min_keep, 0, -1):
+            if self._prefix_is_self_contained(split_idx):
+                return split_idx
         return 0
+
+    def _prefix_is_self_contained(self, split_idx: int) -> bool:
+        """True when no tool call before ``split_idx`` is answered after it."""
+        called: set[str] = set()
+        answered: set[str] = set()
+        for message in self._messages[:split_idx]:
+            content = message.content
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("id"):
+                    called.add(str(block["id"]))
+                elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                    answered.add(str(block["tool_use_id"]))
+        return called <= answered
 
     def _create_summary(self, messages: list[dict[str, Any]]) -> str:
         """Create a simple text summary of messages."""

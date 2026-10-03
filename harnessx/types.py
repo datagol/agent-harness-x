@@ -296,8 +296,13 @@ class Limits:
     max_cost_dollars: float | None = None
     input_cost_per_m: float | None = None
     output_cost_per_m: float | None = None
+    loop_guard: LoopGuard = field(default_factory=lambda: LoopGuard())
 
     def __post_init__(self) -> None:
+        if isinstance(self.loop_guard, dict):  # restored from a snapshot
+            object.__setattr__(self, "loop_guard", LoopGuard(**self.loop_guard))
+        if not isinstance(self.loop_guard, LoopGuard):
+            raise TypeError("loop_guard must be a LoopGuard")
         if type(self.max_iterations) is not int or self.max_iterations < 0:
             raise ConfigurationError("max_iterations must be nonnegative (0 means unlimited)")
         _positive(self.max_context_tokens, "max_context_tokens", integer=True)
@@ -327,6 +332,9 @@ class RetryPolicy:
     # how long a provider stays out of rotation after being passed over.
     switch_after: int = 1
     cooldown_seconds: float = 0.0
+    # Proportional randomness on each wait. Without it, concurrent agents that
+    # hit one rate limit retry in lockstep and hit it again together.
+    jitter: float = 0.25
 
     def __post_init__(self) -> None:
         if type(self.attempts) is not int or self.attempts < 1:
@@ -335,6 +343,8 @@ class RetryPolicy:
         if self.call_timeout_seconds is not None:
             _positive(self.call_timeout_seconds, "call_timeout_seconds")
         _positive(self.max_backoff_seconds, "max_backoff_seconds")
+        if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
+            raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
             raise ConfigurationError("switch_after must be a positive integer")
         _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
@@ -345,13 +355,21 @@ class RetryPolicy:
             return float(self.call_timeout_seconds)
         return call_timeout_for(max_tokens)
 
-    def wait_for(self, attempt: int, retry_after: float | None = None) -> float:
+    def wait_for(self, attempt: int, retry_after: float | None = None, *, rand: Any = None) -> float:
         """Seconds to wait after ``attempt`` (1-based) failed.
 
         Exponential backoff from ``backoff_seconds``, raised to the server's
-        ``retry_after`` when it sent one, capped at ``max_backoff_seconds``.
+        ``retry_after`` when it sent one, spread by ``jitter``, and capped at
+        ``max_backoff_seconds``.
         """
-        return _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
+        wait = _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
+        if not self.jitter or wait <= 0:
+            return wait
+        import random
+
+        draw = (rand or random.random)()
+        # Spread downward only: never wait longer than the cap or the server asked.
+        return max(0.0, wait * (1 - self.jitter * draw))
 
 
 def _backoff(base: float | None, cap: float, attempt: int, retry_after: float | None = None) -> float:
@@ -412,6 +430,38 @@ def call_timeout_for(max_tokens: int | None) -> float:
 
 
 @dataclass(frozen=True)
+class LoopGuard:
+    """Noticing when an agent has stopped making progress.
+
+    Watches for a repeating cycle of tool calls, up to ``max_period`` long,
+    repeated ``threshold`` times with the same results. A trip annotates the
+    result the model reads; it never fails the run, which is what
+    ``Limits.max_iterations`` is for.
+
+    On by default. A trip needs identical arguments *and* identical results for
+    ``threshold`` laps running, which is a genuine loop rather than a slow
+    agent, and the only consequence is a note on the tool result the model
+    reads. ``LoopGuard(enabled=False)`` opts out.
+    """
+
+    enabled: bool = True
+    max_period: int = 4
+    threshold: int = 3
+    history: int = 64
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise TypeError("enabled must be a bool")
+        _positive(self.max_period, "max_period", integer=True)
+        _positive(self.history, "history", integer=True)
+        if type(self.threshold) is not int or self.threshold < 2:
+            raise ConfigurationError("threshold must be an integer of 2 or more")
+
+    def applies(self) -> bool:
+        return self.enabled
+
+
+@dataclass(frozen=True)
 class Fallback:
     """One provider to try when the ones before it fail, named in ``AgentConfig.fallbacks``.
 
@@ -449,6 +499,35 @@ class Fallback:
 
 
 @dataclass(frozen=True)
+class ProgressPolicy:
+    """How long a call may run silently before the run stream says it is still working.
+
+    A provider that is slow rather than broken produces nothing at all: no
+    deltas, no error, no retry. From the caller's side that is
+    indistinguishable from a hung agent, so every consumer ends up writing the
+    same timer, or -- more often -- ships an interface that looks frozen.
+    ``WAITING`` events say which side is slow, the model or a named tool, and
+    how long it has been.
+
+    They are notices, not deadlines: nothing is cancelled, and the call is
+    still bounded by ``RetryPolicy.effective_call_timeout`` and the tool's own
+    timeout. ``first_after_seconds=None`` turns them off.
+    """
+
+    first_after_seconds: float | None = 10.0
+    repeat_every_seconds: float = 15.0
+
+    def __post_init__(self) -> None:
+        if self.first_after_seconds is not None:
+            _positive(self.first_after_seconds, "first_after_seconds")
+        _positive(self.repeat_every_seconds, "repeat_every_seconds")
+
+    @property
+    def enabled(self) -> bool:
+        return self.first_after_seconds is not None
+
+
+@dataclass(frozen=True)
 class ToolPolicy:
     """Registry-wide tool options that an Agent applies to the registry it adopts."""
 
@@ -481,7 +560,7 @@ _LEGACY_FIELDS: dict[str, tuple[str, str]] = {
 }
 _OMITTED: Any = object()  # "argument not given", where None is itself a legal value
 
-_P = TypeVar("_P", Limits, RetryPolicy, ToolPolicy, PromptCachePolicy)
+_P = TypeVar("_P", Limits, RetryPolicy, ToolPolicy, ProgressPolicy, PromptCachePolicy)
 
 
 def _coerce(kind: type[_P], value: Any, name: str) -> _P:
@@ -516,6 +595,9 @@ class AgentConfig:
 
     model: str = "claude-sonnet-4-6"
     provider: str = "anthropic"  # a built-in name or one passed to register_provider()
+    # Give the agent a task list it writes and the harness keeps showing it.
+    # Set False for an agent whose work is never multi-step.
+    planning: bool = True
     # Providers to try, in order, when the primary fails transiently. Empty means
     # no failover. RetryPolicy.switch_after and .cooldown_seconds govern the chain.
     fallbacks: tuple[Fallback, ...] = ()
@@ -526,6 +608,7 @@ class AgentConfig:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)  # None disables caching
     tools: ToolPolicy = field(default_factory=ToolPolicy)
+    progress: ProgressPolicy = field(default_factory=ProgressPolicy)
 
     def __init__(
         self,
@@ -533,6 +616,7 @@ class AgentConfig:
         provider: str = "anthropic",
         max_tokens: int | None = None,
         *,
+        planning: bool = True,
         fallbacks: Sequence[Fallback | Mapping[str, Any]] = (),
         system_prompt: str = "You are a helpful assistant.",
         temperature: float | None = None,
@@ -540,6 +624,7 @@ class AgentConfig:
         retry: RetryPolicy | dict[str, Any] | None = None,
         prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
         tools: ToolPolicy | dict[str, Any] | None = None,
+        progress: ProgressPolicy | dict[str, Any] | None = None,
         # Deprecated 0.3 flat names. Each overrides the matching sub-policy attribute.
         max_iterations: int | None = None,
         max_context_tokens: int | None = None,
@@ -552,6 +637,7 @@ class AgentConfig:
         model_timeout_seconds: float | None = None,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.planning = planning
         self.fallbacks = tuple(
             item if isinstance(item, Fallback) else Fallback(**dict(item)) for item in fallbacks
         )
@@ -559,6 +645,7 @@ class AgentConfig:
         self.limits = _coerce(Limits, limits, "limits")
         self.retry = _coerce(RetryPolicy, retry, "retry")
         self.tools = _coerce(ToolPolicy, tools, "tools")
+        self.progress = _coerce(ProgressPolicy, progress, "progress")
         if prompt_cache is _OMITTED:
             self.prompt_cache = PromptCachePolicy()
         elif prompt_cache is None:
@@ -595,6 +682,8 @@ class AgentConfig:
     def __post_init__(self) -> None:
         from .providers.registry import is_known_provider
 
+        if type(self.planning) is not bool:
+            raise TypeError("planning must be a bool")
         for item in self.fallbacks:
             if not isinstance(item, Fallback):
                 raise ConfigurationError("AgentConfig.fallbacks must contain Fallback entries")

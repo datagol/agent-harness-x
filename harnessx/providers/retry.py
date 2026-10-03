@@ -50,8 +50,55 @@ _TRANSIENT_MARKERS = (
 )
 
 
+# Permanent failures that arrive wearing a retryable status. A quota or billing
+# 429 is not throttling: it will still be exhausted after any backoff, so the
+# whole ladder is spent to be refused again. Checked before the status.
+_PERMANENT_MARKERS = (
+    "quota exceeded",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "billing",
+    "payment required",
+    "spending limit",
+    "credit balance is too low",
+    "account is not active",
+    "suspended",
+)
+
+# Overflowing the context window is deterministic: the same request will not fit
+# next time either. It needs condensing, not a retry.
+_OVERFLOW_MARKERS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "prompt is too long",
+    "reduce the length",
+)
+
+
+def is_permanent(exc: BaseException) -> bool:
+    """True when no number of attempts will help, whatever the status says."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _PERMANENT_MARKERS)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """True when the request did not fit the model's context window."""
+    text = str(exc).lower()
+    if any(marker in text for marker in _OVERFLOW_MARKERS):
+        # "Too many tokens" also appears in some throttling messages; a
+        # throttle names a rate, an overflow names the window.
+        return not any(marker in text for marker in ("rate limit", "too many requests", "throttl"))
+    return False
+
+
 def is_transient(exc: BaseException) -> bool:
     """True when one more attempt could plausibly succeed."""
+    # Permanent and overflow failures can carry a 429 or a 5xx, so they are
+    # settled before the status is consulted.
+    if is_permanent(exc) or is_context_overflow(exc):
+        return False
     # SDKs expose the HTTP status inconsistently; check the usual spellings.
     for attr in ("code", "status_code", "http_status"):
         value = getattr(exc, attr, None)

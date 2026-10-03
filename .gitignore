@@ -37,3 +37,8 @@ output/
 
 # Internal design notes and guides live outside the repository
 doc/
+
+# Local run artifacts from the sandbox and durable-runtime examples.
+.sandbox_sessions/
+.agent_sessions/
+*.sqlite3

@@ -402,7 +402,7 @@ class ToolRegistry:
         """Load built-in tools into the registry by bundle name or tool name.
 
         Args:
-            bundle_or_tool: 'filesystem', 'bash', 'web', 'memory', 'all', or a tool name like 'read_file'.
+            bundle_or_tool: 'filesystem', 'bash', 'web', 'memory', 'planning', 'all', or a tool name like 'read_file'.
             include: Specific tool names to include.
             exclude: Tool names to skip.
             permission: Override default permission level for loaded tools.
@@ -416,6 +416,7 @@ class ToolRegistry:
             register_bash_tools,
             register_filesystem_tools,
             register_memory_tools,
+            register_planning_tools,
             register_web_tools,
         )
         from .builtin._registration import select_tools
@@ -431,6 +432,8 @@ class ToolRegistry:
             return register_web_tools(self, include=include, exclude=exclude, permission=permission, replace=replace, **options)
         elif name in ("memory",):
             return register_memory_tools(self, include=include, exclude=exclude, permission=permission, replace=replace, **options)
+        elif name in ("planning", "todos", "plan"):
+            return register_planning_tools(self, include=include, exclude=exclude, permission=permission, replace=replace, **options)
 
         standalone_map = {
             "read_file": register_filesystem_tools,
@@ -441,6 +444,8 @@ class ToolRegistry:
             "fetch_url": register_web_tools,
             "save_memory": register_memory_tools,
             "recall_memories": register_memory_tools,
+            "write_todos": register_planning_tools,
+            "read_todos": register_planning_tools,
         }
         if name in standalone_map:
             selected = select_tools(self, [name], include, exclude, replace=replace)
@@ -448,7 +453,7 @@ class ToolRegistry:
 
         raise ValueError(
             f"Unknown built-in tool or bundle: {bundle_or_tool!r}. "
-            f"Available bundles: 'filesystem', 'bash', 'web', 'memory', 'all'."
+            f"Available bundles: 'filesystem', 'bash', 'web', 'memory', 'planning', 'all'."
         )
 
     def get_tool_params(self) -> list[dict[str, Any]]:
@@ -490,6 +495,25 @@ class ToolRegistry:
 
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
+
+    def resolve_tool(self, name: str) -> tuple[ToolDefinition, str]:
+        """Find a tool, correcting a name the model nearly got right.
+
+        Models misspell a tool name by case far more often than by anything
+        else. Failing the call teaches nothing the model can act on, and the
+        repair is unambiguous as long as exactly one tool matches. Returns the
+        definition and the corrected name.
+        """
+        if name in self._tools:
+            return self._tools[name], name
+        if isinstance(name, str):
+            folded = name.strip().casefold()
+            matches = [known for known in self._tools if known.casefold() == folded]
+            if len(matches) == 1:
+                return self._tools[matches[0]], matches[0]
+        raise ToolNotFoundError(
+            f"No tool named {name!r}. Available tools: {', '.join(sorted(self._tools)) or 'none'}"
+        )
 
     async def execute(
         self, tool_call: ToolCall, *, permissions: PermissionManager | None = None,

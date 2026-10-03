@@ -190,6 +190,15 @@ EXAMPLES = [
         detail="Requires DATABASE_URL for an existing database. The original example provisions HarnessX tables.",
     ),
     Example(
+        "task_agent",
+        "Task agent",
+        "Hand it one task on the command line; it writes the deliverable and runs it.",
+        "Agents",
+        "terminal",
+        prompt="Write a Python script that prints the first 10 Fibonacci numbers, run it, and confirm the output.",
+        detail="One-shot rather than a conversation. It carries the file and shell tools, so it can produce any format without a pre-written renderer. Web search and tracing switch on only when their keys are set.",
+    ),
+    Example(
         "mcp_agent",
         "MCP agent",
         "Connect a local or remote MCP server and use its tools in a conversation.",

@@ -30,6 +30,8 @@ class HookEvent(Enum):
     SANDBOX_EXEC = "sandbox_exec"
     CHECKPOINT = "checkpoint"
     RETRY = "retry"
+    CONTEXT_CONDENSED = "context_condensed"
+    REPETITION = "repetition"
     ERROR = "error"
 
 
@@ -60,6 +62,22 @@ class LLMResponseData(TypedDict):
     response: "ProviderResponse"
     stop_reason: Any
     provider: str  # the provider that served the call; a FallbackProvider reports the member
+
+
+class ContextCondensedData(TypedDict):
+    """History was condensed to make room for the next request."""
+
+    messages_dropped: int
+    summary_chars: int
+    summarized: bool  # False when the model summary failed and the fallback ran
+
+
+class RepetitionData(TypedDict):
+    """A repeating cycle of tool calls stopped producing new results."""
+
+    period: int  # 1 is the same call repeated; 2 is A, B, A, B
+    laps: int
+    tool: str
 
 
 class RetryData(TypedDict):
@@ -115,7 +133,7 @@ class CheckpointEventData(TypedDict):
 HookData = Union[
     AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
     ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, SandboxExecData,
-    CheckpointEventData, RetryData,
+    CheckpointEventData, RetryData, ContextCondensedData, RepetitionData,
 ]
 
 HOOK_PAYLOADS: dict[HookEvent, type] = {
@@ -132,6 +150,8 @@ HOOK_PAYLOADS: dict[HookEvent, type] = {
     HookEvent.SANDBOX_EXEC: SandboxExecData,
     HookEvent.CHECKPOINT: CheckpointEventData,
     HookEvent.RETRY: RetryData,
+    HookEvent.CONTEXT_CONDENSED: ContextCondensedData,
+    HookEvent.REPETITION: RepetitionData,
 }
 
 

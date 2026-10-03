@@ -227,7 +227,7 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
     assert shape["retry"] == {
         "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 30.0,
-        "switch_after": 1, "cooldown_seconds": 0.0,
+        "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
     }
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}
@@ -496,8 +496,12 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
         assert (await runtime.run("go")).ok
         assert (await runtime.run("fail")).failed
 
-    # SKILL_INVOKED needs a skill, RETRY a transient failure; both have their own tests.
-    missing = set(HOOK_PAYLOADS) - set(observed) - {HookEvent.SKILL_INVOKED, HookEvent.RETRY}
+    # These need conditions a plain run does not meet: a skill, a transient
+    # failure, an overflowing history. Each has its own test.
+    missing = set(HOOK_PAYLOADS) - set(observed) - {
+        HookEvent.SKILL_INVOKED, HookEvent.RETRY, HookEvent.CONTEXT_CONDENSED,
+        HookEvent.REPETITION,
+    }
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():
         allowed = set(HOOK_PAYLOADS[event].__annotations__)  # forward refs stay strings
@@ -683,7 +687,9 @@ async def test_llm_request_hook_carries_the_request_as_sent():
     payload = seen[0]
     assert payload["system"].startswith("Be terse.") and payload["model"] == config.model
     assert (payload["max_tokens"], payload["temperature"], payload["stream"]) == (99, 0.2, False)
-    assert payload["message_count"] == 1 and payload["tool_count"] == 1 and isinstance(payload["prefix_key"], str)  # the built-in reader
+    assert payload["message_count"] == 1 and isinstance(payload["prefix_key"], str)
+    # read_tool_result plus the two planning tools, all registered by the Agent itself.
+    assert payload["tool_count"] == 3
 
 
 @pytest.mark.asyncio

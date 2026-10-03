@@ -145,7 +145,8 @@ def test_transient_text_recognizes_throttling_phrases():
 
 
 def test_wait_for_backs_off_honors_retry_after_and_caps():
-    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=5)
+    # jitter=0 so the backoff maths is asserted exactly; jitter has its own test.
+    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=5, jitter=0)
     assert policy.wait_for(1) == 1 and policy.wait_for(2) == 2 and policy.wait_for(3) == 4
     assert policy.wait_for(4) == 5, "capped"
     assert policy.wait_for(1, retry_after=3) == 3, "the server's hint wins over a shorter backoff"
@@ -160,7 +161,10 @@ async def test_model_retry_emits_the_hook_and_honors_the_servers_retry_after():
     provider = Scripted([_Boom(429, headers={"retry-after": "4"}), ProviderResponse(text="ok")])
     seen: list[dict[str, Any]] = []
     agent = Agent(
-        config=AgentConfig(model="m", retry=RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.01)),
+        config=AgentConfig(
+            model="m",
+            retry=RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.01, jitter=0),
+        ),
         provider=provider,
     )
     agent.hooks.on(HookEvent.RETRY, lambda ctx: seen.append(dict(ctx.data)))
@@ -280,6 +284,32 @@ async def test_fallback_through_an_agent_reports_the_serving_member():
         assert (await agent.run("one")).output == "b"
         assert (await agent.run("two")).output == "p"
     assert served == ["backup", "primary"]
+
+
+@pytest.mark.asyncio
+async def test_async_with_closes_a_chains_own_members(monkeypatch):
+    """A provider you construct is yours to close, and `async with` is how.
+
+    Every other resource the SDK hands you closes this way: the MCP manager,
+    the backends, the Agent. A provider holding one SDK client per fallback
+    member was the odd one out, leaving `contextlib.aclosing` as the only
+    spelling, which is meant for async generators."""
+    built = Scripted(label="built")
+    monkeypatch.setattr("harnessx.providers.fallback.make_provider", lambda name, **kw: built)
+    injected = Scripted(label="injected")
+
+    async with FallbackProvider("anthropic", fallbacks=[injected]) as chain:
+        assert chain.labels == ("anthropic", "injected")
+    assert built.closed, "the chain closes what it built"
+    assert not injected.closed, "and leaves what you passed in alone"
+
+
+@pytest.mark.asyncio
+async def test_async_with_returns_the_provider_itself():
+    provider = Scripted()
+    async with provider as entered:
+        assert entered is provider
+    assert provider.closed
 
 
 @pytest.mark.asyncio

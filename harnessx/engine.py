@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
+
 
 from .execution import (
     RunEvent,
     RunEventType as E,
     ToolExecutionContext,
+    _agent_context,
     _tool_context,
     ToolApprovalRequired,
     cancel_state,
+    close_open_tool_calls,
     next_command,
     result_from_state,
     transition,
@@ -27,6 +31,72 @@ from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .tools import retry_wanted
 from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult, ToolRetry
 from ._journal import RecordingError, record as journal_record
+
+logger = logging.getLogger(__name__)
+
+# How many times one turn may condense its history. A summary that fails to
+# shrink the history enough would otherwise re-trigger every iteration, which is
+# the compaction loop OpenCode has open as issue 15533.
+MAX_CONDENSATIONS = 3
+
+# Asking for the summary. Deliberately told to preserve decisions and open work
+# rather than narrate, because the model reads this instead of the transcript.
+SUMMARY_SYSTEM = (
+    "You condense an agent's conversation so it can keep working with less context. "
+    "Write a dense factual record, not a narrative."
+)
+SUMMARY_INSTRUCTION = (
+    "Condense the conversation above into a record the agent can continue from.\n\n"
+    "Preserve, in this order and only where present:\n"
+    "- The task as it currently stands, including any revisions to it.\n"
+    "- Decisions made and the reasons, especially ones that constrain what comes next.\n"
+    "- Facts established: file paths, identifiers, values, command results.\n"
+    "- Work completed, and work still outstanding.\n"
+    "- Anything that failed, and what was learned from it.\n\n"
+    "Omit pleasantries and restatements. Do not invent anything not present above. "
+    "Do not address the reader or offer help."
+)
+
+
+async def await_with_notices(awaitable, policy, event, *, on, name=None):
+    """Await something slow, saying so rather than going quiet.
+
+    The wait runs in the calling task: a side task emitting into the same run
+    stream would interleave with the driver's own writes, and the durable
+    backends persist events in order. Nothing is cancelled here -- the call is
+    still bounded by the retry policy's call timeout and the tool's own.
+    """
+    task = asyncio.ensure_future(awaitable)
+    if policy is None or not policy.enabled:
+        return await task
+    waited = 0.0
+    delay = policy.first_after_seconds
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=delay)
+        if done:
+            return await task
+        waited += delay
+        await event(E.WAITING, {"on": on, "seconds": round(waited, 1), **({"name": name} if name else {})})
+        delay = policy.repeat_every_seconds
+
+
+async def stream_with_notices(iterator, policy, event, *, on):
+    """The same, for a stream: the gap before the first chunk is the slow part.
+
+    Between chunks the wait restarts, so a provider that stalls mid-answer is
+    reported too.
+    """
+    if policy is None or not policy.enabled:
+        async for chunk in iterator:
+            yield chunk
+        return
+    iterator = iterator.__aiter__()
+    while True:
+        try:
+            chunk = await await_with_notices(iterator.__anext__(), policy, event, on=on)
+        except StopAsyncIteration:
+            return
+        yield chunk
 
 
 def default_max_tokens(provider, model: str) -> int:
@@ -69,6 +139,7 @@ async def snapshot(agent) -> dict:
                 "extensions": extensions,
                 "total_usage": agent.guardrails.total_usage,
                 "lifetime_iterations": agent.guardrails.lifetime_iterations,
+                "todos": list(getattr(agent, "todos", []) or []),
             }
         ),
     )
@@ -84,6 +155,7 @@ async def restore(agent, state):
     agent.guardrails._total_usage = TokenUsage(**state.get("total_usage", {}))
     agent.guardrails._iteration_count = state.get("iterations", 0)
     agent.guardrails._lifetime_iterations = state.get("lifetime_iterations", 0)
+    agent.todos = copy.deepcopy(state.get("todos", []) or [])
     for ext in agent.extensions:
         if ext.name in state.get("extensions", {}):
             await ext.on_load_session(
@@ -109,6 +181,10 @@ def new_state(agent, message, *, run_id=None, durable=False):
         "tools": [],
         "attempt": 0,
         "usage_incomplete": False,
+        "call_history": [],
+        # Carried between runs in a session, the way messages are: a task list
+        # that reset every turn would be no better than not having one.
+        "todos": copy.deepcopy(getattr(agent, "todos", []) or []),
     }
 
 
@@ -164,13 +240,21 @@ async def command(agent, state, name, emit, *, record=None):
         )
         tools = agent.tools.get_tool_params()
         system = agent._build_system_prompt()
-        await agent.memory.trim_if_needed(
+        reply_tokens = agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model)
+        # Condensing costs a model call, so it is its own phase rather than a
+        # side effect here: journaled, retried and observable like any other.
+        # `condensations` bounds it, because a summary that does not shrink the
+        # history enough would otherwise re-trigger on the very next iteration.
+        if state.get("condensations", 0) < MAX_CONDENSATIONS and await agent.memory.needs_condensing(
             agent.provider, agent.config.model, system, tools,
             max_context_tokens=agent.config.limits.max_context_tokens,
-        )
+            reply_tokens=reply_tokens,
+        ):
+            return {**await snapshot(agent), "phase": "compact", "iterations": agent.guardrails.iteration_count}
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools
         )
+        messages = coalesce_same_role(with_task_reminder(agent, messages))
         return {
             **await snapshot(agent),
             "iterations": agent.guardrails.iteration_count,
@@ -188,6 +272,39 @@ async def command(agent, state, name, emit, *, record=None):
                 )
             ),
             "attempt": 0,
+        }
+
+    if name == "compact":
+        dropped, split_point = agent.memory.pending_condensation()
+        summary, usage = "", state["usage"]
+        if split_point:
+            if not state.get("condense_without_model"):
+                # A failure here propagates, so the driver retries it under
+                # RetryPolicy like any other model call. Catching it inside the
+                # command is what defeated that retry entirely; the lossy
+                # fallback runs only once the attempts are spent.
+                summary, summary_usage = await summarize_history(agent, dropped)
+                usage = {k: usage.get(k, 0) + v for k, v in asdict(summary_usage).items()}
+            if summary:
+                agent.memory.apply_condensation(summary, split_point)
+            else:
+                await agent.memory.trim_if_needed(
+                    agent.provider, agent.config.model, agent._build_system_prompt(),
+                    agent.tools.get_tool_params(),
+                    max_context_tokens=agent.config.limits.max_context_tokens,
+                    reply_tokens=agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model),
+                )
+        await emit_hook(
+            agent, HookEvent.CONTEXT_CONDENSED,
+            messages_dropped=len(dropped), summary_chars=len(summary),
+            summarized=bool(summary),
+        )
+        return {
+            **await snapshot(agent),
+            "phase": "prepare_model",
+            "usage": usage,
+            "condensations": state.get("condensations", 0) + 1,
+            "condense_without_model": False,
         }
 
     if name == "model":
@@ -223,9 +340,12 @@ async def command(agent, state, name, emit, *, record=None):
         response = None
         # Retries live in the driver (one policy, journaled per attempt);
         # this command makes exactly one provider call.
+        progress = getattr(agent.config, "progress", None)
         async with asyncio.timeout(agent.config.retry.effective_call_timeout(request.get("max_tokens"))):
             if streaming:
-                async for chunk in agent.provider.stream(**request):
+                async for chunk in stream_with_notices(
+                    agent.provider.stream(**request), progress, event, on="model"
+                ):
                     if chunk.kind == "response":
                         response = chunk.data
                     elif not buffered and chunk.kind in (
@@ -238,7 +358,9 @@ async def command(agent, state, name, emit, *, record=None):
                         "Provider stream ended without a completed response"
                     )
             else:
-                response = await agent.provider.create(**request)
+                response = await await_with_notices(
+                    agent.provider.create(**request), progress, event, on="model"
+                )
         if record:
             # Copy before middleware can mutate the same ProviderResponse in place.
             await record("model.response", response_payload(response))
@@ -305,10 +427,24 @@ async def command(agent, state, name, emit, *, record=None):
                 "retry": ToolRetry().to_dict(),
             }
             try:
-                definition = agent.tools.get_tool(call.name)
-                from jsonschema import validate
+                definition, corrected = agent.tools.resolve_tool(call.name)
+                if corrected != call.name:
+                    # A case-only miss is a typo, not a different intent.
+                    logger.info("repaired tool name %r -> %r", call.name, corrected)
+                    call = replace(call, name=corrected)
+                    entry["call"] = wire(call)
+                from jsonschema import ValidationError, validate
 
-                validate(call.input, definition.input_schema)
+                try:
+                    validate(call.input, definition.input_schema)
+                except ValidationError as invalid:
+                    # Hand the model one actionable line, the way a tool error
+                    # reads, so it can reissue the call rather than stall.
+                    location = ".".join(str(part) for part in invalid.absolute_path)
+                    where = f" at {location!r}" if location else ""
+                    raise ValueError(
+                        f"Invalid arguments for {call.name!r}{where}: {invalid.message}"
+                    ) from None
                 entry.update(
                     policy=definition.replay_policy,
                     concurrent=definition.concurrent,
@@ -347,11 +483,22 @@ async def command(agent, state, name, emit, *, record=None):
 
     if name == "collect_tools":
         results = [ToolResult(**t["result"]) for t in state["tools"]]
+        history, notice = watch_for_repetition(agent, state)
+        if notice:
+            # Annotate the result the model is about to read. Telling the model
+            # it is repeating usually stops it; ending the run is what
+            # max_iterations is for.
+            results = [replace(results[0], content=f"{notice}\n\n{results[0].content}"), *results[1:]]
+            await emit_hook(
+                agent, HookEvent.REPETITION,
+                period=notice_period(notice), laps=agent.config.limits.loop_guard.threshold,
+                tool=state["tools"][0]["call"]["name"],
+            )
         agent.memory.add_tool_results(results)
         await emit_hook(
             agent, HookEvent.LOOP_ITERATION_END, iteration=state["iterations"]
         )
-        return {**await snapshot(agent), "tools": []}
+        return {**await snapshot(agent), "tools": [], "call_history": history}
 
     if name == "finish":
         for ext in agent.extensions:
@@ -387,6 +534,7 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         state["session_id"], state["run_id"], entry["execution_key"], entry["attempt"]
     )
     token = _tool_context.set(context)
+    agent_token = _agent_context.set(agent)
     try:
         if record:
             await record("tool.dispatched", {"call": entry["call"]}, entry)
@@ -404,6 +552,7 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         return wire(result)
     finally:
         _tool_context.reset(token)
+        _agent_context.reset(agent_token)
 
 
 async def finish_tool(agent, entry):
@@ -615,7 +764,7 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     state["status"] = "awaiting_input"
                     break
                 name = "collect_tools"
-            if name == "model":
+            if name in ("model", "compact"):
                 if state["attempt"]:
                     state["usage_incomplete"] = True
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
@@ -636,12 +785,25 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     outcome = await command(agent, state, name, command_emit, record=recorder)
                     break
                 except Exception as exc:
-                    if name == "model":
+                    if name in ("model", "compact"):
                         await record("model.failed", {
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    if name != "model" or not retryable(agent, exc) or state["attempt"] >= retry.attempts:
+                    spent = not retryable(agent, exc) or state["attempt"] >= retry.attempts
+                    if name == "compact" and spent and not state.get("condense_without_model"):
+                        # A failed summary must not fail the run. Condense at the
+                        # character level instead: lossy, but it always works.
+                        logger.warning(
+                            "history summarization failed after %d attempt(s); "
+                            "condensing without a model", state["attempt"], exc_info=True,
+                        )
+                        # Set before retrying, and checked above, so a fallback
+                        # that itself fails raises rather than looping here.
+                        state["condense_without_model"] = True
+                        buffered_events.clear()
+                        continue
+                    if name not in ("model", "compact") or spent:
                         raise
                     wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
                     await emit_hook(
@@ -657,7 +819,15 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     if wait:
                         await asyncio.sleep(wait)
             outcome = await capture(agent, outcome)
+            before = state.get("messages")
             state = transition(state, name, outcome)
+            if state.get("messages") is not before:
+                # `transition` is pure and cannot reach the agent, so a repair it
+                # makes -- closing the tool calls of a reply cut off at the token
+                # budget -- lives only in the state dict. The next command
+                # snapshots `agent.memory`, and that snapshot would put the
+                # unanswered `tool_use` straight back. Mirror it across now.
+                agent.memory.set_messages(copy.deepcopy(state["messages"]))
             await persist(buffered_events, journal=(
                 records("model.completed", outcome["response"]) if name == "model" else []
             ))
@@ -675,6 +845,12 @@ async def drive(agent, state, emit, *, commit=None, control=None):
         state.update(
             status="failed", error={"type": type(exc).__name__, "message": str(exc)}
         )
+        # A failure after the assistant turn was saved leaves its tool calls
+        # unanswered, and the session cannot be resumed from that transcript.
+        state = close_open_tool_calls(
+            state, f"Not executed: the run failed first ({type(exc).__name__})."
+        )
+        agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
         await emit_hook(agent, HookEvent.ERROR, error=str(exc))
         await persist([ev(E.ERROR, str(exc))], journal=records("command.failed", {
             "phase": state["phase"], "type": type(exc).__name__, "message": str(exc),
@@ -689,6 +865,169 @@ async def drive(agent, state, emit, *, commit=None, control=None):
         events.insert(0, ev(E.TURN_COMPLETE, result.stop_reason))
     await persist(events)
     return result
+
+
+async def summarize_history(agent, dropped: list[dict]) -> tuple[str, TokenUsage]:
+    """Summarize the messages a condensation is about to drop, using the agent's model.
+
+    Returns the summary and what it cost. The summary is a real model call, so
+    its tokens go through `track_usage` and into `RunResult.usage` like any
+    other; leaving them out hid spend from `Limits.max_cost_dollars`.
+    """
+    transcript = render_for_summary(dropped)
+    if not transcript.strip():
+        return "", TokenUsage()
+    budget = min(2_000, agent.config.max_tokens or default_max_tokens(agent.provider, agent.config.model))
+    response = await agent.provider.create(
+        model=agent.config.model,
+        messages=[{"role": "user", "content": f"{transcript}\n\n{SUMMARY_INSTRUCTION}"}],
+        system=SUMMARY_SYSTEM,
+        tools=[],
+        max_tokens=budget,
+        temperature=agent.config.temperature,
+    )
+    usage = getattr(response, "usage", None) or TokenUsage()
+    agent.guardrails.track_usage(usage)
+    return (getattr(response, "text", "") or "").strip(), usage
+
+
+def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> str:
+    """Flatten messages into labelled lines for the summarizer.
+
+    Tool output is capped per block: the summary needs to know a tool ran and
+    roughly what it said, not to carry its payload into another model call.
+    """
+    lines: list[str] = []
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+        if isinstance(content, str):
+            if content.strip():
+                lines.append(f"[{role}] {content[:max_block_chars]}")
+            continue
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and block.get("text", "").strip():
+                lines.append(f"[{role}] {block['text'][:max_block_chars]}")
+            elif kind == "tool_use":
+                lines.append(f"[{role} tool call] {block.get('name', '?')}({_preview(block.get('input'))})")
+            elif kind == "tool_result":
+                body = str(block.get("content", ""))[:max_block_chars]
+                label = "tool error" if block.get("is_error") else "tool result"
+                lines.append(f"[{label}] {body}")
+    return "\n".join(lines)
+
+
+def _preview(value, limit: int = 200) -> str:
+    text = str(value if value is not None else "")
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def coalesce_same_role(messages: list[dict]) -> list[dict]:
+    """Join neighbouring messages that share a role, on the outbound request only.
+
+    Several ordinary shapes produce two user turns in a row. A tool-result
+    message is user-role, so a turn that ends right after one -- a reply cut off
+    at the token budget, whose refused calls we answer ourselves -- is followed
+    directly by the next user message. Anthropic merges these silently; other
+    providers reject them, and a configured fallback can be any of them.
+
+    The stored transcript keeps both messages, which is the honest record of what
+    happened. Only the request the provider sees is joined.
+    """
+    joined: list[dict] = []
+    for message in messages:
+        if not joined or joined[-1].get("role") != message.get("role"):
+            joined.append(message)
+            continue
+        previous, content = joined[-1], message.get("content")
+        merged = _as_blocks(previous.get("content")) + _as_blocks(content)
+        joined[-1] = {**previous, "content": merged}
+    return joined
+
+
+def _as_blocks(content) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content.strip() else []
+    return [b for b in content or [] if isinstance(b, dict)]
+
+
+def with_task_reminder(agent, messages: list[dict]) -> list[dict]:
+    """Append the current task list, when there is one.
+
+    At the tail rather than in the system prompt: the system prompt heads the
+    cacheable prefix, so rewriting it every time a task is ticked off would
+    invalidate the prompt cache for the whole conversation. Appending leaves the
+    prefix untouched.
+
+    Rebuilt from the agent each turn, so the model always reads the current list
+    rather than whichever copy survived condensing.
+    """
+    todos = getattr(agent, "todos", None)
+    if not todos:
+        return messages
+    from .builtin.planning import render
+
+    reminder = render(todos)
+    if not reminder:
+        return messages
+    # Merge into the last message when it is already user-role, rather than
+    # appending a second one. A tool-result message is user-role too, so
+    # appending produced two consecutive user turns on every agentic turn.
+    # Anthropic tolerates that; other providers are stricter, and a declared
+    # fallback can be any of them.
+    if messages and messages[-1].get("role") == "user":
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            merged = {**last, "content": f"{content}\n\n{reminder}"}
+        elif isinstance(content, list):
+            merged = {**last, "content": [*content, {"type": "text", "text": reminder}]}
+        else:
+            return [*messages, {"role": "user", "content": reminder}]
+        return [*messages[:-1], merged]
+    return [*messages, {"role": "user", "content": reminder}]
+
+
+def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:
+    """Track completed calls and report a cycle that has stopped producing news.
+
+    Returns the history to persist and, when a cycle is detected, the notice to
+    put in front of the model's next read.
+    """
+    from .loopguard import call_signature, detect_cycle, repetition_notice
+
+    guard = agent.config.limits.loop_guard
+    history = list(state.get("call_history") or [])
+    if not guard.applies():
+        return history, None
+
+    # Every completed call is evidence, whatever its replay policy and whether
+    # it succeeded. Progress is already encoded in the signature, which covers
+    # the result as well as the arguments: an edit that changes a file, or a
+    # test whose output changes, produces a different signature and so breaks
+    # the cycle on its own. Clearing the history on success instead -- which is
+    # what Hermes does, because its signatures carry no result -- switched the
+    # guard off for every tool not declared ``safe``, which is the default.
+    for entry in state["tools"]:
+        result = entry.get("result") or {}
+        call = entry["call"]
+        history.append(call_signature(call["name"], call.get("input"), str(result.get("content", ""))))
+
+    if len(history) > guard.history:
+        history = history[-guard.history:]
+
+    period = detect_cycle(history, max_period=guard.max_period, threshold=guard.threshold)
+    if period is None:
+        return history, None
+    # Start again, so one cycle is reported once rather than on every call after.
+    return [], repetition_notice(period, guard.threshold)
+
+
+def notice_period(notice: str) -> int:
+    return 1 if "This exact call" in notice else int(notice.split("cycle of ")[1].split()[0])
 
 
 def retryable(agent, exc):

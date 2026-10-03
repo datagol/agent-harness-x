@@ -59,6 +59,7 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.langsmith_tracing` | Explicit tracing and specialist spans | `langsmith` extra, Anthropic and LangSmith keys |
 | `python -m examples.run_evals --offline` | Three scripted math/selection evaluations | `langsmith` extra; no keys or uploads |
 | `python -m examples.run_evals` | The same cases against a live model | `langsmith` extra, Anthropic key; upload enabled when a LangSmith key exists |
+| `python -m examples.task_agent "TASK" -o FILE` | One-shot CLI agent: researches, writes the deliverable, runs it | Anthropic key; `TAVILY_API_KEY` adds web search, `LANGSMITH_API_KEY` adds tracing |
 | `python -m examples.mcp_agent --server NAME --command COMMAND` | Local MCP tools alongside native tools | `mcp` extra, Anthropic key, an installed MCP server |
 
 The files `_console.py`, `_calculator.py`, `_fixtures.py`, and `_decision_fixtures.py` are shared helpers.

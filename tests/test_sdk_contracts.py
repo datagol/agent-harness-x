@@ -268,7 +268,8 @@ async def test_extension_priority_and_disposable_registrations():
     assert ("late", RunStatus.COMPLETED) in log
     await agent.aclose()
     assert log[-2:] == [("late", "close"), ("early", "close")]
-    assert agent.tools.list_tools() == ["read_tool_result"] and not agent.middleware._middleware and not agent.prompt_providers
+    assert agent.tools.list_tools() == ["read_tool_result", "write_todos", "read_todos"]
+    assert not agent.middleware._middleware and not agent.prompt_providers
     assert not agent.hooks._hooks[HookEvent.AGENT_START]
 
 
@@ -348,7 +349,8 @@ async def test_teardown_failure_does_not_skip_owned_provider_cleanup():
     agent = owned_agent(extensions=[Broken("broken", [])])
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
-    assert agent.provider.closed == 1 and agent.tools.list_tools() == ["read_tool_result"]
+    assert agent.provider.closed == 1
+    assert agent.tools.list_tools() == ["read_tool_result", "write_todos", "read_todos"]
     with pytest.raises(ExceptionGroup):
         await agent.aclose()
     assert agent.provider.closed == 1
@@ -394,6 +396,27 @@ def test_event_payload_and_failure_validation():
     event = RunEvent(RunEventType.RUN_RESULT, RunResult("session", "run"))
     from harnessx.execution import wire
     assert RunEvent.from_dict(wire(event)) == event
+
+
+def test_waiting_events_say_what_is_slow():
+    """The payload is the contract: a consumer branches on `on` to word it."""
+    from harnessx import ProgressPolicy
+
+    event = RunEvent(RunEventType.WAITING, {"on": "model", "seconds": 12.0})
+    from harnessx.execution import wire
+    assert RunEvent.from_dict(wire(event)) == event
+
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"seconds": 1.0})           # no subject
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"on": "model"})            # no elapsed
+    with pytest.raises(ValueError):
+        RunEvent(RunEventType.WAITING, {"on": "weather", "seconds": 1.0})
+
+    # Notices are on by default; a consumer opts out rather than opting in,
+    # because a silent slow call is the failure this exists to prevent.
+    assert ProgressPolicy().enabled is True
+    assert ProgressPolicy(first_after_seconds=None).enabled is False
 
 
 @pytest.mark.asyncio

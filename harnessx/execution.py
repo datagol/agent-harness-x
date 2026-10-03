@@ -36,6 +36,7 @@ class RunEventType(str, Enum):
     APPROVAL_REQUIRED = "approval_required"
     RECOVERY_REQUIRED = "recovery_required"
     ATTEMPT_RESET = "attempt_reset"
+    WAITING = "waiting"
     RUN_RESULT = "run_result"
     GAP = "gap"
 
@@ -242,6 +243,11 @@ class RunEvent:
                 raise ValueError("Pending-tool events require execution_key and call")
         if self.type == RunEventType.ATTEMPT_RESET and isinstance(self.data, dict) and type(self.data.get("attempt")) is not int:
             raise ValueError("Attempt reset requires an integer attempt")
+        if self.type == RunEventType.WAITING and isinstance(self.data, dict):
+            if self.data.get("on") not in ("model", "tool"):
+                raise ValueError("Waiting events say what is being waited on: 'model' or 'tool'")
+            if not isinstance(self.data.get("seconds"), (int, float)):
+                raise ValueError("Waiting events require elapsed seconds")
 
     @classmethod
     def from_dict(cls, data: dict) -> RunEvent:
@@ -299,6 +305,21 @@ def current_tool_context() -> ToolExecutionContext:
     return context
 
 
+_agent_context: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "harness_agent", default=None
+)
+
+
+def current_agent() -> Any | None:
+    """The agent running the current tool call, or None outside a run.
+
+    Built-in tools that keep run-scoped state use this to reach it. Application
+    tools should close over what they need instead; this is not a service
+    locator for arbitrary agent access.
+    """
+    return _agent_context.get()
+
+
 def next_command(state: dict) -> str:
     """Pure, shared by the in-process driver and Temporal workflow replay."""
     if state["status"] != "running":
@@ -310,12 +331,31 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
     """Only completed commands advance execution; in-flight tools retain intent."""
     state = {**state, **outcome}
     if command == "prepare_model":
-        state["phase"] = "model"
+        # Normally the model call is next, but preparing may decide the history
+        # has to be condensed first and say so in its outcome.
+        state["phase"] = outcome.get("phase", "model")
     elif command == "model":
         response = state["response"]
-        if response["stop_reason"] == "tool_use" and response["tool_calls"]:
+        # Trust the tool calls, not the stop reason. Providers return "end_turn"
+        # or "stop" while still carrying tool calls; ending the turn there drops
+        # them silently and the run looks like the model ignored its tools.
+        # A reply cut off at max_tokens is the exception: its tool arguments may
+        # have been truncated mid-JSON and can parse while being incomplete, so
+        # those calls are never executed.
+        truncated = response["stop_reason"] == "max_tokens"
+        if response["tool_calls"] and not truncated:
             state["phase"] = "prepare_tools"
         else:
+            if response["tool_calls"]:
+                # Refused above, but the assistant turn carrying them is already
+                # in the transcript, so each one still needs an answer or the
+                # next request is malformed.
+                state = close_open_tool_calls(
+                    state,
+                    "Not executed: the reply was cut off at the token budget, so "
+                    "these arguments may be incomplete. Call the tool again with "
+                    "a shorter reply.",
+                )
             state.update(
                 phase="finish",
                 output=response["text"],
@@ -436,29 +476,58 @@ def model_timeout_from_wire(config: Mapping[str, Any] | None) -> float:
     return call_timeout_for(config.get("max_tokens"))
 
 
+def close_open_tool_calls(state: dict, unanswered: str) -> dict:
+    """Answer every tool call in the last assistant turn that has no result yet.
+
+    An assistant message carrying a ``tool_use`` block that nothing answers is
+    not a transcript a provider will accept: Anthropic rejects the next request
+    outright, and the session is wedged with no way forward. Any path that stops
+    after the assistant turn is saved has to close the calls it leaves open --
+    cancellation, a reply truncated at the token budget, or a mid-turn failure.
+
+    Results already recorded are kept, so a tool that did run reports what it
+    did; the rest get ``unanswered``. Pure, because ``transition`` is.
+    """
+    messages = state.get("messages", [])
+    if not messages or messages[-1].get("role") != "assistant":
+        return state
+    content = messages[-1].get("content")
+    if not isinstance(content, list):
+        return state
+    calls = [b for b in content if b.get("type") == "tool_use"]
+    if not calls:
+        return state
+
+    recorded = {t["call"]["id"]: t for t in state.get("tools", [])}
+    answered = {
+        b.get("tool_use_id")
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    }
+    results = []
+    for call in calls:
+        if call["id"] in answered:
+            continue
+        entry = recorded.get(call["id"], {})
+        result = entry.get("result") or entry.get("raw_result")
+        results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": call["id"],
+                "content": result["content"] if result else unanswered,
+                "is_error": result.get("is_error", False) if result else True,
+            }
+        )
+    if results:
+        state["messages"] = [*messages, {"role": "user", "content": results}]
+    return state
+
+
 def cancel_state(state: dict) -> dict:
     """Close incomplete tool protocol messages while retaining uncertain effects."""
     state["status"] = "cancelled"
-    messages = state.get("messages", [])
-    if messages and messages[-1].get("role") == "assistant":
-        calls = [
-            b for b in messages[-1].get("content", []) if b.get("type") == "tool_use"
-        ]
-        if calls:
-            results = []
-            recorded = {t["call"]["id"]: t for t in state.get("tools", [])}
-            for call in calls:
-                entry = recorded.get(call["id"], {})
-                result = entry.get("result") or entry.get("raw_result")
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call["id"],
-                        "content": result["content"]
-                        if result
-                        else "Run cancelled; execution outcome may be unknown.",
-                        "is_error": result.get("is_error", False) if result else True,
-                    }
-                )
-            state["messages"] = [*messages, {"role": "user", "content": results}]
-    return state
+    return close_open_tool_calls(
+        state, "Run cancelled; execution outcome may be unknown."
+    )
