@@ -1375,7 +1375,10 @@ plus `replay_policy=` and `retry=`. A server whose tools only read is worth
 declaring `replay_policy="safe"`: bridged tools then retry a throttled call
 three times on their own, including the common case of a server that reports a
 429 inside an otherwise successful result.
-`connect()` also accepts a name with `command=` or `url=` keywords. The name is
+`connect()` also accepts a name with `command=` or `url=` keywords, and
+`connect_all([...])` connects several servers at once, concurrently, returning
+the discovered tools by server name; if some fail, the rest stay connected and
+an `ExceptionGroup` names the failures. The name is
 yours to choose: it keys the connection and prefixes every bridged tool. The
 manager is caller-owned: closing the agent leaves it connected, and one manager
 can serve several agents. Connecting a server name twice raises `ValueError`.

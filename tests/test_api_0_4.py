@@ -617,6 +617,44 @@ async def test_manager_connect_accepts_a_typed_config(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_manager_connect_all_reports_every_failure_and_keeps_successes(monkeypatch):
+    class FakeConnection:
+        def __init__(self, config):
+            self.config, self.tools, self.transport = config, [], "sse"
+
+        async def connect(self):
+            if "broken" in self.config.name:
+                raise ConnectionError(f"{self.config.name} refused")
+            self.tools = [MCPToolInfo(self.config.name, "ping", "d", {"type": "object", "properties": {}})]
+            return self.tools
+
+        async def disconnect(self):
+            pass
+
+        @property
+        def is_connected(self):
+            return True
+
+    monkeypatch.setattr("harnessx.mcp.MCPConnection", FakeConnection)
+    servers = [MCPServerConfig.http("tavily", "http://a/mcp"), MCPServerConfig.http("revenue", "http://b/mcp")]
+    async with MCPManager() as mcp:
+        tools = await mcp.connect_all(servers)
+        assert sorted(tools) == ["revenue", "tavily"] and [t.tool_name for t in tools["tavily"]] == ["ping"]
+        assert sorted(mcp.list_servers()) == ["revenue", "tavily"]
+        with pytest.raises(ValueError, match="already connected"):
+            await mcp.connect_all([MCPServerConfig.http("tavily", "http://a/mcp")])
+        with pytest.raises(ValueError, match="unique"):
+            await mcp.connect_all([MCPServerConfig.http("x", "http://x"), MCPServerConfig.http("x", "http://y")])
+    async with MCPManager() as mcp:
+        with pytest.raises(ExceptionGroup) as info:
+            await mcp.connect_all([MCPServerConfig.http("ok", "http://ok"), MCPServerConfig.http("broken", "http://no")], concurrent=False)
+        assert len(info.value.exceptions) == 1 and "broken" in str(info.value.exceptions[0])
+        assert "connected: ok" in str(info.value) and list(mcp.list_servers()) == ["ok"], "successes stay connected"
+        with pytest.raises(TypeError, match="MCPServerConfig"):
+            await mcp.connect_all(["not-a-config"])  # type: ignore[list-item]
+
+
+@pytest.mark.asyncio
 async def test_agent_rejects_the_removed_client_argument():
     with pytest.raises(TypeError, match="AnthropicProvider"):
         Agent(client=object())  # type: ignore[call-arg]

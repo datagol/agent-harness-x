@@ -163,6 +163,7 @@ A patch release for one silent regression in 0.4.1.
   0.4.1 registers on **every** agent — so every Gemini agent on 0.4.1 lost
   explicit caching. Found downstream on a workload where 99.96% of the prompt
   prefix had been cached, the moment it upgraded.
+
 ## [Unreleased]
 
 ### Added
@@ -179,6 +180,10 @@ A patch release for one silent regression in 0.4.1.
   `RetryPolicy.call_timeout_seconds`. `"on"` also admits `"tool"`, which
   nothing emits yet: tool calls run concurrently behind the driver's commit
   lock and want their own change.
+- `MCPManager.connect_all([...])` connects several `MCPServerConfig` entries
+  at once, concurrently by default, and returns the discovered tools by server
+  name. Servers that connected stay connected when others fail; the failures
+  are raised together as an `ExceptionGroup`.
 
 ## [0.4.1] - 2026-09-28
 
