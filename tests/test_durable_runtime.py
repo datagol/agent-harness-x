@@ -582,7 +582,17 @@ async def test_cancelled_turn_can_be_followed_by_valid_conversation(tmp_path):
                     tool_calls=[ToolCall("t", "slow", {})], stop_reason="tool_use"
                 )
             messages = kwargs["messages"]
-            assert messages[-2]["content"][0]["type"] == "tool_result"
+            # The cancelled call is answered, so the request is well formed. It
+            # now rides in the same user turn as the follow-up text rather than
+            # a turn of its own, because consecutive same-role messages are
+            # joined on the way out.
+            blocks = [b for m in messages for b in (m.get("content") or [])
+                      if isinstance(b, dict)]
+            used = {b["id"] for b in blocks if b.get("type") == "tool_use"}
+            answered = {b["tool_use_id"] for b in blocks if b.get("type") == "tool_result"}
+            assert used and not used - answered
+            roles = [m["role"] for m in messages]
+            assert all(x != y for x, y in zip(roles, roles[1:])), roles
             return ProviderResponse(text="next")
 
     a = Agent(provider=P())

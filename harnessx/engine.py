@@ -213,7 +213,7 @@ async def command(agent, state, name, emit, *, record=None):
         messages, tools = await agent.middleware.process_llm_request(
             agent.memory.get_messages(), tools
         )
-        messages = with_task_reminder(agent, messages)
+        messages = coalesce_same_role(with_task_reminder(agent, messages))
         return {
             **await snapshot(agent),
             "iterations": agent.guardrails.iteration_count,
@@ -773,7 +773,15 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     if wait:
                         await asyncio.sleep(wait)
             outcome = await capture(agent, outcome)
+            before = state.get("messages")
             state = transition(state, name, outcome)
+            if state.get("messages") is not before:
+                # `transition` is pure and cannot reach the agent, so a repair it
+                # makes -- closing the tool calls of a reply cut off at the token
+                # budget -- lives only in the state dict. The next command
+                # snapshots `agent.memory`, and that snapshot would put the
+                # unanswered `tool_use` straight back. Mirror it across now.
+                agent.memory.set_messages(copy.deepcopy(state["messages"]))
             await persist(buffered_events, journal=(
                 records("model.completed", outcome["response"]) if name == "model" else []
             ))
@@ -869,6 +877,35 @@ def render_for_summary(messages: list[dict], max_block_chars: int = 2_000) -> st
 def _preview(value, limit: int = 200) -> str:
     text = str(value if value is not None else "")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def coalesce_same_role(messages: list[dict]) -> list[dict]:
+    """Join neighbouring messages that share a role, on the outbound request only.
+
+    Several ordinary shapes produce two user turns in a row. A tool-result
+    message is user-role, so a turn that ends right after one -- a reply cut off
+    at the token budget, whose refused calls we answer ourselves -- is followed
+    directly by the next user message. Anthropic merges these silently; other
+    providers reject them, and a configured fallback can be any of them.
+
+    The stored transcript keeps both messages, which is the honest record of what
+    happened. Only the request the provider sees is joined.
+    """
+    joined: list[dict] = []
+    for message in messages:
+        if not joined or joined[-1].get("role") != message.get("role"):
+            joined.append(message)
+            continue
+        previous, content = joined[-1], message.get("content")
+        merged = _as_blocks(previous.get("content")) + _as_blocks(content)
+        joined[-1] = {**previous, "content": merged}
+    return joined
+
+
+def _as_blocks(content) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content.strip() else []
+    return [b for b in content or [] if isinstance(b, dict)]
 
 
 def with_task_reminder(agent, messages: list[dict]) -> list[dict]:

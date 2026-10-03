@@ -1022,3 +1022,106 @@ async def test_a_fallback_condensation_that_also_fails_raises_rather_than_loopin
             result = await agent.run(f"turn {turn}")
     assert result.status.value == "failed"
     assert "cannot trim either" in str(result.error)
+
+
+class _Truncating(LLMProvider):
+    """Cuts the first reply off at the token budget, mid tool call."""
+
+    name = "truncating"
+
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return ProviderResponse(
+                text="part", tool_calls=[ToolCall("c1", "probe", {})], stop_reason="max_tokens",
+            )
+        return ProviderResponse(text="recovered", stop_reason="end_turn")
+
+    async def count_tokens(self, **kwargs):
+        return 0
+
+
+def _truncating_agent(provider):
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    agent.tools.register_with_schema(
+        "probe", "probe", {"type": "object", "properties": {}}, lambda: "ok",
+        permission=PermissionLevel.ALLOW,
+    )
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_reply_leaves_a_stored_transcript_with_no_orphan():
+    """Repairing only the state dict is not enough. `finish` snapshots
+    `agent.memory`, and that snapshot put the unanswered tool_use straight back,
+    so the stored transcript was still the malformed one. A unit test on
+    `transition` alone cannot see this -- it takes a whole run."""
+    provider = _Truncating()
+    agent = _truncating_agent(provider)
+    async with agent:
+        result = await agent.run("go")
+
+    assert result.truncated
+    assert not _unanswered(agent.memory.get_messages()), agent.memory.get_messages()
+
+
+@pytest.mark.asyncio
+async def test_the_turn_after_a_truncated_reply_is_a_request_a_provider_accepts():
+    """The point of the repair: the next request must be well formed, and must
+    not carry two same-role turns in a row either."""
+    provider = _Truncating()
+    agent = _truncating_agent(provider)
+    async with agent:
+        await agent.run("go")
+        await agent.run("carry on")
+
+    sent = provider.calls[-1]["messages"]
+    assert not _unanswered(sent), sent
+    roles = [m["role"] for m in sent]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+
+
+@pytest.mark.asyncio
+async def test_a_durable_run_stores_the_repaired_transcript_too(tmp_path):
+    from harnessx import AgentRuntime, SQLiteBackend
+
+    provider = _Truncating()
+    agent = _truncating_agent(provider)
+    backend = await SQLiteBackend.connect(tmp_path / "r.db")
+    async with backend, AgentRuntime(agent, backend=backend) as runtime:
+        await runtime.run("go")
+        await runtime.run("carry on")
+
+    assert not _unanswered(provider.calls[-1]["messages"])
+    assert not _unanswered(agent.memory.get_messages())
+
+
+def test_coalescing_joins_only_neighbours_that_share_a_role():
+    from harnessx.engine import coalesce_same_role
+
+    joined = coalesce_same_role([
+        {"role": "user", "content": "one"},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "r"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+        {"role": "user", "content": "two"},
+    ])
+    assert [m["role"] for m in joined] == ["user", "assistant", "user"]
+    assert joined[0]["content"] == [
+        {"type": "text", "text": "one"},
+        {"type": "tool_result", "tool_use_id": "c1", "content": "r"},
+    ]
+    assert joined[-1]["content"] == "two", "a lone message is passed through untouched"
+
+
+def test_coalescing_drops_nothing_a_provider_needs():
+    from harnessx.engine import coalesce_same_role
+
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "p", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "r"}]},
+        {"role": "user", "content": "next"},
+    ]
+    assert not _unanswered(coalesce_same_role(messages))
