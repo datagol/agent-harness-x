@@ -1125,3 +1125,14 @@ def test_coalescing_drops_nothing_a_provider_needs():
         {"role": "user", "content": "next"},
     ]
     assert not _unanswered(coalesce_same_role(messages))
+
+
+def test_loop_guard_is_exported_like_every_other_config_type():
+    """`Limits.loop_guard` takes one, so a reader configuring it reaches for
+    `from harnessx import LoopGuard` beside `Limits`. It was the only config
+    dataclass missing from the top level, which made the documented example
+    fail on import."""
+    import harnessx
+
+    assert harnessx.LoopGuard is LoopGuard
+    assert "LoopGuard" in harnessx.__all__

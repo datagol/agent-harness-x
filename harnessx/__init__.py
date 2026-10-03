@@ -53,6 +53,7 @@ from .types import (
     CheckpointData,
     Fallback,
     Limits,
+    LoopGuard,
     PermissionLevel,
     PromptCacheHint,
     PromptCachePolicy,
@@ -78,7 +79,7 @@ from .types import (
 __all__ = [
     "__version__",
     # Agent and configuration
-    "Agent", "SubAgent", "AgentConfig", "Limits", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry",
+    "Agent", "SubAgent", "AgentConfig", "Limits", "LoopGuard", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry",
     "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",
