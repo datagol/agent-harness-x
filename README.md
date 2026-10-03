@@ -152,8 +152,9 @@ asyncio.run(main())
 | `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False`, `retry=None` (a `ToolRetry` applied to tools registered without one) |
 
 The sub-policies are frozen dataclasses; change one with `dataclasses.replace`.
-The 0.3 flat names (`max_iterations=`, `llm_max_attempts=`, ...) still work and
-warn until 0.5; see [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md).
+The 0.3 flat names (`max_iterations=`, `llm_max_attempts=`, ...) were removed in
+0.5; `AgentConfig.from_dict()` still reads them so saved sessions load. See
+[MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md).
 
 ### Prompt caching
 
@@ -1423,8 +1424,8 @@ async with await SQLiteBackend.connect("runtime.db") as backend:
 ```
 
 `run()`, `run_stream()`, and `stream_text()` mirror the `Agent` methods;
-`submit()` returns a `RunHandle` when the caller wants to detach. `execute()`,
-`execute_stream()`, and `get_status()` remain as deprecated aliases until 0.5.
+`submit()` returns a `RunHandle` when the caller wants to detach. The 0.3
+aliases `execute()`, `execute_stream()`, and `get_status()` were removed in 0.5.
 
 The default backend is SQLite. PostgreSQL automatically provisions its schema from
 a connection string (`await PostgresBackend.connect(dsn)`); Temporal adds

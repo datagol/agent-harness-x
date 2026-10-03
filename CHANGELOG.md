@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.4] - 2026-10-02
+## [0.5.0] - 2026-10-02
 
 Loop reliability. Read four other agent harnesses -- OpenCode, Pi, Hermes and
 LangChain Deep Agents -- and fixed what the comparison exposed in ours. Nothing
@@ -104,6 +104,25 @@ can be switched off.
   no longer retried.
 - Near-miss tool names are repaired rather than failed, and invalid arguments
   come back to the model as one actionable line instead of stalling the run.
+
+### Removed
+
+The four shims 0.4 deprecated with "removed in harnessx 0.5" are gone.
+
+- The flat 0.3 `AgentConfig` fields -- `max_iterations`, `max_context_tokens`,
+  `max_result_chars`, `max_cost_dollars`, `input_cost_per_m`,
+  `output_cost_per_m`, `llm_max_attempts`, `llm_retry_backoff_seconds` and
+  `model_timeout_seconds` -- as constructor keyword arguments and as
+  attributes. Pass `limits=Limits(...)` and `retry=RetryPolicy(...)`, and read
+  through the sub-policy. `AgentConfig.from_dict()` deliberately still accepts
+  the flat shape, silently, so sessions and snapshots written by 0.3 keep
+  loading.
+- `AgentRuntime.execute`, `AgentRuntime.execute_stream` and
+  `AgentRuntime.get_status`. Use `run`, `run_stream` and `status`.
+- `PendingTool.__getitem__` and `PendingTool.get`, so `pending["execution_key"]`
+  no longer works. Use attribute access; the persisted wire shape
+  (`to_dict()` / `from_dict()`) is unchanged.
+- `RunHandle.backend`. A runtime owns its backend; ask the runtime.
 
 ## [0.4.3] - 2026-09-29
 

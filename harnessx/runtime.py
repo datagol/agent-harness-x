@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Literal, overload
 
@@ -33,9 +32,6 @@ from ._journal import record as journal_record
 from .errors import ConfigurationError, ResolutionError, RuntimeStateError, UnknownExecutionKey
 
 
-def _deprecated(old: str, new: str) -> None:
-    warnings.warn(f"{old} is deprecated and will be removed in harnessx 0.5; use {new}", DeprecationWarning, stacklevel=3)
-
 
 def _execution_key(target: str | PendingTool) -> str:
     return target.execution_key if isinstance(target, PendingTool) else target
@@ -51,11 +47,6 @@ class RunHandle:
             run_id,
             task,
         )
-
-    @property
-    def backend(self):
-        _deprecated("RunHandle.backend", "the runtime's backend")
-        return self._backend
 
     async def result(self):
         if self._task:
@@ -373,10 +364,6 @@ class AgentRuntime:
             await self.submit(message, request_id=request_id, stream=False)
         ).result()
 
-    async def execute(self, message, *, request_id=None) -> RunResult:
-        _deprecated("AgentRuntime.execute", "AgentRuntime.run")
-        return await self.run(message, request_id=request_id)
-
     async def export_incident(
         self, run_id: str, *, destination: str | Path,
         policy: ExportPolicy | None = None, limits: BundleLimits | None = None,
@@ -406,10 +393,6 @@ class AgentRuntime:
             return await handle.result()
 
         return RunStream(run)
-
-    def execute_stream(self, message, *, request_id=None):
-        _deprecated("AgentRuntime.execute_stream", "AgentRuntime.run_stream")
-        return self.run_stream(message, request_id=request_id)
 
     async def stream_text(
         self, message: str, *, request_id: str | None = None, on_reset: Callable[[], Any] | None = None,
@@ -628,10 +611,6 @@ class AgentRuntime:
             "state": self._state.value,
             "run": result_from_state(state) if state else None,
         }
-
-    async def get_status(self):
-        _deprecated("AgentRuntime.get_status", "AgentRuntime.status")
-        return await self.status()
 
     async def stop(self):
         if self._state == RuntimeState.STOPPED:

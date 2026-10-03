@@ -4,8 +4,9 @@
 running an agent, grouped configuration, a common error base, typed extension
 points, and fewer ways to do the same thing. Most 0.3 code keeps working and
 emits a `DeprecationWarning` naming the replacement. Everything marked
-**deprecated** below is removed in 0.5; everything marked **removed** is gone in
-0.4 and listed with its replacement.
+**removed in 0.5** below warned in 0.4 and is gone as of 0.5.0 -- see
+[0.5.0](#050) at the end; everything marked **removed** is gone in 0.4 and
+listed with its replacement.
 
 Run your suite once with warnings promoted to errors to find every deprecated
 use:
@@ -40,18 +41,21 @@ AgentConfig(
 )
 ```
 
-The flat names are **deprecated**, not removed: they still work as keyword
-arguments and as attributes (`config.max_iterations` reads and writes
-`config.limits.max_iterations`) and warn on every use. The sub-policies are
-frozen dataclasses; change one with `dataclasses.replace`.
+The flat names warned in 0.4 and are **removed in 0.5**: passing one as a
+keyword argument raises `TypeError`, and `config.max_iterations` no longer
+exists as an attribute. Read and write them through the sub-policy
+(`config.limits.max_iterations`). The sub-policies are frozen dataclasses;
+change one with `dataclasses.replace`.
 
 `AgentConfig` construction beyond the third positional argument is keyword-only.
 Only `model`, `provider`, and `max_tokens` may be positional. **Breaking** if you
 passed `system_prompt` positionally.
 
-`AgentConfig.from_dict()` reads both the 0.3 flat shape and the 0.4 nested shape
-without warnings. `Agent.load_session`, `AgentRuntime.resume`, and the Temporal
-worker use it, so saved sessions load unchanged.
+`AgentConfig.from_dict()` still reads both the 0.3 flat shape and the 0.4 nested
+shape, silently. A session file is not a caller: the constructor keywords are
+gone, but a snapshot written by 0.3 keeps loading, with the flat keys lifted
+into their sub-policy. `Agent.load_session`, `AgentRuntime.resume`, and the
+Temporal worker use it, so saved sessions load unchanged.
 
 `ToolPolicy` reaches registries that had no way to receive registry-wide options
 before: `Agent(config=AgentConfig(tools=ToolPolicy(default_timeout_seconds=60)), tools=[fn])`
@@ -67,10 +71,10 @@ default. Tools registered with their own `timeout_seconds` are never changed.
 | `agent.run(msg)` | same | |
 | `agent.run_stream(msg)` | same, yields `RunEvent`s | |
 | iterate `run_stream` and filter `TEXT_DELTA` | `agent.stream_text(msg, on_reset=...)` yields `str` | new |
-| `runtime.execute(msg)` | `runtime.run(msg)` | deprecated alias |
-| `runtime.execute_stream(msg)` | `runtime.run_stream(msg)` | deprecated alias |
+| `runtime.execute(msg)` | `runtime.run(msg)` | alias removed in 0.5 |
+| `runtime.execute_stream(msg)` | `runtime.run_stream(msg)` | alias removed in 0.5 |
 | | `runtime.stream_text(msg)` | new |
-| `runtime.get_status()` | `runtime.status()` | deprecated alias |
+| `runtime.get_status()` | `runtime.status()` | alias removed in 0.5 |
 | `runtime.stop()` | same, plus `runtime.aclose()` | |
 | `agent._closed`, `agent._busy` | `agent.closed`, `agent.busy` | new properties |
 
@@ -100,8 +104,9 @@ result.raise_for_status()    # returns result, or raises RunFailed / RunAwaiting
 `pending.execution_key`, `pending.call.name`, `pending.call.input`,
 `pending.status` (`"approval"` or `"uncertain"`), `pending.attempt`,
 `pending.policy`, `pending.concurrent`, `pending.timeout_seconds`. Indexing
-(`pending["execution_key"]`) still works and is **deprecated**. The persisted
-shape is unchanged (`to_dict()` / `from_dict()`).
+(`pending["execution_key"]`) and `pending.get(...)` warned in 0.4 and are
+**removed in 0.5**. The persisted shape is unchanged (`to_dict()` /
+`from_dict()`).
 
 ## Durable approvals
 
@@ -109,7 +114,7 @@ Approving no longer takes four calls.
 
 ```python
 # 0.3
-result = await runtime.execute("write the report")
+result = await runtime.execute("write the report")  # removed in 0.5
 if result.status == "awaiting_input":
     await runtime.approve(result.pending[0]["execution_key"])
     handle = await runtime.resume(runtime.session_id)
@@ -325,3 +330,29 @@ loop is the retry path. `providers.retry.is_transient` stays, and is what
 | `FallbackProvider` | The chain itself, for the case where a member has to be a live object |
 | `HookEvent.RETRY`, `RetryData` | Every retry, model or tool |
 | `MCPServerConfig.replay_policy`, `.retry` | Retry for bridged MCP tools |
+
+---
+
+## 0.5.0
+
+The three shims 0.4 deprecated with "removed in harnessx 0.5" are gone. Each one
+warned for the whole of 0.4; running your suite under
+`python -W error::DeprecationWarning -m pytest` on 0.4 finds every use.
+
+| Gone in 0.5.0 | Use instead |
+|---|---|
+| `AgentConfig(max_iterations=, max_context_tokens=, max_result_chars=, max_cost_dollars=, input_cost_per_m=, output_cost_per_m=)` | `AgentConfig(limits=Limits(...))` |
+| `AgentConfig(llm_max_attempts=, llm_retry_backoff_seconds=, model_timeout_seconds=)` | `AgentConfig(retry=RetryPolicy(attempts, backoff_seconds, call_timeout_seconds))` |
+| `config.max_iterations` and the other eight flat attributes, reading and writing | `config.limits.max_iterations`, `config.retry.attempts`, ... |
+| `runtime.execute(msg)` | `runtime.run(msg)` |
+| `runtime.execute_stream(msg)` | `runtime.run_stream(msg)` |
+| `runtime.get_status()` | `runtime.status()` |
+| `pending["execution_key"]`, `pending.get("timeout")` | `pending.execution_key`, `pending.timeout_seconds` |
+
+A flat keyword now raises `TypeError`, a flat attribute `AttributeError`, and
+indexing a `PendingTool` `TypeError`.
+
+**Persisted state is untouched.** `AgentConfig.from_dict()` still reads the 0.3
+flat shape as well as the 0.4 nested one, silently, and `PendingTool.to_dict()`
+/ `.from_dict()` still speak the 0.3 wire shape. A snapshot is not a caller:
+sessions, run states, and incident bundles written by 0.3 load in 0.5 unchanged.
