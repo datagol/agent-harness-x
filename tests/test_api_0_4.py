@@ -238,20 +238,28 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     assert AgentConfig(prompt_cache=None).prompt_cache is None
 
 
-def test_flat_names_still_work_but_warn():
-    with pytest.warns(DeprecationWarning, match="max_iterations"):
-        config = AgentConfig(max_iterations=7, llm_max_attempts=3, model_timeout_seconds=12)
-    assert config.limits.max_iterations == 7
-    assert config.retry.attempts == 3 and config.retry.call_timeout_seconds == 12
-    with pytest.warns(DeprecationWarning):
-        assert config.max_iterations == 7
-    with pytest.warns(DeprecationWarning):
-        config.max_cost_dollars = 2.0
-    assert config.limits.max_cost_dollars == 2.0
-    # A flat kwarg wins over the nested value, matching the documented precedence.
-    with pytest.warns(DeprecationWarning):
-        both = AgentConfig(limits=Limits(max_iterations=1), max_iterations=5)
-    assert both.limits.max_iterations == 5
+def test_flat_names_are_gone_in_0_5():
+    # The 0.3 flat keyword arguments were removed; only the sub-policies remain.
+    for kwargs in (
+        {"max_iterations": 7},
+        {"max_context_tokens": 1000},
+        {"max_result_chars": 10},
+        {"max_cost_dollars": 1.0},
+        {"input_cost_per_m": 3.0},
+        {"output_cost_per_m": 15.0},
+        {"llm_max_attempts": 3},
+        {"llm_retry_backoff_seconds": 0.5},
+        {"model_timeout_seconds": 12},
+    ):
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            AgentConfig(**kwargs)  # type: ignore[arg-type]
+    config = AgentConfig(limits=Limits(max_iterations=1), retry=RetryPolicy(attempts=2))
+    for name in (
+        "max_iterations", "max_context_tokens", "max_result_chars", "max_cost_dollars",
+        "input_cost_per_m", "output_cost_per_m", "llm_max_attempts",
+        "llm_retry_backoff_seconds", "model_timeout_seconds",
+    ):
+        assert not hasattr(config, name)
 
 
 def test_from_dict_reads_both_snapshot_shapes_silently():
@@ -344,10 +352,11 @@ def test_pending_tool_round_trips_the_0_3_wire_shape():
     assert wire(_result(RunStatus.AWAITING_INPUT, pending=[pending]))["pending"] == [as_wire]
     restored = RunResult.from_dict(wire(_result(RunStatus.AWAITING_INPUT, pending=[pending])))
     assert restored.pending == [pending] and isinstance(restored.pending[0].call, ToolCall)
-    with pytest.warns(DeprecationWarning, match="attribute access"):
-        assert pending["execution_key"] == "k1"
-    with pytest.warns(DeprecationWarning):
-        assert pending.get("timeout") == 5
+    # Dict-style access was removed in 0.5; attribute access is the only way in.
+    with pytest.raises(TypeError):
+        pending["execution_key"]  # type: ignore[index]
+    assert not hasattr(pending, "get")
+    assert pending.execution_key == "k1" and pending.timeout_seconds == 5
     with pytest.raises(ValueError):
         PendingTool("k", ToolCall("c", "n", {}), "maybe")  # type: ignore[arg-type]
 
@@ -457,22 +466,17 @@ async def test_runtime_run_stream_and_stream_text(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_deprecated_runtime_aliases_warn_and_delegate(tmp_path):
+async def test_runtime_aliases_are_gone_in_0_5(tmp_path):
     backend = await SQLiteBackend.connect(tmp_path / "r.db")
     agent = Agent(provider=Scripted([ProviderResponse(text="one"), ProviderResponse(text="two")]))
     async with backend, AgentRuntime(agent, backend=backend) as runtime:
-        with pytest.warns(DeprecationWarning, match="AgentRuntime.run"):
-            assert (await runtime.execute("hi")).output == "one"
-        with pytest.warns(DeprecationWarning, match="run_stream"):
-            stream = runtime.execute_stream("hi")
-        async with stream:
-            [_ async for _ in stream]
-            assert (await stream.result()).output == "two"
-        with pytest.warns(DeprecationWarning, match="status"):
-            assert (await runtime.get_status())["run"].output == "two"
+        for name in ("execute", "execute_stream", "get_status"):
+            assert not hasattr(runtime, name)
+        assert (await runtime.run("hi")).output == "one"
+        assert (await runtime.status())["run"].output == "one"
         handle = await runtime.submit("x", request_id="dup")  # replays the session's last run id
-        with pytest.warns(DeprecationWarning, match="backend"):
-            assert handle.backend is backend
+        assert not hasattr(handle, "backend"), "runtimes own their backend since 0.5"
+        assert handle.run_id
 
 
 @pytest.mark.asyncio

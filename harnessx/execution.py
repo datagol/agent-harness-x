@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import warnings
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, TypedDict
@@ -104,23 +103,6 @@ class PendingTool:
             timeout_seconds=float(data.get("timeout", data.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))),
             retry=ToolRetry.from_dict(data["retry"]) if data.get("retry") else None,
         )
-
-    def __getitem__(self, key: str) -> Any:
-        warnings.warn(
-            "PendingTool is a dataclass since harnessx 0.4; use attribute access "
-            f"(pending.{'timeout_seconds' if key == 'timeout' else key})",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.to_dict()[key]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        warnings.warn(
-            "PendingTool is a dataclass since harnessx 0.4; use attribute access",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.to_dict().get(key, default)
 
 
 class AttemptReset(TypedDict):

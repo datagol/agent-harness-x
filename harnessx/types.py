@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 import math
-import warnings
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, TypeVar
 
@@ -546,8 +545,10 @@ class ToolPolicy:
             raise TypeError("retry must be a ToolRetry")
 
 
-_LEGACY_FIELDS: dict[str, tuple[str, str]] = {
-    # 0.3 flat name -> (sub-policy field, attribute). The aliases are removed in 0.5.
+# 0.3 flat name -> (sub-policy field, attribute). The constructor keywords and
+# attributes are gone as of 0.5; this mapping survives only so ``from_dict`` can
+# still load sessions and snapshots persisted by 0.3.
+_FLAT_0_3_FIELDS: dict[str, tuple[str, str]] = {
     "max_iterations": ("limits", "max_iterations"),
     "max_context_tokens": ("limits", "max_context_tokens"),
     "max_result_chars": ("limits", "max_result_chars"),
@@ -573,24 +574,16 @@ def _coerce(kind: type[_P], value: Any, name: str) -> _P:
     return value
 
 
-def _warn_flat(name: str) -> None:
-    group, attr = _LEGACY_FIELDS[name]
-    warnings.warn(
-        f"AgentConfig.{name} is deprecated and will be removed in harnessx 0.5; "
-        f"use AgentConfig.{group}.{attr}",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-
-
 @dataclass(init=False)
 class AgentConfig:
     """All configuration for an Agent, with sensible defaults.
 
     Budgets live on ``limits``, transient-failure handling on ``retry``, prompt
     caching on ``prompt_cache``, and registry-wide tool options on ``tools``.
-    The flat 0.3 names (``max_iterations``, ``llm_max_attempts``, ...) still
-    work as keyword arguments and attributes but warn; they go away in 0.5.
+    The flat 0.3 names (``max_iterations``, ``llm_max_attempts``, ...) were
+    removed in 0.5: pass ``limits=Limits(...)`` and ``retry=RetryPolicy(...)``
+    instead. ``from_dict`` still reads the flat shape so sessions saved by 0.3
+    keep loading.
     """
 
     model: str = "claude-sonnet-4-6"
@@ -625,16 +618,6 @@ class AgentConfig:
         prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
         tools: ToolPolicy | dict[str, Any] | None = None,
         progress: ProgressPolicy | dict[str, Any] | None = None,
-        # Deprecated 0.3 flat names. Each overrides the matching sub-policy attribute.
-        max_iterations: int | None = None,
-        max_context_tokens: int | None = None,
-        max_result_chars: int | None = None,
-        max_cost_dollars: float | None = None,
-        input_cost_per_m: float | None = None,
-        output_cost_per_m: float | None = None,
-        llm_max_attempts: int | None = None,
-        llm_retry_backoff_seconds: float | None = None,
-        model_timeout_seconds: float | None = None,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
         self.planning = planning
@@ -652,31 +635,6 @@ class AgentConfig:
             self.prompt_cache = None
         else:
             self.prompt_cache = _coerce(PromptCachePolicy, prompt_cache, "prompt_cache")
-        legacy = {
-            name: value
-            for name, value in (
-                ("max_iterations", max_iterations),
-                ("max_context_tokens", max_context_tokens),
-                ("max_result_chars", max_result_chars),
-                ("max_cost_dollars", max_cost_dollars),
-                ("input_cost_per_m", input_cost_per_m),
-                ("output_cost_per_m", output_cost_per_m),
-                ("llm_max_attempts", llm_max_attempts),
-                ("llm_retry_backoff_seconds", llm_retry_backoff_seconds),
-                ("model_timeout_seconds", model_timeout_seconds),
-            )
-            if value is not None
-        }
-        if legacy:
-            warnings.warn(
-                f"AgentConfig flat fields {sorted(legacy)} are deprecated and will be removed in "
-                "harnessx 0.5; pass limits=Limits(...) and retry=RetryPolicy(...) instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            for name, value in legacy.items():
-                group, attr = _LEGACY_FIELDS[name]
-                setattr(self, group, replace(getattr(self, group), **{attr: value}))
         self.__post_init__()  # init=False: dataclasses will not call it for us
 
     def __post_init__(self) -> None:
@@ -712,14 +670,15 @@ class AgentConfig:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AgentConfig:
-        """Rebuild from a persisted dict, 0.3 flat or 0.4 nested, without deprecation warnings.
+        """Rebuild from a persisted dict, 0.3 flat or 0.4 nested.
 
-        Flat keys are lifted into their sub-policy and override nested values,
-        matching the constructor's precedence.
+        The flat 0.3 keys are no longer accepted as constructor keywords, but a
+        session file written by 0.3 is still a session file: they are lifted
+        into their sub-policy here, silently, and override nested values.
         """
         payload = dict(data)
         lifted: dict[str, dict[str, Any]] = {}
-        for name, (group, attr) in _LEGACY_FIELDS.items():
+        for name, (group, attr) in _FLAT_0_3_FIELDS.items():
             if name in payload:
                 lifted.setdefault(group, {})[attr] = payload.pop(name)
         for group, values in lifted.items():
@@ -732,97 +691,6 @@ class AgentConfig:
                 base = {}
             payload[group] = {**base, **values}
         return cls(**payload)
-
-    # ── Deprecated 0.3 flat aliases; removed in 0.5 ─────────────────────────
-    @property
-    def max_iterations(self) -> int:
-        _warn_flat("max_iterations")
-        return self.limits.max_iterations
-
-    @max_iterations.setter
-    def max_iterations(self, value: int) -> None:
-        _warn_flat("max_iterations")
-        self.limits = replace(self.limits, max_iterations=value)
-
-    @property
-    def max_context_tokens(self) -> int:
-        _warn_flat("max_context_tokens")
-        return self.limits.max_context_tokens
-
-    @max_context_tokens.setter
-    def max_context_tokens(self, value: int) -> None:
-        _warn_flat("max_context_tokens")
-        self.limits = replace(self.limits, max_context_tokens=value)
-
-    @property
-    def max_result_chars(self) -> int:
-        _warn_flat("max_result_chars")
-        return self.limits.max_result_chars
-
-    @max_result_chars.setter
-    def max_result_chars(self, value: int) -> None:
-        _warn_flat("max_result_chars")
-        self.limits = replace(self.limits, max_result_chars=value)
-
-    @property
-    def max_cost_dollars(self) -> float | None:
-        _warn_flat("max_cost_dollars")
-        return self.limits.max_cost_dollars
-
-    @max_cost_dollars.setter
-    def max_cost_dollars(self, value: float | None) -> None:
-        _warn_flat("max_cost_dollars")
-        self.limits = replace(self.limits, max_cost_dollars=value)
-
-    @property
-    def input_cost_per_m(self) -> float | None:
-        _warn_flat("input_cost_per_m")
-        return self.limits.input_cost_per_m
-
-    @input_cost_per_m.setter
-    def input_cost_per_m(self, value: float | None) -> None:
-        _warn_flat("input_cost_per_m")
-        self.limits = replace(self.limits, input_cost_per_m=value)
-
-    @property
-    def output_cost_per_m(self) -> float | None:
-        _warn_flat("output_cost_per_m")
-        return self.limits.output_cost_per_m
-
-    @output_cost_per_m.setter
-    def output_cost_per_m(self, value: float | None) -> None:
-        _warn_flat("output_cost_per_m")
-        self.limits = replace(self.limits, output_cost_per_m=value)
-
-    @property
-    def llm_max_attempts(self) -> int:
-        _warn_flat("llm_max_attempts")
-        return self.retry.attempts
-
-    @llm_max_attempts.setter
-    def llm_max_attempts(self, value: int) -> None:
-        _warn_flat("llm_max_attempts")
-        self.retry = replace(self.retry, attempts=value)
-
-    @property
-    def llm_retry_backoff_seconds(self) -> float:
-        _warn_flat("llm_retry_backoff_seconds")
-        return self.retry.backoff_seconds
-
-    @llm_retry_backoff_seconds.setter
-    def llm_retry_backoff_seconds(self, value: float) -> None:
-        _warn_flat("llm_retry_backoff_seconds")
-        self.retry = replace(self.retry, backoff_seconds=value)
-
-    @property
-    def model_timeout_seconds(self) -> float | None:
-        _warn_flat("model_timeout_seconds")
-        return self.retry.call_timeout_seconds
-
-    @model_timeout_seconds.setter
-    def model_timeout_seconds(self, value: float | None) -> None:
-        _warn_flat("model_timeout_seconds")
-        self.retry = replace(self.retry, call_timeout_seconds=value)
 
 
 @dataclass
