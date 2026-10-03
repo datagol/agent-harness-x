@@ -75,6 +75,7 @@ def example_environment(monkeypatch, tmp_path):
         "memory_agent",
         "multi_agent",
         "skills_agent",
+        "knowledge_agent",
         "sandboxed_coder",
     ],
 )
@@ -97,6 +98,9 @@ async def test_interactive_examples_complete_and_close(
             ToolCall("review", "delegate_code_review", {"task": "Review print(1)"})
         ],
         "skills_agent": [ToolCall("skill", "Skill", {"skill": "code-review"})],
+        "knowledge_agent": [
+            ToolCall("kb", "search_concepts", {"query": "active users"})
+        ],
         "sandboxed_coder": [
             ToolCall("code", "run_python", {"code": "print('fixture execution')"})
         ],

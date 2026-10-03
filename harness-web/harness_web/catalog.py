@@ -152,6 +152,16 @@ EXAMPLES = [
         detail="Loads the repository's review, commit-message, bug-triage, and SQL skills. Uses the configured default provider.",
     ),
     Example(
+        "knowledge_agent",
+        "Knowledge agent",
+        "Answer questions from an Open Knowledge Format bundle with BM25F search, concept reads, and link traversal.",
+        "Skills",
+        "memory",
+        interactive=True,
+        prompt="How are active users defined, and which table do they come from?",
+        detail="Loads examples/knowledge, an OKF v0.2 bundle of four linked concepts; set AGENT_KNOWLEDGE to a folder or git URL to use another. Uses the configured default provider.",
+    ),
+    Example(
         "sandboxed_coder",
         "Sandboxed coder",
         "Execute Python with process resource limits and a durable runtime.",
@@ -248,13 +258,13 @@ def requirements(example, mode="offline", *, provider="anthropic"):
     if example.extra and not installed(example.extra):
         missing.append(f"Python package: {example.extra}")
     if not example.offline or (example.id == "run_evals" and mode == "live"):
-        if example.id == "skills_agent":
+        if example.id in ("skills_agent", "knowledge_agent"):
             provider = os.getenv("AGENT_PROVIDER", "anthropic")
         elif example.id != "provider_chat":
             provider = "anthropic"
         missing.extend(provider_missing(provider))
         if (
-            example.id == "skills_agent"
+            example.id in ("skills_agent", "knowledge_agent")
             and provider != "anthropic"
             and not os.getenv("AGENT_MODEL")
         ):

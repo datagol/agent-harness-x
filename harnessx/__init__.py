@@ -44,6 +44,7 @@ from .artifacts import S3ArtifactStore
 from .backends import SQLiteBackend, PostgresBackend, SchemaError, StorageError, SessionBusyError, LeaseLostError
 from .sandbox import Sandbox
 from .skills import Skill, SkillManager
+from .knowledge import GitSource, KnowledgeManager, OKFBundle, OKFConcept
 from .execution import RunEvent, RunEventType, RunResult, RunStatus, RunStream, RunFailure, PendingTool, ToolApprovalRequired, ToolExecutionContext, current_tool_context
 from .registry import AgentRef, AgentRegistry, agents
 from .tools import ToolNotFoundError, ToolRegistry, normalize_tool_registry
@@ -103,6 +104,8 @@ __all__ = [
     "Extension", "ExtensionContext", "LangSmithExtension", "ResultSpillExtension",
     # Skills
     "Skill", "SkillManager",
+    # Knowledge (OKF bundles)
+    "KnowledgeManager", "OKFBundle", "OKFConcept", "GitSource",
     # MCP
     "MCPManager", "MCPServerConfig", "MCPToolInfo",
     # Sandbox

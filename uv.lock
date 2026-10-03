@@ -535,7 +535,9 @@ dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
     { name = "jsonschema" },
+    { name = "markdown-it-py" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "rich" },
 ]
 
@@ -616,6 +618,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "langsmith", marker = "extra == 'langsmith'", specifier = ">=0.1.0" },
+    { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.18" },
     { name = "openai", marker = "extra == 'azure'", specifier = ">=1.50.0" },
@@ -626,6 +629,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-dotenv", marker = "extra == 'server'", specifier = ">=1.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", marker = "extra == 'temporal'", specifier = ">=5" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14" },

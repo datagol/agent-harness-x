@@ -9,7 +9,8 @@ from __future__ import annotations
 import uuid
 import asyncio
 from dataclasses import asdict
-from typing import Any, AsyncIterator, Callable
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from .errors import ConfigurationError, RuntimeStateError
 from .execution import RunResult, RunStream
@@ -23,6 +24,7 @@ from .providers import LLMProvider, make_provider
 from .providers.registry import BUILTIN_PROVIDERS
 from .sandbox import Sandbox
 from .skills import SkillManager
+from .knowledge import GitSource, KnowledgeManager
 from .subagents import SubAgent, install_subagent, prepare_subagents
 from .tools import ToolRegistry, normalize_tool_registry
 from .types import AgentConfig, SessionState
@@ -65,6 +67,7 @@ class Agent:
         sandbox: Sandbox | None = None,
         mcp: MCPManager | None = None,
         skills: SkillManager | list[str] | None = None,
+        knowledge: KnowledgeManager | Sequence[str | Path | GitSource] | None = None,
         extensions: list[Extension] | None = None,
         subagents: list[SubAgent] | None = None,
     ) -> None:
@@ -115,9 +118,19 @@ class Agent:
         else:
             self.skills = None
 
-        # Install extensions after skills so they can rely on the Skill tool
-        # existing (and on skill bodies having been appended to the system
-        # prompt). Stored for later teardown via aclose().
+        # Knowledge bundles (OKF): three retrieval tools plus a <knowledge>
+        # block in the system prompt. Git URLs are cloned here, synchronously.
+        if knowledge is not None:
+            self.knowledge = (
+                knowledge if isinstance(knowledge, KnowledgeManager) else KnowledgeManager.from_paths(knowledge)
+            )
+            self.knowledge.install(self)
+        else:
+            self.knowledge = None
+
+        # Install extensions after skills and knowledge so they can rely on the
+        # Skill and knowledge tools existing (and on the catalogs having been
+        # appended to the system prompt). Stored for later teardown via aclose().
         self.extensions = install_extensions(self, extensions)
 
     def _register_planning_tools(self) -> None:

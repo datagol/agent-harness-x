@@ -17,6 +17,7 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 - **Provider-Agnostic:** First-class support for Anthropic (Claude 3.5/3.7/Sonnet/Opus) and OpenAI (GPT-4o/GPT-5).
 - **Streaming-First:** First-class typed event stream (`run_stream`) for WebSocket and SSE frontends.
 - **Lazy Instruction Packs (Skills):** Load specialized guidelines only when needed via YAML-frontmatter `SKILL.md` packs.
+- **Knowledge Bundles (OKF):** Point an agent at a folder or git URL for BM25F search, concept reads, and link traversal over curated knowledge with provenance.
 - **Guardrails & Execution Backends:** Budget and iteration limits, host subprocess execution, and Docker or macOS Seatbelt access isolation.
 - **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote SSE) in 3 lines of code.
 - **Full Observability & Evals:** Zero-overhead lifecycle hooks, middleware transforms, native LangSmith tracing, and benchmark evaluations.
@@ -30,13 +31,14 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 - [3. Streaming agents](#3-streaming-agents)
 - [4. Multi-agent orchestration](#4-multi-agent-orchestration)
 - [5. Skills](#5-skills)
-- [6. Memory](#6-memory)
-- [7. Permissions and guardrails](#7-permissions-and-guardrails)
-- [8. Hooks and middleware](#8-hooks-and-middleware)
-- [9. MCP servers](#9-mcp-servers)
-- [10. Session persistence](#10-session-persistence)
-- [11. Shipping a web app](#11-shipping-a-web-app)
-- [12. Evaluations with LangSmith](#12-evaluations-with-langsmith)
+- [6. Knowledge (OKF bundles)](#6-knowledge-okf-bundles)
+- [7. Memory](#7-memory)
+- [8. Permissions and guardrails](#8-permissions-and-guardrails)
+- [9. Hooks and middleware](#9-hooks-and-middleware)
+- [10. MCP servers](#10-mcp-servers)
+- [11. Session persistence](#11-session-persistence)
+- [12. Shipping a web app](#12-shipping-a-web-app)
+- [13. Evaluations with LangSmith](#13-evaluations-with-langsmith)
 - [API reference (quick)](#api-reference-quick)
 
 ---
@@ -904,7 +906,147 @@ Full demo: `examples/skills_agent.py`, with sample skills under
 
 ---
 
-## 6. Memory
+## 6. Knowledge (OKF bundles)
+
+The [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
+(OKF) is a vendor-neutral way to give agents curated context: a folder of
+markdown files with YAML frontmatter. Every non-reserved `.md` file is a
+**concept** with at least a `type`; `index.md` files are directory listings for
+progressive disclosure; ordinary markdown links between concepts form the graph.
+Files are read and indexed when the bundle loads. Model context is populated
+**lazily**: the root index goes into the system prompt, and the model pulls
+concepts into context with three read-only tools.
+
+### Authoring a concept
+
+`knowledge/metrics/active-users.md`:
+
+```markdown
+---
+type: Metric
+title: Active Users
+description: Daily and monthly active users, counted from qualifying product events.
+tags: [metric, engagement]
+status: stable
+stale_after: 2027-09-27T00:00:00Z
+verified:
+  - by: human:analytics-lead
+    at: 2026-09-27T00:00:00Z
+sources:
+  - id: dau-model
+    resource: /tables/events.md
+---
+
+A user is active on a day when they emit one qualifying event.[^dau-model]
+Computed from the [events table](/tables/events.md).
+```
+
+`/tables/events.md` is bundle-root-relative; `./events.md` is relative to the
+file. Broken links, unknown `type` values, and missing optional fields are all
+legal. Files without frontmatter or without a `type`, malformed YAML, and invalid
+YAML timestamps are skipped and reported in `bundle.warnings`. Invalid root-index
+metadata produces a warning while its body remains readable. `index.md` and
+`log.md` are readable listings and history, excluded from concept search.
+
+Inline and reference-style Markdown links form the graph. Directory links such
+as `tables/` resolve to `tables/index.md`; code examples and images are excluded.
+Missing targets from both concepts and indexes remain visible in `get_neighbors`.
+
+### Loading knowledge into an agent
+
+```python
+from harnessx import Agent, AgentConfig
+
+agent = Agent(
+    config=AgentConfig(
+        system_prompt="Answer from the knowledge bundle and cite concept paths and sources.",
+    ),
+    knowledge=[
+        "./knowledge",                                                          # local folder
+        "https://github.com/GoogleCloudPlatform/open-knowledge-format/tree/main/bundles/ga4",
+    ],
+)
+```
+
+Git URLs are shallow-cloned into `.agent_knowledge/` on first use and reused
+afterwards; GitHub/GitLab `.../tree/<ref>/<subdir>` links select a branch and
+subdirectory. New clones are published atomically, with a lock per repository/ref
+covering cache updates and bundle loading. Failed clones can be retried, and
+subdirectory symlinks must resolve inside the repository. Cloning happens when
+the agent is constructed. The
+`knowledge=` argument also accepts a `KnowledgeManager` or `GitSource` entries:
+
+```python
+from harnessx import GitSource, KnowledgeManager, OKFBundle
+
+manager = KnowledgeManager.from_paths(
+    ["./knowledge", GitSource("git@github.com:acme/kb.git", ref="v2", subdir="bundles/sales")],
+    refresh=True,            # re-fetch cached clones
+    max_body_chars=12_000,   # read_concept body budget
+)
+agent = Agent(config=AgentConfig(system_prompt="..."), knowledge=manager)
+
+bundle = OKFBundle.load("./knowledge")
+concept = bundle.get("/metrics/active-users.md")
+print(concept.type, concept.trust_tier, concept.is_stale(), bundle.warnings)
+print(bundle.search("active users", limit=3))
+print(bundle.neighbors("/metrics/active-users.md")["backlinks"])
+```
+
+### What the model sees
+
+The system prompt gains a `<knowledge>` block with the workflow and each
+bundle's root `index.md`. The tools, all `ALLOW` by default:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `search_concepts` | `query`, `limit`, `type`, `tags` | Ranked hits: path, type, title, description, score |
+| `read_concept` | `path`, `max_chars` | Metadata header (type, status, trust tier, staleness, tags, sources) and the body |
+| `get_neighbors` | `path` | Outbound links, backlinks, and unresolved links |
+
+With several bundles loaded the tools take a `bundle` argument. Trust tiers
+follow the spec: `unverified`, `machine-confirmed`, or `human-reviewed` when
+any valid `verified[].by` is a `human:<id>` actor. Empty or malformed actors are
+ignored with warnings; their raw metadata is preserved. Trust is an
+author-supplied signal, without identity authentication.
+
+Search uses BM25F (BM25 with weighted
+fields): title, tags, description, and body have weights of 3, 2.5, 2, and 0.5.
+It accounts for term rarity, saturates repeated matches, and normalizes each
+field's length (`k1=1.2`, `b=0.75`), with draft and deprecated concepts
+down-weighted. Tokenization handles Unicode words and case folding. Common
+English singular/plural forms match in both directions, with a 0.95 multiplier
+for expanded matches. General stemming and synonyms are outside this heuristic.
+Corpus statistics are built when a bundle
+loads; `manager.search()` across bundles uses shared statistics. Scores are
+relative to the searched corpus, not confidence values. Override
+`KnowledgeManager.search` to plug in embeddings or hybrid retrieval; the agent's
+search tool calls that method too.
+
+`read_concept` also exposes Attested Computation contracts (`runtime`, parameters,
+computation, executor/receipt, and attester), plus source credibility metadata.
+Applications provide computation execution and attestation.
+
+### Reacting to knowledge access
+
+A `KNOWLEDGE_ACCESSED` hook fires on every tool call:
+
+```python
+from harnessx import HookContext, HookEvent
+
+async def on_knowledge(ctx: HookContext):
+    print(ctx.data["tool"], ctx.data.get("query") or ctx.data.get("path"), ctx.data.get("hits"))
+
+agent.hooks.on(HookEvent.KNOWLEDGE_ACCESSED, on_knowledge)
+```
+
+Full demo: `examples/knowledge_agent.py`, with a sample bundle under
+`examples/knowledge/`. See the [knowledge guide](docs/knowledge.md) for retrieval
+semantics, trust validation, Git cache behavior, limits, and custom retrieval.
+
+---
+
+## 7. Memory
 
 Three layers, all optional:
 
@@ -968,7 +1110,7 @@ Tell the agent about these tools in the system prompt and when to use them
 
 ---
 
-## 7. Permissions and guardrails
+## 8. Permissions and guardrails
 
 ### Permission levels
 
@@ -1146,7 +1288,7 @@ in stay yours. Setting both `fallbacks` in config and `provider=` is a
 
 ---
 
-## 8. Middleware, hooks, and extensions
+## 9. Middleware, hooks, and extensions
 
 | Interface | Use it for |
 | --- | --- |
@@ -1203,7 +1345,7 @@ already retained by durable execution or recording.
 
 ---
 
-## 9. MCP servers
+## 10. MCP servers
 
 `MCPManager` connects to Model Context Protocol servers (stdio subprocess or
 remote SSE). `Agent(mcp=manager)` bridges the discovered tools into the agent's
@@ -1245,7 +1387,7 @@ See `examples/mcp_agent.py` for the interactive version.
 
 ---
 
-## 10. Session persistence
+## 11. Session persistence
 
 Save and restore an agent's conversation:
 
@@ -1312,7 +1454,7 @@ service qualification, and Temporal recording is not implemented. Try
 
 ---
 
-## 11. Shipping a web app
+## 12. Shipping a web app
 
 The harness is transport-agnostic: a web server runs the same `Agent` and
 translates its run events to whatever the browser speaks. The pattern is
@@ -1373,7 +1515,7 @@ uv run python harness-web/run.py        # http://127.0.0.1:8765
 
 ---
 
-## 12. Evaluations with LangSmith
+## 13. Evaluations with LangSmith
 
 The harness includes first-class evaluation capabilities powered by the
 **LangSmith evaluation framework** (`evaluate` / `aevaluate`). You can benchmark
@@ -1476,6 +1618,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `HookManager` / `HookEvent` | `harnessx` | Lifecycle hooks |
 | `Middleware` / `MiddlewarePipeline` | `harnessx` | Request/result transforms |
 | `SkillManager` | `harnessx` | Lazy skill loading |
+| `KnowledgeManager` / `OKFBundle` / `GitSource` | `harnessx` | OKF knowledge bundles from folders or git: `search_concepts`, `read_concept`, `get_neighbors` |
 | `MCPManager` | `harnessx` | MCP server connections |
 | `Sandbox` | `harnessx` | Sandboxed code execution |
 | `AgentRuntime` | `harnessx` | Durable sessions: `run`, `run_stream`, `stream_text`, `approve(..., resume=True)`, `decline`, `status` |
@@ -1505,6 +1648,7 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `examples.multi_agent` | Constructor-declared specialists with isolated tools and permissions | Anthropic key; URL research asks for approval |
 | `examples.skills_agent` | Lazy skill loading in a live conversation, with a hook showing invocations | Anthropic key by default |
 | `examples.skills_demo` | Skill discovery, invocation, and hook ordering | No services |
+| `examples.knowledge_agent` | Answers from an OKF knowledge bundle, with a hook showing each search and read | Anthropic key by default |
 | `examples.runtime_approvals` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
 | `examples.flight_recorder --output incident.hx` | A retried model call, middleware boundaries, and offline playback of the exported incident | No services; unused output path |
 | `examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |

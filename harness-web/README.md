@@ -51,6 +51,7 @@ Try `What is 48 * 12?`.
 | Memory agent | `examples.memory_agent` | Anthropic; notes belong to the example's working directory |
 | Specialist agents | `examples.multi_agent` | Anthropic; constructor-defined specialists |
 | Skills agent | `examples.skills_agent` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
+| Knowledge agent | `examples.knowledge_agent` | BM25F retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL; configured provider/model |
 | Sandboxed coder | `examples.sandboxed_coder` | Anthropic; process resource limits, temporary execution directory |
 | Workflow evaluations | `examples.run_evals` | `langsmith` extra; offline by default, optional live model mode |
 | LangSmith tracing | `examples.langsmith_tracing` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |

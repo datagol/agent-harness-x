@@ -259,6 +259,19 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 
 ### Added
 
+- `Agent(knowledge=)` and `KnowledgeManager` load Open Knowledge Format (OKF v0.2)
+  bundles from local folders or git URLs: `OKFBundle`/`OKFConcept` parsing with
+  trust tiers and staleness, BM25F search with weighted fields and shared
+  corpus statistics across bundles, the `search_concepts`, `read_concept`, and
+  `get_neighbors` tools, a `<knowledge>` prompt block built from the bundle
+  index, `GitSource` for cached shallow clones, and the `KNOWLEDGE_ACCESSED`
+  hook. Adds direct `pyyaml` and `markdown-it-py` dependencies.
+- OKF loading rejects Git subdirectory symlinks that escape the repository,
+  serializes cache updates and reads across threads/processes, and publishes
+  completed clones atomically. Invalid YAML timestamps and verification actors
+  produce warnings. The graph parses Markdown reference links, excludes code
+  examples, and preserves unresolved index links. Common English plural search
+  matches work in both directions; computation contracts are exposed by reads.
 - `Limits`, `RetryPolicy`, `ToolPolicy` sub-policies; `AgentConfig.from_dict()`
   reads 0.3 flat and 0.4 nested snapshots; `AgentConfig(tools=ToolPolicy(...))`
   reaches list-built registries (`ToolRegistry.policy`, `adopt_policy()`).
@@ -317,12 +330,6 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 
 ### Fixed
 
-- Oversized tool results are read back through a built-in `read_tool_result`
-  tool, registered on every agent, instead of a `read_file` call on a temp
-  path that a sandboxed registry could not open. The eviction notice names
-  the tool-use id to pass, and the reader survives session save and load.
-- Tool errors reach the model as one line (`Tool execution error:
-  PermissionError: ...`); the traceback goes to the log instead of the context.
 - The tool dedupe cache is cleared at the start of every run; it used to leak
   results across turns.
 - An unknown execution key passed to `approve`/`resolve_tool` raises

@@ -47,6 +47,7 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.multi_agent` | Constructor-defined specialists with isolated conversations | Anthropic key; URL research requests ask for approval |
 | `python -m examples.skills_agent` | Interactive lazy skill loading | Anthropic key by default |
 | `python -m examples.skills_demo` | Skill invocation and hook ordering | No external services |
+| `python -m examples.knowledge_agent` | BM25F search, concept reads, and graph traversal over an OKF bundle | Anthropic key by default |
 | `python -m examples.prompt_caching` | Stable prompt prefix, the cache hint a provider receives, and cache read/write counters | No external services by default; `--live` uses the Anthropic key |
 | `python -m examples.jev_routing --min-confidence 0.8` | Choice selects one fixed agent factory; general fallback | No external services by default |
 | `python -m examples.jev_classification` | Choice classifies W2, Deposit, Insurance, Payroll, or unknown | No external services by default |
@@ -63,7 +64,9 @@ writing a temporary note. The recorder's destination must not already exist;
 | `python -m examples.mcp_agent --server NAME --command COMMAND` | Local MCP tools alongside native tools | `mcp` extra, Anthropic key, an installed MCP server |
 
 The files `_console.py`, `_calculator.py`, `_fixtures.py`, and `_decision_fixtures.py` are shared helpers.
-The `.md` files under `skills/` are sample skill inputs.
+The `.md` files under `skills/` are sample skill inputs. `knowledge/` is a sample
+Open Knowledge Format bundle for `knowledge_agent`; set `AGENT_KNOWLEDGE` to a
+folder or git URL to load a different one.
 
 Jev examples print fixed fixture outputs unless `--live` is supplied. They do not
 measure model quality offline. For live decisions install `.[jev]` and set
@@ -85,7 +88,7 @@ See [subagents](../doc/subagents.md) and [tool registration](../doc/tools.md) fo
 the API, permissions, and recovery boundary. `langsmith_tracing` retains a manual
 wrapper to demonstrate a child with its own tracing extension.
 
-`skills_agent` also accepts `AGENT_PROVIDER` and `AGENT_MODEL`. When choosing a
+`skills_agent` and `knowledge_agent` also accept `AGENT_PROVIDER` and `AGENT_MODEL`. When choosing a
 different provider, install its SDK extra, set its API key, and specify a compatible
 model explicitly. `provider_chat` accepts the command-line selection described
 below. The remaining live examples use Anthropic unless edited.
