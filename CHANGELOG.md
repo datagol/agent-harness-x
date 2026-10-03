@@ -26,6 +26,35 @@ can be switched off.
   prompt cache, and condensing cannot summarize the list away. OpenCode persists
   todos and never re-injects them, which is how an agent ends up believing in a
   plan it can no longer read.
+- `Agent(knowledge=)` and `KnowledgeManager` load Open Knowledge Format (OKF v0.2)
+  bundles from local folders or git URLs: `OKFBundle`/`OKFConcept` parsing with
+  trust tiers and staleness, BM25F search with weighted fields and shared
+  corpus statistics across bundles, the `search_concepts`, `read_concept`, and
+  `get_neighbors` tools, a `<knowledge>` prompt block built from the bundle
+  index, `GitSource` for cached shallow clones, and the `KNOWLEDGE_ACCESSED`
+  hook. Adds direct `pyyaml` and `markdown-it-py` dependencies.
+- OKF loading rejects Git subdirectory symlinks that escape the repository,
+  serializes cache updates and reads across threads/processes, and publishes
+  completed clones atomically. Invalid YAML timestamps and verification actors
+  produce warnings. The graph parses Markdown reference links, excludes code
+  examples, and preserves unresolved index links. Common English plural search
+  matches work in both directions; computation contracts are exposed by reads.
+- `WAITING` run events while a model call is outstanding, so a provider that is
+  slow rather than broken is visible instead of silent. A call that succeeds
+  late never fails, never retries and never logs, so a streaming consumer shows
+  nothing for the duration and reads as hung; the first conclusion drawn tends
+  to be that the last deploy broke something. Configured by
+  `AgentConfig.progress=ProgressPolicy(first_after_seconds=10.0,
+  repeat_every_seconds=15.0)`; `first_after_seconds=None` disables it. The
+  events carry `{"on": "model", "seconds": <elapsed>}` and are notices, not
+  deadlines: nothing is cancelled, and the call stays bounded by
+  `RetryPolicy.call_timeout_seconds`. `"on"` also admits `"tool"`, which
+  nothing emits yet: tool calls run concurrently behind the driver's commit
+  lock and want their own change.
+- `MCPManager.connect_all([...])` connects several `MCPServerConfig` entries
+  at once, concurrently by default, and returns the discovered tools by server
+  name. Servers that connected stay connected when others fail; the failures
+  are raised together as an `ExceptionGroup`.
 - `LLMProvider` is an async context manager, so `async with provider:` closes
   the clients it built. An Agent closes only a provider it built itself, so one
   you construct and inject has always been yours to close; until now
@@ -164,27 +193,6 @@ A patch release for one silent regression in 0.4.1.
   explicit caching. Found downstream on a workload where 99.96% of the prompt
   prefix had been cached, the moment it upgraded.
 
-## [Unreleased]
-
-### Added
-
-- `WAITING` run events while a model call is outstanding, so a provider that is
-  slow rather than broken is visible instead of silent. A call that succeeds
-  late never fails, never retries and never logs, so a streaming consumer shows
-  nothing for the duration and reads as hung; the first conclusion drawn tends
-  to be that the last deploy broke something. Configured by
-  `AgentConfig.progress=ProgressPolicy(first_after_seconds=10.0,
-  repeat_every_seconds=15.0)`; `first_after_seconds=None` disables it. The
-  events carry `{"on": "model", "seconds": <elapsed>}` and are notices, not
-  deadlines — nothing is cancelled, and the call stays bounded by
-  `RetryPolicy.call_timeout_seconds`. `"on"` also admits `"tool"`, which
-  nothing emits yet: tool calls run concurrently behind the driver's commit
-  lock and want their own change.
-- `MCPManager.connect_all([...])` connects several `MCPServerConfig` entries
-  at once, concurrently by default, and returns the discovered tools by server
-  name. Servers that connected stay connected when others fail; the failures
-  are raised together as an `ExceptionGroup`.
-
 ## [0.4.1] - 2026-09-28
 
 Long replies. An agent that writes whole files hits the reply token budget,
@@ -259,19 +267,6 @@ change with before/after code. Deprecated names warn and are removed in 0.5.
 
 ### Added
 
-- `Agent(knowledge=)` and `KnowledgeManager` load Open Knowledge Format (OKF v0.2)
-  bundles from local folders or git URLs: `OKFBundle`/`OKFConcept` parsing with
-  trust tiers and staleness, BM25F search with weighted fields and shared
-  corpus statistics across bundles, the `search_concepts`, `read_concept`, and
-  `get_neighbors` tools, a `<knowledge>` prompt block built from the bundle
-  index, `GitSource` for cached shallow clones, and the `KNOWLEDGE_ACCESSED`
-  hook. Adds direct `pyyaml` and `markdown-it-py` dependencies.
-- OKF loading rejects Git subdirectory symlinks that escape the repository,
-  serializes cache updates and reads across threads/processes, and publishes
-  completed clones atomically. Invalid YAML timestamps and verification actors
-  produce warnings. The graph parses Markdown reference links, excludes code
-  examples, and preserves unresolved index links. Common English plural search
-  matches work in both directions; computation contracts are exposed by reads.
 - `Limits`, `RetryPolicy`, `ToolPolicy` sub-policies; `AgentConfig.from_dict()`
   reads 0.3 flat and 0.4 nested snapshots; `AgentConfig(tools=ToolPolicy(...))`
   reaches list-built registries (`ToolRegistry.policy`, `adopt_policy()`).
