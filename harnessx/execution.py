@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Ty
 import math
 import uuid
 
-from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed, RunTruncated
+from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed, RunLimitReached, RunRefused, RunTruncated
 from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult, ToolRetry
 
 
@@ -35,6 +35,7 @@ class RunEventType(str, Enum):
     APPROVAL_REQUIRED = "approval_required"
     RECOVERY_REQUIRED = "recovery_required"
     ATTEMPT_RESET = "attempt_reset"
+    TODOS_UPDATED = "todos_updated"  # the agent's task list changed: {todos, completed, total}
     WAITING = "waiting"
     RUN_RESULT = "run_result"
     GAP = "gap"
@@ -139,14 +140,30 @@ class RunResult:
     @property
     def ok(self) -> bool:
         """True when the run completed with a whole reply. Failures, pauses,
-        cancellations, and replies cut off at the token budget are not ok."""
-        return self.status is RunStatus.COMPLETED and not self.truncated
+        cancellations, replies cut off at the token budget, and refusals are not ok."""
+        return (
+            self.status is RunStatus.COMPLETED
+            and not self.truncated and not self.refused and not self.limited
+            and self.stop_reason not in ("pause_turn", "empty_reply")
+        )
 
     @property
     def truncated(self) -> bool:
         """True when the model stopped at ``max_tokens``: the reply, or a tool call it
         was making, is incomplete even though the run ended normally."""
         return self.status is RunStatus.COMPLETED and self.stop_reason == "max_tokens"
+
+    @property
+    def limited(self) -> bool:
+        """True when the run reached ``Limits.max_iterations``: the output is the
+        model's account of where it got to, not a finished answer."""
+        return self.status is RunStatus.COMPLETED and self.stop_reason == "max_iterations"
+
+    @property
+    def refused(self) -> bool:
+        """True when the model declined or a content filter stopped the reply: the
+        run ended normally, but its output is not an answer."""
+        return self.status is RunStatus.COMPLETED and self.stop_reason in ("refusal", "safety")
 
     @property
     def failed(self) -> bool:
@@ -162,6 +179,10 @@ class RunResult:
         if self.status is RunStatus.COMPLETED:
             if self.truncated:
                 raise RunTruncated(self)
+            if self.refused:
+                raise RunRefused(self)
+            if self.limited:
+                raise RunLimitReached(self)
             return self
         if self.status is RunStatus.FAILED:
             raise RunFailed(self)
@@ -317,7 +338,33 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
         # has to be condensed first and say so in its outcome.
         state["phase"] = outcome.get("phase", "model")
     elif command == "model":
+        # The command already decided the loop goes on -- a truncated or empty
+        # reply it answered, or a request the provider refused as too long.
+        recovery = state.pop("recovery", None)
+        if recovery == "context_overflow":
+            state["phase"] = "compact"
+            return state
+        if recovery:
+            state["phase"] = "prepare_model"
+            return state
         response = state["response"]
+        failure = state.pop("terminal_failure", None)
+        if failure:
+            state.update(status="failed", error=failure, phase="finish",
+                         output=state.get("partial_output", "") + response["text"])
+            return state
+        if state.get("final_answer"):
+            # The run is at max_iterations and this was its one last call. It
+            # ends here whatever the reply holds; a tool call it made anyway is
+            # answered, not run.
+            if response["tool_calls"]:
+                state = close_open_tool_calls(state, "Not executed: the run reached its step limit.")
+            state.update(
+                phase="finish",
+                output=state.get("partial_output", "") + response["text"],
+                stop_reason="max_iterations",
+            )
+            return state
         # Trust the tool calls, not the stop reason. Providers return "end_turn"
         # or "stop" while still carrying tool calls; ending the turn there drops
         # them silently and the run looks like the model ignored its tools.
@@ -325,7 +372,8 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
         # have been truncated mid-JSON and can parse while being incomplete, so
         # those calls are never executed.
         truncated = response["stop_reason"] == "max_tokens"
-        if response["tool_calls"] and not truncated:
+        blocked = response["stop_reason"] in ("safety", "refusal")
+        if response["tool_calls"] and not (truncated or blocked):
             state["phase"] = "prepare_tools"
         else:
             if response["tool_calls"]:
@@ -334,13 +382,16 @@ def transition(state: dict, command: str, outcome: dict) -> dict:
                 # next request is malformed.
                 state = close_open_tool_calls(
                     state,
+                    "Not executed: the provider refused or filtered this reply." if blocked else
                     "Not executed: the reply was cut off at the token budget, so "
                     "these arguments may be incomplete. Call the tool again with "
                     "a shorter reply.",
                 )
+            output = state.get("partial_output", "") + response["text"]
             state.update(
                 phase="finish",
-                output=response["text"],
+                # A reply continued after being cut off arrives in pieces.
+                output=output if response["text"].strip() else output.rstrip(),
                 stop_reason=response["stop_reason"],
             )
     elif command == "prepare_tools":
@@ -356,7 +407,7 @@ def result_from_state(state: dict) -> RunResult:
     return RunResult(
         session_id=state["session_id"],
         run_id=state["run_id"],
-        output=state.get("output", ""),
+        output=state.get("output", state.get("partial_output", "")),
         status=RunStatus(state["status"]),
         stop_reason=state.get("stop_reason", ""),
         usage=TokenUsage(**state.get("usage", {})),
@@ -443,6 +494,23 @@ class RunStream(AsyncIterator[RunEvent]):
 
 class ToolApprovalRequired(HarnessError, RuntimeError):
     """A dispatch-time policy change requires a new exact-call approval."""
+
+
+def apply_accounting(state: dict, entry: dict, accounting: dict) -> None:
+    """Apply a cumulative activity charge once, including heartbeat recovery."""
+    previous = entry.get("accounting", {})
+    for key, value in accounting.get("usage", {}).items():
+        delta = max(0, value - previous.get("usage", {}).get(key, 0))
+        for bucket in ("usage", "total_usage"):
+            state.setdefault(bucket, {})[key] = state.get(bucket, {}).get(key, 0) + delta
+    state["estimated_cost"] = state.get("estimated_cost", 0) + max(0, accounting.get("cost", 0) - previous.get("cost", 0))
+    state["usage_incomplete"] = state.get("usage_incomplete", False) or accounting.get("incomplete", False)
+    entry["accounting"] = {
+        "usage": {k: max(v, accounting.get("usage", {}).get(k, 0))
+                  for k, v in {**accounting.get("usage", {}), **previous.get("usage", {})}.items()},
+        "cost": max(previous.get("cost", 0), accounting.get("cost", 0)),
+        "incomplete": previous.get("incomplete", False) or accounting.get("incomplete", False),
+    }
 
 
 def model_timeout_from_wire(config: Mapping[str, Any] | None) -> float:

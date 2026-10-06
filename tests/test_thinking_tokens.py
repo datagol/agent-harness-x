@@ -35,7 +35,9 @@ def test_gemini_maps_thoughts_token_count():
     response = _from_gemini_parts([], None, usage_metadata, raw=None)
     assert response.usage.thinking_tokens == 33
     assert response.usage.input_tokens == 100
-    assert response.usage.output_tokens == 20
+    # Thoughts are billed as output, so output_tokens counts them, as Anthropic
+    # and OpenAI report it; thinking_tokens is the breakdown.
+    assert response.usage.output_tokens == 20 + 33
 
 
 def test_gemini_without_thought_counts_reports_zero():

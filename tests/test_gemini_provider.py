@@ -316,6 +316,10 @@ class TestGeminiStream(unittest.TestCase):
             return chunks
 
         chunks = _run(collect())
+        # "progress" marks each raw chunk arriving, text or not; it is what keeps
+        # a long tool argument from looking like a stalled stream.
+        self.assertIn("progress", [c.kind for c in chunks])
+        chunks = [c for c in chunks if c.kind != "progress"]
         kinds = [c.kind for c in chunks]
         self.assertEqual(kinds, ["thinking_delta", "text_delta", "text_delta", "response"])
         self.assertEqual(chunks[1].data, "Hello ")

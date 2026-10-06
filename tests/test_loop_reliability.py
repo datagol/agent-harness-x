@@ -791,11 +791,12 @@ async def test_the_reminder_rides_along_with_the_tool_result_it_follows():
     agent, provider = _planning_agent([
         ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": TODOS})], stop_reason="tool_use"),
         ProviderResponse(text="planned"),
+        ProviderResponse(text="the rest is left for later"),  # answers the unfinished-plan reminder
     ])
     async with agent:
         await agent.run("plan it")
 
-    tail = provider.calls[-1]["messages"][-1]
+    tail = provider.calls[1]["messages"][-1]
     kinds = [b["type"] for b in tail["content"]]
     assert kinds == ["tool_result", "text"], "merged into the message, not appended after it"
     assert "1/3 complete" in tail["content"][-1]["text"]
@@ -1044,8 +1045,13 @@ class _Truncating(LLMProvider):
         return 0
 
 
-def _truncating_agent(provider):
-    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+def _truncating_agent(provider, *, recoveries=0):
+    # recoveries=0: these tests are about the transcript when the run does stop
+    # at a truncation. Recovering instead has its own tests.
+    agent = Agent(
+        config=AgentConfig(model="m", limits=Limits(max_truncation_recoveries=recoveries)),
+        provider=provider,
+    )
     agent.tools.register_with_schema(
         "probe", "probe", {"type": "object", "properties": {}}, lambda: "ok",
         permission=PermissionLevel.ALLOW,

@@ -33,6 +33,8 @@ class HookEvent(Enum):
     RETRY = "retry"
     CONTEXT_CONDENSED = "context_condensed"
     REPETITION = "repetition"
+    RECOVERY = "recovery"
+    TODOS_UPDATED = "todos_updated"
     ERROR = "error"
 
 
@@ -79,6 +81,43 @@ class RepetitionData(TypedDict):
     period: int  # 1 is the same call repeated; 2 is A, B, A, B
     laps: int
     tool: str
+
+
+class RecoveryData(TypedDict):
+    """The loop recovered from a reply or request that hit a limit, instead of stopping.
+
+    ``reason`` is one of:
+
+    * ``truncated_tool_call`` -- a tool call was cut off at the reply budget; it
+      was refused and the model asked again with a larger budget.
+    * ``truncated_text`` -- the reply was cut off; the model was asked to continue.
+    * ``empty_reply`` -- the model said nothing; it was asked to go on.
+    * ``reply_limit`` -- the provider refused the reply budget as too large; the
+      call was repeated within the limit it named.
+    * ``context_overflow`` -- the request did not fit the context window; the
+      history was condensed and the call repeated.
+    * ``paused_turn`` -- the server paused a long turn; it was sent back to resume.
+    * ``iteration_limit`` -- the run reached ``max_iterations``; the model was
+      asked for a final answer without tools instead of the run failing.
+    * ``unfinished_plan`` -- the model was finishing with its task list still
+      open; it was asked once to mark it done or say what is left.
+    """
+
+    reason: Literal[
+        "truncated_tool_call", "truncated_text", "empty_reply", "reply_limit", "context_overflow",
+        "paused_turn", "iteration_limit", "unfinished_plan",
+    ]
+    attempt: int  # how many recoveries of this kind the run has made, this one included
+    reply_budget: int | None  # the budget the next call asks for
+
+
+class TodosUpdatedData(TypedDict):
+    """The agent changed its task list (``write_todos``). The whole list, every time."""
+
+    todos: list[dict[str, str]]  # {"content": str, "status": "pending" | "in_progress" | "completed"}
+    completed: int
+    total: int
+    in_progress: str | None  # the item being worked on, when there is one
 
 
 class RetryData(TypedDict):
@@ -145,6 +184,7 @@ HookData = Union[
     AgentStartData, AgentEndData, LoopIterationData, LLMRequestData, LLMResponseData,
     ToolCallStartData, ToolCallEndData, ErrorData, SkillInvokedData, KnowledgeAccessedData,
     SandboxExecData, CheckpointEventData, RetryData, ContextCondensedData, RepetitionData,
+    RecoveryData, TodosUpdatedData,
 ]
 
 HOOK_PAYLOADS: dict[HookEvent, type] = {
@@ -164,6 +204,8 @@ HOOK_PAYLOADS: dict[HookEvent, type] = {
     HookEvent.RETRY: RetryData,
     HookEvent.CONTEXT_CONDENSED: ContextCondensedData,
     HookEvent.REPETITION: RepetitionData,
+    HookEvent.RECOVERY: RecoveryData,
+    HookEvent.TODOS_UPDATED: TodosUpdatedData,
 }
 
 

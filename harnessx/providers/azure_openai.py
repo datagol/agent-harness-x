@@ -75,12 +75,13 @@ class AzureOpenAIProvider(OpenAIProvider):
         api_key: str | None = None,
         api_version: str | None = None,
         azure_deployment: str | None = None,
+        allow_missing_finish_reason_for_text: bool = False,
         **client_kwargs: Any,
     ) -> None:
         if client is not None:
             # A preconfigured client manages its own auth/endpoint/version;
             # use it as-is and skip all env validation and SDK construction.
-            super().__init__(client=client)
+            super().__init__(client=client, allow_missing_finish_reason_for_text=allow_missing_finish_reason_for_text)
         else:
             resolved_endpoint = azure_endpoint or os.environ.get("AZURE_OPENAI_ENDPOINT")
             resolved_api_key = api_key or os.environ.get("AZURE_OPENAI_API_KEY")
@@ -110,7 +111,7 @@ class AzureOpenAIProvider(OpenAIProvider):
             # The engine owns retries (RetryPolicy); the SDK's own would compound them.
             kwargs.setdefault("max_retries", 0)
 
-            super().__init__(client=AsyncAzureOpenAI(**kwargs))
+            super().__init__(client=AsyncAzureOpenAI(**kwargs), allow_missing_finish_reason_for_text=allow_missing_finish_reason_for_text)
 
         # Harness-level request-model override (does not pin the SDK URL).
         self.azure_deployment = azure_deployment

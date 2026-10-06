@@ -22,7 +22,7 @@ import asyncio
 import json
 import logging
 import re
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence, overload
 
@@ -160,12 +160,68 @@ class MCPConnection:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self.session: Any = None  # mcp.ClientSession
-        self._exit_stack: AsyncExitStack | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._closing: asyncio.Event | None = None
+        self._ready: asyncio.Future[list[MCPToolInfo]] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._tools: list[MCPToolInfo] = []
         self.transport: str | None = None  # negotiated: stdio, streamable-http, or sse
 
     async def connect(self) -> list[MCPToolInfo]:
-        """Connect to the MCP server and discover its tools."""
+        """Connect to the MCP server and discover its tools.
+
+        The transports are anyio context managers, so their cancel scopes bind
+        to the task that enters them and must be exited from that same task.
+        Entering them here would tie the connection to whoever called
+        ``connect()``: inside a web request handler that task ends when the
+        response is sent, anyio raises "Attempted to exit a cancel scope that
+        isn't the current task's current cancel scope", the transport unwinds,
+        and the next tool call fails with "Connection closed".
+
+        So a dedicated task owns the whole lifecycle instead. It opens the
+        transports, hands the discovered tools back, and then waits. The
+        connection lives until ``disconnect()``, whatever happens to the caller.
+        """
+        async with self._lifecycle_lock:
+            if self._task is None or self._task.done():
+                loop = asyncio.get_running_loop()
+                self._tools = []
+                self._ready = loop.create_future()
+                self._ready.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+                self._closing = asyncio.Event()
+                self._task = loop.create_task(self._lifecycle(self._ready))
+            ready = self._ready
+        assert ready is not None
+        # One cancelled request must not cancel discovery for other callers.
+        return list(await asyncio.shield(ready))
+
+    async def _lifecycle(self, ready: "asyncio.Future[list[MCPToolInfo]]") -> None:
+        """Own the transports from open to close, in one task."""
+        try:
+            async with AsyncExitStack() as stack:
+                tools = await self._open(stack)
+                if ready.done():  # the caller was cancelled while we connected
+                    return
+                ready.set_result(tools)
+                await self._closing.wait()
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(RuntimeError("MCP connection closed during initialization")
+                                    if isinstance(exc, asyncio.CancelledError) else exc)
+            elif not isinstance(exc, asyncio.CancelledError):
+                logger.warning(
+                    "MCP '%s': connection ended: %s", self.config.name, exc
+                )
+        finally:
+            self.session = None
+
+    async def _open(self, stack: AsyncExitStack) -> list[MCPToolInfo]:
+        """Enter the transport contexts and discover tools.
+
+        Runs inside ``_lifecycle``'s task, never the caller's, because the
+        transports are anyio context managers whose cancel scopes belong to
+        whichever task entered them.
+        """
         try:
             from mcp import ClientSession, StdioServerParameters
         except ImportError:
@@ -173,9 +229,6 @@ class MCPConnection:
                 "MCP support requires the 'mcp' package. "
                 "Install it with: pip install 'mcp[cli]'"
             )
-
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
 
         if self.config.command:
             # stdio transport
@@ -186,7 +239,7 @@ class MCPConnection:
                 args=self.config.args,
                 env=self.config.env,
             )
-            read, write = await self._exit_stack.enter_async_context(
+            read, write = await stack.enter_async_context(
                 stdio_client(server_params)
             )
             self.transport = "stdio"
@@ -208,7 +261,7 @@ class MCPConnection:
                         import httpx
                         client_kwargs["http_client"] = httpx.AsyncClient(headers=self.config.headers)
 
-                result = await self._exit_stack.enter_async_context(
+                result = await stack.enter_async_context(
                     streamable_http_client(self.config.url, **client_kwargs)
                 )
                 read, write = result[0], result[1]
@@ -222,7 +275,7 @@ class MCPConnection:
                 try:
                     from mcp.client.sse import sse_client
 
-                    read, write = await self._exit_stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         sse_client(self.config.url, headers=self.config.headers)
                     )
                     self.transport = "sse"
@@ -237,7 +290,7 @@ class MCPConnection:
                 f"MCP server '{self.config.name}': must specify either 'command' (stdio) or 'url' (sse)"
             )
 
-        self.session = await self._exit_stack.enter_async_context(
+        self.session = await stack.enter_async_context(
             ClientSession(read, write)
         )
         await self.session.initialize()
@@ -305,13 +358,31 @@ class MCPConnection:
         return text
 
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
-        if self._exit_stack:
-            try:
-                await self._exit_stack.__aexit__(None, None, None)
-            except Exception:
-                pass
-            self._exit_stack = None
+        """Disconnect from the MCP server.
+
+        Signals the owning task rather than exiting the stack here, so the
+        contexts unwind in the task that entered them.
+        """
+        async with self._lifecycle_lock:
+            task = self._task
+            if self._closing is not None:
+                self._closing.set()
+            if task is not None and not task.done():
+                if self._ready is not None and not self._ready.done():
+                    task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=10)
+                except (TimeoutError, asyncio.TimeoutError):
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_exception(RuntimeError("MCP connection closed during initialization"))
+            self._task = None
+            self._closing = None
             self.session = None
             self._tools = []
 

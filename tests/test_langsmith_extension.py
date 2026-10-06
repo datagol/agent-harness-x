@@ -128,7 +128,7 @@ class TestLangSmithExtension(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prefix_key", llm_run.extra["metadata"])
         params = llm_run.extra["invocation_params"]
         self.assertEqual((params["model"], params["max_tokens"], params["temperature"], params["stream"]),
-                         ("claude-sonnet-4-6", 8192, None, False))
+                         ("claude-sonnet-4-6", 32_000, None, False))
         self.assertEqual(llm_run.extra["metadata"]["usage_metadata"],
                          {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
 

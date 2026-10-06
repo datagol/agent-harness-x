@@ -806,8 +806,10 @@ current engine serializes a tool batch containing such a delegation. Both
 child text does not appear as parent answer text.
 
 Each specialist has its own iteration and cost limits. Parent `RunResult.usage`
-and guardrail totals remain parent-only, not a combined team budget. Set child
-limits explicitly. A timeout cancels waiting and closes child resources, but
+and lifetime totals include completed child responses, including responses before
+a child fails or is cancelled. Parent cost limits also apply during delegation;
+child spend uses the child's configured rates. Unknown spend on interrupted calls
+is flagged with `usage_incomplete`. A timeout cancels waiting and closes child resources, but
 cannot reverse external effects or forcibly stop a synchronous tool thread.
 
 ### Durable execution boundary

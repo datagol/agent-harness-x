@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from typing import TYPE_CHECKING, Any
 
 from harnessx.types import PermissionLevel
@@ -19,12 +21,20 @@ async def run_bash(command: str, timeout: int = 30) -> str:
         command: The shell command to execute.
         timeout: Maximum seconds to wait (default 30).
     """
-    try:
-        proc = await asyncio.create_subprocess_shell(
+    return await _run_bash(command, timeout)
+
+
+async def _run_bash(command: str, timeout: int = 30, cwd: str | None = None) -> str:
+    proc = None
+    spawn = asyncio.create_task(asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-        )
+            cwd=cwd,
+            start_new_session=True,
+        ))
+    try:
+        proc = await asyncio.shield(spawn)
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
         output = ""
@@ -37,11 +47,31 @@ async def run_bash(command: str, timeout: int = 30) -> str:
         return output.strip() or "(no output)"
 
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        await _kill_command(proc)
         return f"Command timed out after {timeout}s"
+    except asyncio.CancelledError:
+        # The harness's own deadline for the tool fired first (a model can ask
+        # for a longer timeout than the tool is allowed); do not leave the
+        # process running behind the cancelled call.
+        if proc is None:
+            # Cancellation may arrive while the subprocess transport is opening.
+            try:
+                proc = await spawn
+            except Exception:
+                pass
+        await _kill_command(proc)
+        raise
+
+
+async def _kill_command(proc) -> None:
+    if proc is None:
+        return
+    # The shell may already have exited while a child still holds its pipes.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    await proc.communicate()
 
 
 def register_bash_tools(
@@ -52,6 +82,7 @@ def register_bash_tools(
     include: list[str] | None = None,
     exclude: list[str] | None = None,
     replace: bool = False,
+    cwd: str | None = None,
 ) -> list[str]:
     """Register bash execution tools.
 
@@ -63,6 +94,10 @@ def register_bash_tools(
         permission: Explicit policy; None inherits the manager default (normally ALLOW).
         include: Specific tool names to register ('run_bash').
         exclude: Tool names to omit.
+        cwd: Directory commands start in, for a direct subprocess. None is the
+            process's own working directory. An agent serving several users from
+            one process gives each its own; a sandbox has its own and ignores it.
+            Commands can still ``cd`` out: this is a starting point, not a jail.
 
     Returns:
         List of registered tool names.
@@ -93,6 +128,17 @@ def register_bash_tools(
             return output.strip() or "(no output)"
 
         registry.register_tool(sandboxed_run_bash, name="run_bash", permission=permission, replace=replace)
+    elif cwd is not None:
+        async def scoped_run_bash(command: str, timeout: int = 30) -> str:
+            """Execute a bash command in the working directory and return its output.
+
+            Args:
+                command: The shell command to execute.
+                timeout: Maximum seconds to wait (default 30).
+            """
+            return await _run_bash(command, timeout, cwd)
+
+        registry.register_tool(scoped_run_bash, name="run_bash", permission=permission, replace=replace)
     else:
         registry.register_tool(run_bash, name="run_bash", permission=permission, replace=replace)
 

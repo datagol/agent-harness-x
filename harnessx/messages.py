@@ -33,7 +33,14 @@ class ToolResultBlock(TypedDict, total=False):
     is_error: bool
 
 
-ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock
+class ProviderBlock(TypedDict):
+    """Opaque native content, returned only to its originating provider family."""
+    type: Literal["provider"]
+    provider: str
+    data: dict[str, Any]
+
+
+ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ProviderBlock
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,11 @@ class Message(Mapping[str, Any]):
                         raise ValueError("Invalid tool-result block")
                     if "is_error" in block and type(block["is_error"]) is not bool:
                         raise TypeError("Tool result is_error must be a bool")
+                elif kind == "provider":
+                    if (self.role != "assistant" or not isinstance(block.get("provider"), str)
+                            or not block["provider"] or not isinstance(block.get("data"), dict)
+                            or not isinstance(block["data"].get("type"), str)):
+                        raise ValueError("Invalid provider content block")
                 else:
                     raise ValueError(f"Unsupported content block: {kind!r}")
         json.dumps(self.content, allow_nan=False)

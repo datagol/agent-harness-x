@@ -39,6 +39,15 @@ class UnknownExecutionKey(HarnessError, KeyError):
         return f"No pending tool has execution key {self.execution_key!r}"
 
 
+class IncompleteStreamError(HarnessError, ConnectionError):
+    """A streamed reply stalled, or ended before the provider said it was complete.
+
+    What arrived may be a fragment that parses as a whole reply -- an answer
+    missing its end, a tool call missing arguments -- so it is never used. A
+    ``ConnectionError``, so the engine retries the call like a dropped connection.
+    """
+
+
 class TransientToolError(HarnessError):
     """Raised by a tool handler to say the call failed for a reason that may clear on its own
     (throttling, a flaky upstream, a lost connection) and did not take effect.
@@ -83,6 +92,28 @@ class RunTruncated(RunError):
             result,
             f"Run {result.run_id} was cut off at the reply token budget; raise AgentConfig.max_tokens "
             "or ask for shorter output",
+        )
+
+
+class RunLimitReached(RunError):
+    """The run reached ``Limits.max_iterations`` and ended with the model's final account."""
+
+    def __init__(self, result: RunResult) -> None:
+        super().__init__(
+            result,
+            f"Run {result.run_id} reached its step limit; the output says what was done and "
+            "what remains. Raise Limits.max_iterations or narrow the task",
+        )
+
+
+class RunRefused(RunError):
+    """The model declined, or a content filter stopped the reply."""
+
+    def __init__(self, result: RunResult) -> None:
+        super().__init__(
+            result,
+            f"Run {result.run_id} ended with a {result.stop_reason}: the model declined or the "
+            "reply was filtered, so its output is not an answer",
         )
 
 

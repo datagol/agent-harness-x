@@ -113,6 +113,8 @@ class GuardrailsEngine:
         input_cost_per_m: float | None = None,
         output_cost_per_m: float | None = None,
     ) -> None:
+        self.usage_observer: Callable[..., None] | None = None
+        self.parent_cost_check: Callable[[], None] | None = None
         self.max_iterations = max_iterations
         self.max_cost_dollars = max_cost_dollars
         self.input_cost_per_m = input_cost_per_m if input_cost_per_m is not None else self.INPUT_COST_PER_M
@@ -120,6 +122,8 @@ class GuardrailsEngine:
         self._iteration_count = 0
         self._lifetime_iterations = 0
         self._total_usage = TokenUsage()
+        self._estimated_cost = 0.0
+        self.usage_incomplete = False
 
     def reset_turn(self) -> None:
         """Reset turn iteration counter at the start of a user turn."""
@@ -136,18 +140,25 @@ class GuardrailsEngine:
                 f"Total usage: {self.usage_summary}"
             )
 
-    def track_usage(self, usage: Any) -> None:
+    def cost_of(self, usage: Any) -> float:
+        return (usage.input_tokens * self.input_cost_per_m + usage.output_tokens * self.output_cost_per_m) / 1_000_000
+
+    def track_usage(self, usage: Any, *, cost: float | None = None) -> None:
         """Accumulate token usage from an API response."""
-        self._total_usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        self._total_usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-        self._total_usage.cache_creation_input_tokens += getattr(
-            usage, "cache_creation_input_tokens", 0
-        ) or 0
-        self._total_usage.cache_read_input_tokens += getattr(
-            usage, "cache_read_input_tokens", 0
-        ) or 0
+        from dataclasses import fields
+        for field in fields(TokenUsage):
+            value = getattr(usage, field.name, 0) or 0
+            setattr(self._total_usage, field.name, getattr(self._total_usage, field.name) + value)
+        charge = self.cost_of(usage) if cost is None else cost
+        self._estimated_cost += charge
+        observer = getattr(self, "usage_observer", None)
+        if observer is not None:
+            observer(usage, cost=charge)
 
     def check_cost_limit(self) -> None:
+        parent_check = getattr(self, "parent_cost_check", None)
+        if parent_check is not None:
+            parent_check()
         if self.max_cost_dollars is None:
             return
         cost = self.estimated_cost
@@ -160,8 +171,7 @@ class GuardrailsEngine:
     @property
     def estimated_cost(self) -> float:
         """Every input token at the input rate, so an upper bound where the vendor discounts cache reads."""
-        u = self._total_usage
-        return (u.input_tokens * self.input_cost_per_m + u.output_tokens * self.output_cost_per_m) / 1_000_000
+        return self._estimated_cost
 
     @property
     def iteration_count(self) -> int:
@@ -192,6 +202,8 @@ class GuardrailsEngine:
         self._iteration_count = 0
         self._lifetime_iterations = 0
         self._total_usage = TokenUsage()
+        self._estimated_cost = 0.0
+        self.usage_incomplete = False
 
 
 def _truncate(s: str, max_len: int) -> str:

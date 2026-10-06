@@ -226,8 +226,8 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     shape = asdict(config)
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
     assert shape["retry"] == {
-        "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 30.0,
-        "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
+        "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 60.0,
+        "stream_idle_timeout_seconds": 180.0, "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
     }
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}
@@ -504,7 +504,8 @@ async def test_hook_payload_keys_match_their_typed_dicts(tmp_path):
     # bundle, a transient failure, an overflowing history. Each has its own test.
     missing = set(HOOK_PAYLOADS) - set(observed) - {
         HookEvent.SKILL_INVOKED, HookEvent.KNOWLEDGE_ACCESSED, HookEvent.RETRY,
-        HookEvent.CONTEXT_CONDENSED, HookEvent.REPETITION,
+        HookEvent.CONTEXT_CONDENSED, HookEvent.REPETITION, HookEvent.RECOVERY,
+        HookEvent.TODOS_UPDATED,
     }
     assert not missing, f"events never emitted: {missing}"
     for event, payloads in observed.items():
@@ -870,11 +871,13 @@ def test_reply_budget_defaults_per_provider_and_timeout_follows_it():
     from harnessx.providers.base import DEFAULT_MAX_TOKENS
     from harnessx.types import call_timeout_for
 
-    assert AgentConfig().max_tokens is None, "unset means the provider chooses for the model"
+    assert AgentConfig().max_tokens is None, "unset means it is resolved from the model's limits"
     anthropic = AnthropicProvider(client=object())
-    assert anthropic.default_max_tokens("claude-sonnet-4-6") == 20_000
-    assert anthropic.default_max_tokens("claude-3-5-haiku-latest") == DEFAULT_MAX_TOKENS
-    assert Scripted().default_max_tokens("anything") == DEFAULT_MAX_TOKENS
+    # The model's own limit, capped at 32K -- whatever the model's generation.
+    assert anthropic.default_max_tokens("claude-sonnet-4-6") == 32_000
+    assert anthropic.default_max_tokens("claude-opus-5-5") == 32_000
+    assert anthropic.default_max_tokens("claude-3-5-haiku-latest") == 8_192, "below the cap, the model's limit"
+    assert Scripted().default_max_tokens("anything") == DEFAULT_MAX_TOKENS == 32_000
     # The timeout for one call grows with the budget instead of cutting a long reply short.
     assert call_timeout_for(8192) == DEFAULT_TIMEOUT_SECONDS
     assert call_timeout_for(32_000) == 32_000 * 3600 / 128_000 + 60
@@ -887,9 +890,10 @@ async def test_engine_sends_the_resolved_budget_and_reports_truncation():
     hooks = HookManager()
     hooks.on(HookEvent.LLM_REQUEST, lambda ctx: seen.append(dict(ctx.data)))
     provider = Scripted([ProviderResponse(text="half a reply", stop_reason="max_tokens")])
-    async with Agent(provider=provider, hooks=hooks) as agent:
+    config = AgentConfig(limits=Limits(max_truncation_recoveries=0))  # report the cut, do not recover
+    async with Agent(provider=provider, hooks=hooks, config=config) as agent:
         result = await agent.run("write a novel")
-    assert seen[0]["max_tokens"] == 8192 and provider.calls[0]["max_tokens"] == 8192
+    assert seen[0]["max_tokens"] == 32_000 and provider.calls[0]["max_tokens"] == 32_000
     assert result.status is RunStatus.COMPLETED and result.stop_reason == "max_tokens"
     assert result.truncated and not result.ok and not result.failed
     with pytest.raises(harnessx.RunTruncated, match="max_tokens"):

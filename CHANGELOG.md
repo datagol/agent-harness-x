@@ -4,6 +4,131 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Hitting a limit no longer ends a run. A hardcoded 8K reply budget cut a reply
+off mid tool call; the harness refused the half-written call with "call the
+tool again" and then ended the run, so the model never could. The same
+comparison with Pi, OpenCode, Hermes and Deep Agents then covered the rest of
+the loop: the transcript, stop reasons, streams, the step limit, context and
+subagents.
+
+### Changed
+
+- **Reply budgets come from the model.** With `AgentConfig.max_tokens` unset,
+  the budget is the model's own output limit capped at 32K, fitted into what is
+  left of the context window. Limits are resolved from what the application
+  registered, what a provider reported in an error, Anthropic's Models API,
+  then a built-in table matched by longest prefix. This replaces a regex that
+  knew Claude 4 and sent 8192 to every other model, including Claude 5.
+- **A reply cut off at the budget is recovered.** A truncated tool call is
+  refused with an error result and the model asked again; truncated text is
+  continued and the pieces joined. Each time, the budget doubles up to the
+  model's limit and stays raised for the rest of the run. The loop recovers up to
+  `Limits.max_truncation_recoveries` times (default 3); 0 restores the old stop.
+- **A request refused for asking too much is repeated within the limit.** A
+  "max_tokens: X > Y" refusal is retried at Y, and Y is remembered for the
+  model. A "prompt is too long" refusal condenses the history and repeats the
+  call, up to twice per run, and remembers the window the provider named.
+- `Limits.max_context_tokens` defaults to `None`: the model's own window rather
+  than a fixed 150K. Set it to condense earlier.
+- An empty reply (no text, no tool call) is no longer stored -- sent back, it
+  was rejected and broke the session -- and the model is nudged to go on, at
+  most twice. Exhausting empty-response or paused-turn recovery fails the run
+  with `RecoveryExhaustedError`, retaining partial output and known usage.
+- A tool that times out in a direct `Agent.run()` is answered with an error
+  result the model reads. It used to stop the run "awaiting input" on an
+  unanswered call that a direct run could never resolve. Durable runtimes still
+  stop for recovery. One failing call in a concurrent batch no longer cancels
+  the others. Cancellation joins owned asynchronous work before retry, and
+  `run_bash` kills its process group and reaps the shell on timeout or cancellation.
+- Tool arguments that are not a JSON object (OpenAI-compatible providers) reach
+  the model as the parse error, instead of a schema complaint about `_raw` or a
+  failed run. Raw control characters inside strings are accepted, and a call
+  without an id gets one.
+- Anthropic's `model_context_window_exceeded` stop reason is treated as a
+  truncation.
+- **The transcript is repaired before every request** (`sanitize_history`),
+  leaving the stored one alone: a call with no answer gets one, an answer to
+  nothing is dropped, of two answers to one call the later is kept (a resumed
+  run used to send both), and empty assistant turns are left out.
+- **Stop reasons say what happened.** `StopReason.REFUSAL` (Anthropic's
+  `refusal`, OpenAI's `message.refusal`) and `StopReason.PAUSE_TURN` are new;
+  Gemini's RECITATION and SPII are `SAFETY`, its MALFORMED_FUNCTION_CALL is
+  `OTHER`, and a MAX_TOKENS reply carrying tool calls stays `MAX_TOKENS`. A
+  refused or filtered run completes but is not `ok` (`result.refused`;
+  `raise_for_status()` raises `RunRefused`). A paused turn is sent back to
+  resume it, up to five times.
+- **The step limit ends with an answer.** On reaching `max_iterations` the
+  model is asked once more, told to use no tools, for what it did, what is left
+  and its best answer. The run completes with `stop_reason="max_iterations"`
+  (`result.limited`, not `ok`; `raise_for_status()` raises `RunLimitReached`).
+  `Limits(final_answer_on_limit=False)` fails it as before.
+- **Retries:** `RetryPolicy.attempts` defaults to 4 (was 2) and
+  `max_backoff_seconds` to 60 (was 30). A connection dropped mid-reply
+  (`RemoteProtocolError`, `ReadError`, ...) is retried.
+- **Streams that stall or end early are retried.** No chunk for
+  `RetryPolicy.stream_idle_timeout_seconds` (180) abandons the stream. An
+  Anthropic stream with no stop reason (including the SDK's internal streaming
+  path), or an OpenAI/Gemini stream with no terminal finish reason, raises
+  `IncompleteStreamError`. OpenAI-compatible providers offer the explicit
+  `allow_missing_finish_reason_for_text=True` option for text-only servers;
+  it never enables incomplete tool calls. Anthropic's prompt-cache
+  fallback never restarts a stream that has already delivered text.
+- **Only unambiguous formatting aliases are repaired:** case, separators
+  (`search-web`, `searchWeb`), and the known `functions.`, `tools.`,
+  `default_api:` prefixes. Exact names win. Typos and ambiguous aliases produce
+  errors with up to three suggestions and never silently dispatch another tool.
+- **Old tool output is cleared before the history is summarized.** Past the
+  newest ~40K tokens of tool results, older ones are replaced by a one-line
+  note (only when that frees ~20K tokens); the summary runs only if that was
+  not enough. Large error results are spilled to disk like any other.
+- **A conversation moved to Anthropic by a fallback is accepted:** unsigned
+  thinking from other vendors and private keys such as Gemini's thought
+  signature are left out of the request. Native signed thinking, redacted
+  thinking and server tool blocks retain their order and metadata in snapshots
+  and recorder payloads. Pending native continuations stay on their originating
+  fallback member, without transcript repair or task reminders altering them.
+- **Subagents:** known child usage is charged as each response arrives, included
+  in parent run/lifetime totals, and priced at the child's configured rates.
+  Durable tool outcomes carry idempotent usage/cost deltas; interruptions flag
+  unknown usage. Parent cost checks apply within the child loop;
+  a child cut off at its budget or stopped at its step limit returns its output
+  with a note saying so; one that declines is an error; one that says nothing
+  says that.
+- Gemini's `output_tokens` includes thinking tokens, as Anthropic's and
+  OpenAI's do, so cost estimates and `max_cost_dollars` count them.
+
+### Added
+
+- `ModelLimits` and `register_model_limits(prefix, context_window=, max_output=)`,
+  and `LLMProvider.model_limits(model)` for providers that can look limits up.
+- `HookEvent.RECOVERY` (`RecoveryData`: `reason`, `attempt`, `reply_budget`).
+- `RunResult.refused`, `RunResult.limited`, `RunRefused`, `RunLimitReached`,
+  `IncompleteStreamError`, `StopReason.REFUSAL`, `StopReason.PAUSE_TURN`.
+- `RetryPolicy.stream_idle_timeout_seconds`, `Limits.final_answer_on_limit`,
+  `ConversationMemory.prune_tool_results()`.
+
+### Fixed
+
+- Learned model limits are scoped to the provider and exact model/deployment;
+  fallback member caps and repaired budgets survive snapshots. Configured
+  fallback budgets cannot override a learned cap. Custom providers' existing
+  `default_max_tokens` overrides remain effective.
+- Forced overflow compaction trims even when a token counter underestimates;
+  it refuses to retry an unchanged request. Summary calls have model deadlines.
+- Temporal activities use provider-aware retry classification, configured retry
+  counts, effective reply-budget deadlines, and summary fallback. Workflow
+  scheduling changes are guarded by the `harness-reliability-v2` patch marker.
+- Concurrent MCP callers share discovery and its result; cancelling a waiter
+  leaves the connection owner alive. Disconnect releases pending waiters.
+- Condensing mid-run no longer reports itself as a retry: no spurious
+  `ATTEMPT_RESET`, no usage marked incomplete, and the summary keeps its full
+  retry budget.
+- The history summary may use up to 8K tokens rather than 2K.
+- A model call retried after it had already written to memory no longer stores
+  its assistant turn twice.
+
 ## [0.5.0] - 2026-10-02
 
 Loop reliability. Read four other agent harnesses -- OpenCode, Pi, Hermes and

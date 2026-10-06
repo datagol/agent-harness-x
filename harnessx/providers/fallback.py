@@ -20,11 +20,13 @@ chain again.
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any, AsyncIterator, Sequence
 
 from ..types import Fallback, PromptCacheHint, ProviderResponse, StreamChunk
-from .base import LLMProvider, make_provider
+from ..models import lookup_model_limits, _apply_learned, resolve_model_limits
+from .base import LLMProvider, make_provider, native_continuation
 from .retry import is_transient, retry_after_seconds
 
 # What a chain accepts as a member: a config record, a provider name, or a live
@@ -33,7 +35,7 @@ MemberSpec = Fallback | LLMProvider | str
 
 
 class _Member:
-    __slots__ = ("provider", "label", "owned", "model", "max_tokens", "strikes", "skip_until")
+    __slots__ = ("provider", "label", "owned", "model", "max_tokens", "strikes", "skip_until", "reply_budget")
 
     def __init__(self, spec: MemberSpec) -> None:
         self.model: str | None = None
@@ -54,14 +56,25 @@ class _Member:
         else:
             raise TypeError("A chain member must be a Fallback, a provider name, or an LLMProvider")
         self.strikes = 0
+        self.reply_budget: int | None = None
         self.skip_until = 0.0
 
-    def request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def request(self, request: dict[str, Any], *, limits=None) -> dict[str, Any]:
         mapped = dict(request)
         if self.model is not None:
             mapped["model"] = self.model
         if self.max_tokens is not None:
             mapped["max_tokens"] = self.max_tokens
+        if self.reply_budget is not None and "max_tokens" in request:
+            mapped["max_tokens"] = self.reply_budget
+        if mapped.get("max_tokens"):
+            # The budget was resolved for the primary's model. A member serving a
+            # different model with a smaller reply limit would refuse it outright.
+            from ..models import UNKNOWN_MODEL
+            model = mapped.get("model") or self.model or ""
+            known = limits or _apply_learned(model, lookup_model_limits(model) or UNKNOWN_MODEL, self.provider)
+            if known is not None and mapped.get("max_tokens"):
+                mapped["max_tokens"] = min(int(mapped["max_tokens"]), known.max_output)
         return mapped
 
     def transient(self, exc: BaseException) -> bool:
@@ -85,6 +98,7 @@ class FallbackProvider(LLMProvider):
     """
 
     name = "fallback"
+    _resolves_member_limits = True
 
     def __init__(
         self,
@@ -103,6 +117,9 @@ class FallbackProvider(LLMProvider):
         self.cooldown_seconds = float(cooldown_seconds)
         self.last_served: str | None = None
         self._failing: _Member | None = None
+        self._active: _Member | None = None
+        self._pinned: _Member | None = None
+        self._last_request: dict[str, Any] = {}
 
     @classmethod
     def from_config(cls, config: Any) -> FallbackProvider:
@@ -121,6 +138,8 @@ class FallbackProvider(LLMProvider):
         return tuple(m.label for m in self._members)
 
     def _eligible(self) -> list[_Member]:
+        if self._pinned is not None:
+            return [self._pinned]
         now = time.monotonic()
         ready = [m for m in self._members if m.skip_until <= now]
         return ready or list(self._members)  # every member cooling down: try them all
@@ -142,7 +161,49 @@ class FallbackProvider(LLMProvider):
 
     # ── LLMProvider ────────────────────────────────────────────────────────
     def default_max_tokens(self, model: str) -> int:
-        return self._members[0].provider.default_max_tokens(model)
+        member = self._eligible()[0]
+        return member.provider.default_max_tokens(member.model or model)
+
+    async def model_limits(self, model: str):
+        """Limits for the member handling this request or recovery."""
+        member = self._pinned or self._failing or self._eligible()[0]
+        return await resolve_model_limits(member.provider, member.model or model)
+
+    def request_target(self, model):
+        member = self._active or self._eligible()[0]
+        return member.provider, self._last_request.get("model", member.model or model)
+
+    def set_reply_budget(self, budget):
+        (self._active or self._eligible()[0]).reply_budget = budget
+
+    def call_budget(self, budget):
+        return max([budget or 0, *(m.reply_budget or m.max_tokens or budget or 0 for m in self._eligible())])
+
+    def export_state(self):
+        return {"members": [{"limits": getattr(m.provider, "_harness_model_limits", {}),
+                             "reply_budget": m.reply_budget} for m in self._members],
+                "pinned": self._members.index(self._pinned) if self._pinned is not None else None,
+                "failing": self._members.index(self._failing) if self._failing is not None else None}
+
+    def restore_state(self, state):
+        for member, saved in zip(self._members, state.get("members", [])):
+            member.provider._harness_model_limits = copy.deepcopy(saved.get("limits", {}))
+            member.reply_budget = saved.get("reply_budget")
+        index = state.get("pinned")
+        self._pinned = self._members[index] if isinstance(index, int) and 0 <= index < len(self._members) else None
+        index = state.get("failing")
+        self._failing = self._members[index] if isinstance(index, int) and 0 <= index < len(self._members) else None
+
+    async def _request(self, member, request):
+        model = member.model or request["model"]
+        limits = await resolve_model_limits(member.provider, model)
+        mapped = member.request(request, limits=limits)
+        mapped["max_tokens"] = min(mapped["max_tokens"], limits.max_output)
+        self._active, self._last_request = member, mapped
+        return mapped
+
+    def _continuation(self, member, response):
+        self._pinned = member if native_continuation(response) else None
 
     def is_transient(self, exc: BaseException) -> bool:
         member = self._failing or self._members[0]
@@ -176,7 +237,7 @@ class FallbackProvider(LLMProvider):
         chain = self._eligible()
         for index, member in enumerate(chain):
             try:
-                response = await member.provider.create(**member.request(request))
+                response = await member.provider.create(**await self._request(member, request))
             except Exception as exc:
                 if not member.transient(exc):
                     self._failing = member
@@ -185,6 +246,7 @@ class FallbackProvider(LLMProvider):
                     raise
                 continue
             self._served(member)
+            self._continuation(member, response)
             return response
         raise RuntimeError("FallbackProvider has no members")  # pragma: no cover - constructor requires one
 
@@ -205,13 +267,26 @@ class FallbackProvider(LLMProvider):
         )
         chain = self._eligible()
         for index, member in enumerate(chain):
-            iterator = member.provider.stream(**member.request(request))
+            iterator = member.provider.stream(**await self._request(member, request))
+            delivered = False
             try:
-                first = await iterator.__anext__()
-            except StopAsyncIteration:
-                self._served(member)
-                return
+                async for chunk in iterator:
+                    if chunk.kind == "response":
+                        self._continuation(member, chunk.data)
+                    # "progress" chunks carry nothing the caller shows, so they
+                    # pass straight through -- keeping a stall watchdog fed --
+                    # without closing the window in which another member can
+                    # still take over.
+                    if not delivered and chunk.kind != "progress":
+                        # Output has reached the caller: from here a failure is
+                        # the engine's to handle.
+                        delivered = True
+                        self.last_served = member.label
+                        self._failing = member
+                    yield chunk
             except Exception as exc:
+                if delivered:
+                    raise
                 await _aclose(iterator)
                 if not member.transient(exc):
                     self._failing = member
@@ -219,12 +294,8 @@ class FallbackProvider(LLMProvider):
                 if not self._struck(member, exc, last=index == len(chain) - 1):
                     raise
                 continue
-            # Output has reached the caller: from here a failure is the engine's to handle.
-            self.last_served = member.label
-            self._failing = member
-            yield first
-            async for chunk in iterator:
-                yield chunk
+            finally:
+                await _aclose(iterator)
             self._served(member)
             return
 
@@ -236,7 +307,7 @@ class FallbackProvider(LLMProvider):
         system: str | None,
         tools: list[dict[str, Any]],
     ) -> int:
-        member = self._eligible()[0]
+        member = self._pinned or self._failing or self._eligible()[0]
         mapped = member.request({"model": model})
         return await member.provider.count_tokens(
             model=mapped["model"], messages=messages, system=system, tools=tools,

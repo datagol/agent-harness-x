@@ -79,7 +79,7 @@ async def test_delegation_isolated_and_serial_with_cleanup(monkeypatch, streamin
         else:
             result = await parent.run("Private parent context")
         assert result.status == "completed" and result.output == "Combined findings"
-        assert result.usage.input_tokens == 7  # Parent-only accounting remains explicit.
+        assert result.usage.input_tokens == 45  # Includes both specialists.
         assert len(children) == 2 and all(c.closed for c in children)
         for child, task in zip(children, ("first", "second")):
             request = child.requests[0]
@@ -181,8 +181,9 @@ async def test_timeout_or_cancellation_closes_child(monkeypatch, cancel):
 
     child = Waiting([])
     monkeypatch.setattr("harnessx.core.make_provider", lambda name: child)
+    parent_provider = Provider([call_response(delegate()), ProviderResponse(text="gave up on the review")])
     async with Agent(
-        provider=Provider([call_response(delegate())]),
+        provider=parent_provider,
         subagents=[specialist(timeout_seconds=300 if cancel else 0.05)],
     ) as parent:
         task = asyncio.create_task(parent.run("review"))
@@ -192,8 +193,13 @@ async def test_timeout_or_cancellation_closes_child(monkeypatch, cancel):
             with pytest.raises(asyncio.CancelledError):
                 await task
         else:
+            # A direct run has no one to ask whether a timed-out call took
+            # effect, so the parent model is told and the run goes on, rather
+            # than stopping on an "uncertain" call nothing can resolve.
             result = await asyncio.wait_for(task, 2)
-            assert result.status == "awaiting_input" and result.pending[0].status == "uncertain"
+            assert result.ok and result.output == "gave up on the review"
+            answer = parent_provider.requests[-1]["messages"][-1]["content"][0]
+            assert answer["is_error"] and "timed out" in answer["content"]
         assert child.closed and not parent.busy
 
 
@@ -254,7 +260,7 @@ async def test_durable_raw_result_is_reused_after_processing_failure(monkeypatch
     children, fail = [], [True]
 
     def make_provider(name):
-        child = Provider([ProviderResponse(text="persisted specialist result")])
+        child = Provider([ProviderResponse(text="persisted specialist result", usage=TokenUsage(input_tokens=19, thinking_tokens=3))])
         children.append(child)
         return child
 
@@ -287,11 +293,14 @@ async def test_durable_raw_result_is_reused_after_processing_failure(monkeypatch
         sid = await runtime.start()
         failed = await runtime.run("review")
         assert failed.status == "failed" and len(children) == 1
+        assert failed.usage.input_tokens == 19
         saved = await store.get_run(failed.run_id)
         assert saved["tools"][0]["status"] == "raw_completed"
         fail[0] = False
         handle = await runtime.resume(sid)
-        assert (await handle.result()).status == "completed"
+        resumed = await handle.result()
+        assert resumed.status == "completed"
+        assert resumed.usage.input_tokens == 19 and resumed.usage.thinking_tokens == 3
         assert len(children) == 1 and children[0].closed
     finally:
         await runtime.stop()

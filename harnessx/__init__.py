@@ -14,7 +14,7 @@ from .errors import (
     HarnessError,
     ResolutionError,
     RunAwaitingInput,
-    RunCancelled, RunTruncated,
+    RunCancelled, RunLimitReached, RunRefused, RunTruncated,
     RunError,
     RunFailed,
     RuntimeStateError,
@@ -34,6 +34,7 @@ from .memory import (
     VectorMemoryStore,
 )
 from .messages import Message, ContentBlock
+from .models import ModelLimits, register_model_limits
 from .permissions import CliPermissionManager, CostLimitError, GuardrailsEngine, MaxIterationsError, PermissionManager
 from .providers import AnthropicProvider, FallbackProvider, LLMProvider, make_provider, register_provider
 from .runtime import AgentRuntime, RunHandle
@@ -85,6 +86,7 @@ __all__ = [
     "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",
+    "ModelLimits", "register_model_limits",
     # Tools
     "ToolRegistry", "ToolDefinition", "ToolCall", "ToolResult", "ToolNotFoundError", "PermissionLevel",
     "ReplayPolicy", "ToolExecutionContext", "ToolApprovalRequired", "current_tool_context", "normalize_tool_registry",
@@ -92,7 +94,7 @@ __all__ = [
     "RunEvent", "RunEventType", "RunResult", "RunStatus", "RunStream", "RunFailure", "PendingTool", "TokenUsage",
     # Errors
     "HarnessError", "ConfigurationError", "RuntimeStateError", "ResolutionError", "UnknownExecutionKey",
-    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled", "RunTruncated", "TransientToolError",
+    "RunError", "RunFailed", "RunAwaitingInput", "RunCancelled", "RunTruncated", "RunRefused", "RunLimitReached", "TransientToolError",
     "MaxIterationsError", "CostLimitError",
     # Memory and sessions
     "ConversationMemory", "Message", "ContentBlock", "PersistentMemory", "LongTermMemory", "AgentMemory",

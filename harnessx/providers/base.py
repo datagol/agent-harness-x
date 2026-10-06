@@ -8,25 +8,98 @@ harness's canonical ProviderResponse and RunEvent models.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
+import inspect
 from typing import Any, AsyncIterator, Self
 
+from ..models import DEFAULT_OUTPUT_CAP, ModelLimits, default_reply_budget, lookup_model_limits
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
 from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
 from .retry import is_transient, retry_after_seconds, sdk_connection_failure
 
 
-DEFAULT_MAX_TOKENS = 8192  # conservative: accepted by every model the built-in providers know
+# The reply budget for a model no table knows. Kept under its old name for
+# callers that import it; the value now comes from ``harnessx.models``.
+DEFAULT_MAX_TOKENS = DEFAULT_OUTPUT_CAP
+
+
+# Set on a tool call's input when the model's arguments could not be read. The
+# engine answers such a call with the reason instead of running it, so the model
+# sees what was wrong rather than a schema error about a key it never wrote.
+INVALID_ARGUMENTS = "__invalid_arguments__"
+
+
+def native_continuation(response) -> bool:
+    if response.stop_reason == "pause_turn":
+        return True
+    native = [b.get("data", {}) for b in response.content if isinstance(b, dict) and b.get("type") == "provider"]
+    calls = {b.get("id") for b in native if b.get("type") == "server_tool_use"}
+    answered = {b.get("tool_use_id") for b in native}
+    return bool(calls - answered)
+
+
+@asynccontextmanager
+async def closing_stream(stream):
+    """Close both SDK streams and async generators on completion or cancellation."""
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+def parse_tool_arguments(raw: str | None) -> dict[str, Any]:
+    """Tool-call arguments as the model wrote them, or a marker saying why not.
+
+    Raw control characters inside strings (a literal newline in a file body)
+    are accepted, as most models emit them. Anything that is not a JSON object
+    -- a truncated or malformed document, an array, a bare string -- becomes
+    ``{INVALID_ARGUMENTS: reason}``: a dict, so the transcript stays valid, and
+    the run goes on instead of failing on the turn that carries it.
+    """
+    import json
+
+    text = raw or ""
+    if not text.strip():
+        return {}
+    try:
+        value = json.loads(text, strict=False)
+    except json.JSONDecodeError as exc:
+        return {INVALID_ARGUMENTS: f"the arguments are not valid JSON ({exc.msg} at character {exc.pos})"}
+    if not isinstance(value, dict):
+        return {INVALID_ARGUMENTS: f"the arguments are a JSON {type(value).__name__}, not an object"}
+    return value
 
 
 class LLMProvider(ABC):
     """Backend that knows how to talk to one LLM vendor."""
 
     name: str = ""
+    _harness_model_limits: dict[str, dict[str, int]]
 
     def default_max_tokens(self, model: str) -> int:
-        """The reply budget used when AgentConfig.max_tokens is None. Override per vendor."""
-        return DEFAULT_MAX_TOKENS
+        """The reply budget used when AgentConfig.max_tokens is None.
+
+        The model's own output limit from the built-in table, capped at
+        ``DEFAULT_OUTPUT_CAP``. The engine resolves limits through
+        ``model_limits`` instead, which can also ask the vendor; this stays for
+        callers that want a synchronous answer.
+        """
+        known = lookup_model_limits(model)
+        return default_reply_budget(known) if known is not None else DEFAULT_MAX_TOKENS
+
+    def model_limits(self, model: str) -> ModelLimits | None | Any:
+        """The model's context window and output limit, when the vendor can say.
+
+        May be a coroutine function. None means "no better answer than the
+        built-in table", which is what the base class gives. Override to ask
+        the vendor; the engine caches nothing itself, so cache in the provider.
+        """
+        return None
 
     def is_transient(self, exc: BaseException) -> bool:
         """Whether one more attempt at the same request could succeed.

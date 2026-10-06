@@ -162,3 +162,52 @@ async def test_redis_duplicates_and_expired_cursor():
                 "harness:events:" + run, "harness:events:" + run + ":ids"
             )
         await events.aclose()
+
+
+async def test_reliability_retry_and_child_accounting_replay(tmp_path, monkeypatch):
+    from harnessx import AgentConfig, RetryPolicy, SubAgent, TokenUsage
+    from temporalio.worker import Replayer
+    from harnessx.backends.temporal_workflow import AgentSessionWorkflow
+
+    attempts, children = [], []
+    class Parent(P):
+        def is_transient(self, exc):
+            return isinstance(exc, LookupError)
+        async def create(self, **request):
+            if len(request["messages"]) == 1:
+                attempts.append(True)
+                if len(attempts) == 1:
+                    raise LookupError("retry this provider-specific failure")
+                return ProviderResponse(tool_calls=[ToolCall("d", "delegate_worker", {"task": "go"})],
+                                        usage=TokenUsage(input_tokens=2))
+            return ProviderResponse(text="done", usage=TokenUsage(input_tokens=3))
+    class Child(P):
+        async def create(self, **request):
+            children.append(True)
+            return ProviderResponse(text="child", usage=TokenUsage(input_tokens=17, thinking_tokens=3))
+    monkeypatch.setattr("harnessx.core.make_provider", lambda _: Child())
+    cfg = AgentConfig(model="fixture", planning=False, prompt_cache=None,
+                      retry=RetryPolicy(attempts=2, backoff_seconds=0))
+    registry = AgentRegistry()
+    ref = registry.register("reliability", lambda: Agent(config=cfg, provider=Parent(),
+        subagents=[SubAgent("worker", "work", cfg)]))
+    artifacts = await SQLiteBackend.connect(tmp_path / "artifacts.db")
+    backend = await TemporalBackend.connect(TARGET, events=RedisEvents(REDIS), artifact_store=artifacts,
+        registry=registry, task_queue="test-" + uuid.uuid4().hex)
+    runtime = AgentRuntime(ref, backend=backend)
+    try:
+        async with await backend.worker():
+            sid = await runtime.start()
+            result = await asyncio.wait_for(runtime.run("go"), 30)
+            assert result.ok and result.output == "done"
+            assert result.usage.input_tokens == 22 and result.usage.thinking_tokens == 3
+            assert result.usage_incomplete and len(attempts) == 2 and len(children) == 1
+            history = await backend.handle(sid).fetch_history()
+            await Replayer(workflows=[AgentSessionWorkflow],
+                data_converter=backend.client.config()["data_converter"]).replay_workflow(history)
+            await runtime.stop()
+    finally:
+        if runtime.session_id:
+            await backend.handle(runtime.session_id).terminate()
+        await backend.aclose()
+        await artifacts.aclose()

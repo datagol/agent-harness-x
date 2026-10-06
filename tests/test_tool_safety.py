@@ -540,3 +540,20 @@ def test_the_builtin_bundle_offers_the_full_file_tool_set():
     registry = ToolRegistry()
     names = register_filesystem_tools(registry, permission=PermissionLevel.ALLOW)
     assert set(names) >= {"read_file", "write_file", "edit_file", "delete", "glob", "grep", "list_directory"}
+
+
+def test_bash_can_start_in_a_given_directory(tmp_path):
+    """A server holding many conversations gives each its own directory; the
+    commands of one must not run in the server's own working directory."""
+    import asyncio
+
+    from harnessx.builtin.bash import register_bash_tools
+    from harnessx.tools import ToolRegistry
+    from harnessx.types import PermissionLevel, ToolCall
+
+    (tmp_path / "marker.txt").write_text("here")
+    registry = ToolRegistry()
+    register_bash_tools(registry, cwd=str(tmp_path), permission=PermissionLevel.ALLOW)
+    result = asyncio.run(registry.execute(ToolCall("1", "run_bash", {"command": "pwd && ls"})))
+    assert str(tmp_path.resolve()) in result.content and "marker.txt" in result.content
+    assert set(registry.get_tool("run_bash").input_schema["properties"]) == {"command", "timeout"}
