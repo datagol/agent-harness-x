@@ -4,7 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-10-06
+
+Hitting a limit no longer ends a run, the examples are standalone scripts by
+topic, harness-web shows every tool call and lets you build your own agent, and
+an agent's tools can run in an NVIDIA OpenShell sandbox
+(`pip install "harnessx[openshell]"`).
 
 Hitting a limit no longer ends a run. A hardcoded 8K reply budget cut a reply
 off mid tool call; the harness refused the half-written call with "call the
@@ -576,6 +581,8 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
+[0.6.0]: https://github.com/datagol/agent-harness-x/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/datagol/agent-harness-x/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/datagol/agent-harness-x/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/datagol/agent-harness-x/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/datagol/agent-harness-x/compare/v0.4.0...v0.4.1

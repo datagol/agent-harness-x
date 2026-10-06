@@ -359,7 +359,7 @@ sessions, run states, and incident bundles written by 0.3 load in 0.5 unchanged.
 
 ---
 
-## Unreleased: reply budgets and recovery
+## 0.6.0: reply budgets and recovery
 
 Nothing needs changing, but these defaults moved:
 
@@ -379,7 +379,7 @@ it for the rest of the run. Pair it with `max_truncation_recoveries=0` to make
 it a hard ceiling.
 
 
-## Reliability behavior changes (unreleased)
+## 0.6.0: reliability behavior changes
 
 Tool-name repair now accepts only unique formatting aliases. A spelling typo
 returns an error and suggestions; the model must issue a new call with the
