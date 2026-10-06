@@ -85,10 +85,10 @@ EXAMPLES = [
         "progress_and_waiting",
         "01-basics/progress_and_waiting.py",
         "Progress and waiting",
-        "Follow a long run's event stream, including the events sent while a slow tool works.",
+        "Follow a long run's event stream, including the waiting events sent while a slow model call is quiet.",
         "activity",
         offline=True,
-        detail="A scripted model calls a deliberately slow tool; every event is printed as it arrives. No model calls.",
+        detail="A deliberately slow scripted model, so waiting events fire; every event is printed as it arrives. No real model calls.",
     ),
     # ── Tools ──
     Example(
