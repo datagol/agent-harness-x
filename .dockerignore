@@ -1,0 +1,28 @@
+# Keep the build context small and the image free of local state.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Installed by the build, never copied in.
+harness-web/node_modules
+harness-web/dist
+node_modules
+dist
+build
+*.egg-info
+
+# Local state and secrets. .env is read at run time through env_file, and must
+# not be baked into a layer.
+.env
+.env.*
+*.db
+*.sqlite3
+.agent_sessions
+.agent_knowledge
+.sandbox_sessions
+doc

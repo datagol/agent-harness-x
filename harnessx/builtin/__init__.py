@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .ask import register_ask_user_tool
 from .bash import register_bash_tools, run_bash
 from .file_output import make_downloadable
 from .filesystem import (

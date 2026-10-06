@@ -22,8 +22,37 @@ npm --prefix harness-web run build
 python3 harness-web/run.py
 ```
 
-Open **http://127.0.0.1:8765**. Use `--port 8766` to choose another port.
+Open **http://127.0.0.1:8765**. Use `--port 8766` to choose another port, and
+`--host 0.0.0.0` to accept connections from outside this machine. It binds
+localhost by default because the app runs example code.
 The frontend build is served by the Python server; no second server is needed.
+
+## Run everything in containers
+
+No Python, no Node, and every optional service provisioned:
+
+```bash
+docker compose up
+```
+
+That builds the frontend, installs the SDK with every extra, and starts
+PostgreSQL, Temporal and Redis alongside the app on
+**http://localhost:8765**. The durable and Temporal examples are runnable with
+nothing further to configure.
+
+Model API keys come from your own `.env`, read at run time and never baked into
+an image. Without them the offline examples still run and the live ones say
+what is missing.
+
+To run the suite with those services reachable, which is the only way nothing
+is skipped:
+
+```bash
+docker compose run --rm tests
+```
+
+## Credentials and scope
+
 The app lives in this checkout and is not bundled in the SDK wheel.
 
 The existing repository `.env` is loaded without overriding environment variables.

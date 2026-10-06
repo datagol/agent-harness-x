@@ -144,3 +144,54 @@ test("output retention is bounded and a replay gap is visible", () => {
   });
   assert.equal(feed.notice, "Earlier output truncated");
 });
+
+test("an approval prompt renders from input_required alone", () => {
+  // The follow-up `state` event is deliberately withheld: a reconnect or a
+  // trimmed buffer can drop it, and the buttons must still appear.
+  let feed = reduceFeed(initialFeed(), { seq: 1, type: "state", status: "running", pending: null });
+  feed = reduceFeed(feed, {
+    seq: 2, type: "input_required", id: "p1", kind: "approval",
+    prompt: "Allow write_file?", tool: { name: "write_file", input: { path: "hi.txt" } },
+  });
+  assert.equal(feed.phase, "approval");
+  assert.equal(feed.run.pending.id, "p1");
+  assert.equal(feed.run.pending.kind, "approval");
+  assert.equal(feed.run.pending.tool.name, "write_file");
+  assert.equal(feed.run.pending.seq, undefined, "the envelope's seq is not part of the prompt");
+});
+
+test("the state event that follows an input_required does not clobber it", () => {
+  let feed = reduceFeed(initialFeed(), { seq: 1, type: "input_required", id: "p1", kind: "approval", prompt: "Allow?" });
+  feed = reduceFeed(feed, {
+    seq: 2, type: "state", status: "waiting", id: "r1",
+    pending: { id: "p1", kind: "approval", prompt: "Allow?" },
+  });
+  assert.equal(feed.run.pending.id, "p1");
+  assert.equal(feed.run.id, "r1", "the state event still supplies the run's own fields");
+});
+
+test("the agent's plan follows its latest update and survives the final result", () => {
+  const plan = (done) => ({
+    todos: [
+      { content: "Read the code", status: done ? "completed" : "in_progress" },
+      { content: "Write the fix", status: done ? "in_progress" : "pending" },
+    ],
+    completed: done ? 1 : 0, total: 2, in_progress: done ? "Write the fix" : "Read the code",
+  });
+  let feed = reduceFeed(initialFeed(), { seq: 1, type: "agent", event: { type: "todos_updated", data: plan(false) } });
+  feed = reduceFeed(feed, { seq: 2, type: "agent", event: { type: "todos_updated", data: plan(true) } });
+  assert.equal(feed.todos.completed, 1);
+  feed = reduceFeed(feed, { seq: 3, type: "chat_result", message: { content: "done", tools: [], segments: [] } });
+  assert.equal(feed.todos.in_progress, "Write the fix", "a result without a plan keeps the one shown");
+});
+
+test("a question from the agent is its own phase, not an approval", () => {
+  let feed = reduceFeed(initialFeed(), {
+    seq: 1, type: "input_required", id: "q1", kind: "question",
+    prompt: "Which Jev do you mean?", choices: ["Jevons paradox", "HarnessX Jev decisions"],
+  });
+  assert.equal(feed.phase, "question");
+  assert.deepEqual(feed.run.pending.choices, ["Jevons paradox", "HarnessX Jev decisions"]);
+  feed = reduceFeed(feed, { seq: 2, type: "state", status: "running", id: "r1", pending: null });
+  assert.equal(feed.phase, "waiting");
+});

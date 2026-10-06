@@ -70,6 +70,15 @@ uv sync --all-extras          # SDK, every integration, and the dev tools
 uv run pytest -q              # the suite runs offline
 ```
 
+Eleven of those tests skip, because PostgreSQL, Temporal and Redis are not
+running. To get all of them, and the example browser, without installing
+anything:
+
+```bash
+docker compose up                  # the app on http://localhost:8765
+docker compose run --rm tests      # the suite with nothing skipped
+```
+
 Set your key (a root `.env` is auto-loaded by the `examples` package):
 
 ```bash

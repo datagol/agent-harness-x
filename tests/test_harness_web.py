@@ -515,6 +515,8 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         }
         assert tools["calculate"]["source"] == "builtin" and tools["calculate"]["permission"] == "allow"
         assert tools["write_file"]["permission"] == "ask" and tools["Skill"]["source"] == "skill"
+        assert tools["run_bash"]["source"] == "builtin" and tools["run_bash"]["permission"] == "ask"
+        assert tools["ask_user"]["permission"] == "allow", "a question needs no approval to be asked"
         assert all(tool["enabled"] for tool in tools.values())
 
         # Switch the MCP tool off: it leaves the model's registry but stays listed.

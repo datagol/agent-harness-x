@@ -21,6 +21,8 @@ from harnessx import (
     ToolCall,
     ToolResult,
 )
+from harnessx.builtin.ask import register_ask_user_tool
+from harnessx.builtin.bash import register_bash_tools
 from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.execution import wire
 from harnessx.mcp import MCPManager
@@ -64,7 +66,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "calculator for arithmetic. Files are relative to the conversation "
     "workspace. File changes require the user's approval. When you save or "
     "generate a file, the app attaches a download link to your reply: refer to "
-    "the file by name and never invent a URL for it."
+    "the file by name and never invent a URL for it. When a request is ambiguous "
+    "-- a term you do not recognize or that could mean several things -- use "
+    "ask_user to check before starting substantial work."
 )
 
 DOWNLOADS_DIR = ".downloads"  # generate_file copies land here, served by /api/chats/{id}/downloads
@@ -252,7 +256,20 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
     register_filesystem_tools(
         agent.tools, base_path=str(chat.directory), output_dir=str(chat.directory / DOWNLOADS_DIR),
     )
-    for name in ("write_file", "generate_file"):
+    # The agent can ask before it guesses. The question appears in the
+    # conversation as its own prompt; with no run attached nobody can answer,
+    # and the tool tells the model to proceed on a stated assumption.
+    async def ask(question, choices):
+        if chat.active is None:
+            return None
+        return await chat.active.question(question, "question", choices=choices)
+
+    register_ask_user_tool(agent.tools, ask)
+    # Shell commands start in this conversation's own directory, like the file
+    # tools, and every one is approved first: a command can reach anything the
+    # server process can.
+    register_bash_tools(agent.tools, cwd=str(chat.directory), permission=PermissionLevel.ASK)
+    for name in ("write_file", "generate_file", "run_bash"):
         agent.permissions.set_permission(name, PermissionLevel.ASK)
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
@@ -313,6 +330,7 @@ async def run_chat(chat, run, message):
         "tools": [],
         "files": [],
         "segments": [],  # text and tool calls in the order they happened
+        "todos": None,  # the agent's plan, as last announced by TODOS_UPDATED
         "run_id": run.id,
         "status": "running",
     }
@@ -353,6 +371,8 @@ async def run_chat(chat, run, message):
                 if event.type == RunEventType.TEXT_DELTA:
                     assistant["content"] += event.data
                     append_text(event.data)
+                elif event.type == RunEventType.TODOS_UPDATED:
+                    assistant["todos"] = event.data
                 elif event.type == RunEventType.ATTEMPT_RESET:
                     assistant["content"] = ""
                     # A retried model call restarts its answer: drop the provisional text.

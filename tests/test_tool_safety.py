@@ -557,3 +557,35 @@ def test_bash_can_start_in_a_given_directory(tmp_path):
     result = asyncio.run(registry.execute(ToolCall("1", "run_bash", {"command": "pwd && ls"})))
     assert str(tmp_path.resolve()) in result.content and "marker.txt" in result.content
     assert set(registry.get_tool("run_bash").input_schema["properties"]) == {"command", "timeout"}
+
+
+def test_ask_user_puts_the_question_through_the_application_and_returns_the_answer():
+    import asyncio
+
+    from harnessx.builtin.ask import NO_ONE_TO_ASK, register_ask_user_tool
+    from harnessx.tools import ToolRegistry
+    from harnessx.types import ToolCall
+
+    asked = []
+
+    async def ask(question, choices):
+        asked.append((question, choices))
+        return "The HarnessX Jev decision layer"
+
+    registry = ToolRegistry()
+    register_ask_user_tool(registry, ask)
+    definition = registry.get_tool("ask_user")
+    assert definition.timeout_seconds >= 3600, "waiting on a person, not a machine"
+    assert "ambiguous" in definition.description
+    call = ToolCall("1", "ask_user", {"question": "Which Jev?", "choices": ["Jevons paradox", "Jev decisions", " "]})
+    result = asyncio.run(registry.execute(call))
+    assert result.content == "The user answered: The HarnessX Jev decision layer"
+    assert asked == [("Which Jev?", ["Jevons paradox", "Jev decisions"])]
+
+    async def nobody(question, choices):
+        return None
+
+    lonely = ToolRegistry()
+    register_ask_user_tool(lonely, nobody)
+    answer = asyncio.run(lonely.execute(ToolCall("2", "ask_user", {"question": "Which?"})))
+    assert answer.content == NO_ONE_TO_ASK and "assumption" in answer.content

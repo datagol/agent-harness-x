@@ -13,6 +13,17 @@ uv sync --all-extras
 uv run python -m examples.skills_demo
 ```
 
+Or run them in containers, with PostgreSQL, Temporal and Redis already
+provisioned, and no Python or Node to install:
+
+```bash
+docker compose up                              # the browser at localhost:8765
+docker compose run --rm web python -m examples.skills_demo
+```
+
+That is the shortest route to the examples that need a service, such as
+`postgres_runtime`.
+
 `uv sync` alone installs the SDK without integrations; add `--extra NAME` for only the extras
 listed below. Most interactive examples use the SDK's default Anthropic provider
 and require `ANTHROPIC_API_KEY`; they make billable model calls.

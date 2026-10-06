@@ -122,6 +122,7 @@ subagents.
   scheduling changes are guarded by the `harness-reliability-v2` patch marker.
 - Concurrent MCP callers share discovery and its result; cancelling a waiter
   leaves the connection owner alive. Disconnect releases pending waiters.
+- Docker Compose publishes the web app and Temporal ports on loopback only.
 - Condensing mid-run no longer reports itself as a retry: no spurious
   `ATTEMPT_RESET`, no usage marked incomplete, and the summary keeps its full
   retry budget.

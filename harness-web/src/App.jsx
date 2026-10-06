@@ -17,6 +17,7 @@ import {
   Globe,
   History,
   LayoutGrid,
+  ListChecks,
   LoaderCircle,
   Menu,
   MessageSquare,
@@ -455,7 +456,7 @@ function Library({ examples, loading, onSelect }) {
       <div className="featured">
         <div className="featured-copy">
           <div className="featured-label">
-            <Radio size={16} /> START HERE <span>NO API KEY</span>
+            <Radio size={16} /> START HERE <span>RUNS OFFLINE</span>
           </div>
           <h2>A complete run. Every detail.</h2>
           <p>
@@ -513,7 +514,7 @@ function Library({ examples, loading, onSelect }) {
             checked={offlineOnly}
             onChange={(e) => setOfflineOnly(e.target.checked)}
           />{" "}
-          No API key needed
+          Runs offline
         </label>
       </div>
       <div className="tabs" role="tablist" aria-label="Example categories">
@@ -557,7 +558,7 @@ function Library({ examples, loading, onSelect }) {
                   <span
                     className={`mode-label ${example.offline ? "offline" : ""}`}
                   >
-                    {example.offline ? "No API key" : "Live model"}
+                    {example.offline ? "Runs offline" : "Live model"}
                   </span>
                 </div>
                 <h3>{example.title}</h3>
@@ -628,14 +629,20 @@ function Prompt({ run, onReply }) {
     }
   }
   const approval = run.pending.kind === "approval";
+  const question = run.pending.kind === "question";
+  const choices = question ? run.pending.choices || [] : [];
   const tool = run.pending.tool;
   const summary = tool ? summarizeInput(tool.input) : [];
   return (
-    <div className={`prompt-box ${approval ? "approval" : ""}`}>
+    <div className={`prompt-box ${approval ? "approval" : ""} ${question ? "question" : ""}`}>
       <div className="prompt-title">
         {approval ? <ShieldCheck size={18} /> : <MessageSquare size={18} />}
         <strong>
-          {approval ? "Your approval is needed" : "Continue the conversation"}
+          {approval
+            ? "Your approval is needed"
+            : question
+              ? "The agent has a question"
+              : "Continue the conversation"}
         </strong>
         {approval && (
           <div className="approval-actions">
@@ -676,6 +683,17 @@ function Prompt({ run, onReply }) {
           )}
         </>
       ) : (
+        <>
+        {question && <p className="question-text">{run.pending.prompt}</p>}
+        {choices.length > 0 && (
+          <div className="question-choices">
+            {choices.map((choice) => (
+              <button key={choice} className="button" disabled={busy} onClick={() => send(choice)}>
+                {choice}
+              </button>
+            ))}
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -692,7 +710,11 @@ function Prompt({ run, onReply }) {
             placeholder={
               run.pending.kind === "message"
                 ? "Send a message, or type quit to finish…"
-                : run.pending.prompt || "Enter a response…"
+                : question
+                  ? choices.length
+                    ? "Or type your own answer…"
+                    : "Type your answer…"
+                  : run.pending.prompt || "Enter a response…"
             }
             disabled={busy}
             autoComplete="off"
@@ -706,6 +728,7 @@ function Prompt({ run, onReply }) {
             <span className="sr-only">Send reply</span>
           </button>
         </form>
+        </>
       )}
       <ErrorNotice message={error} />
     </div>
@@ -958,6 +981,7 @@ function TurnActivity({ phase, since }) {
   const seconds = since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
   let label = "Thinking";
   if (phase === "approval") label = "Waiting for your approval";
+  else if (phase === "question") label = "Waiting for your answer";
   else if (phase === "model" || phase === "text") label = "Working on the reply";
   else if (phase?.startsWith("tool:")) label = `Running ${phase.slice(5)}`;
   else if (phase === "waiting") label = "Reading the tool result";
@@ -994,12 +1018,82 @@ function FileLinks({ files = [] }) {
   );
 }
 
+const PLAN_TOOLS = new Set(["write_todos", "read_todos"]);
+
+// The plan belongs where the agent wrote it, not pinned above work it did
+// before it had one. The first write_todos becomes the plan card, kept current
+// as items are ticked off; later edits and reads of the list are not repeated.
+function planSegments(message) {
+  const tools = new Map((message.tools || []).map((tool) => [tool.id, tool]));
+  const out = [];
+  let placed = false;
+  for (const segment of message.segments) {
+    const name = segment.type === "tool" ? tools.get(segment.id)?.name : null;
+    if (name && PLAN_TOOLS.has(name)) {
+      if (!placed && name === "write_todos" && message.todos?.todos?.length) {
+        out.push({ type: "plan" });
+        placed = true;
+      }
+      continue;
+    }
+    out.push(segment);
+  }
+  return out;
+}
+
+// The agent's own plan (write_todos), kept current as it ticks items off. The
+// spinner means "being worked on now", so it only spins while the run is live;
+// afterwards an unfinished item says so instead.
+function TaskPlan({ plan, live }) {
+  if (!plan?.todos?.length) return null;
+  const open = plan.total - plan.completed;
+  return (
+    <div className="task-plan">
+      <div className="task-plan-head">
+        <ListChecks size={14} />
+        <span>Plan</span>
+        <small>
+          {plan.completed}/{plan.total} done
+          {!live && open > 0 ? ` · ${open} left unfinished` : ""}
+        </small>
+      </div>
+      <ul>
+        {plan.todos.map((item, at) => (
+          <li key={at} className={`task-item ${item.status}${live ? "" : " settled"}`}>
+            {item.status === "completed" ? (
+              <Check size={13} />
+            ) : item.status === "in_progress" && live ? (
+              <LoaderCircle size={13} className="spin" />
+            ) : (
+              <span className="task-dot" />
+            )}
+            <span>{item.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// The argument that tells one call from another: the search, the file, the command.
+const HEADLINE_KEYS = ["query", "command", "path", "url", "pattern", "expression", "question", "task", "name"];
+
+function toolHeadline(input) {
+  if (!input || typeof input !== "object") return "";
+  const key = HEADLINE_KEYS.find((k) => typeof input[k] === "string" && input[k].trim());
+  const value = key ? input[key] : Object.values(input).find((v) => typeof v === "string" && v.trim());
+  if (!value) return "";
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > 90 ? `${oneLine.slice(0, 90)}…` : oneLine;
+}
+
 function ToolList({ tools = [] }) {
   return tools.map((tool) => (
     <details className="tool-detail" key={tool.id}>
       <summary>
         <Code2 size={14} />
         <span>{tool.name}</span>
+        {toolHeadline(tool.input) && <span className="tool-headline">{toolHeadline(tool.input)}</span>}
         <Badge status={tool.status} />
         <ChevronDown size={13} />
       </summary>
@@ -1577,6 +1671,7 @@ function ChatView({ id, providers, refresh, onNew }) {
           tools: feed.tools,
           segments: feed.segments?.length ? feed.segments : message.segments,
           files: feed.files?.length ? feed.files : message.files,
+          todos: feed.todos || message.todos,
           phase: feed.phase,
           phaseAt: feed.phaseAt,
           error: feed.error,
@@ -1756,8 +1851,14 @@ function ChatView({ id, providers, refresh, onNew }) {
                       message.status === "cancelled" && <span>Stopped</span>}
                   </div>
                   {message.segments?.length ? (
-                    message.segments.map((segment, at) =>
-                      segment.type === "text" ? (
+                    planSegments(message).map((segment, at) =>
+                      segment.type === "plan" ? (
+                        <TaskPlan
+                          key="plan"
+                          plan={message.todos}
+                          live={active && message.run_id === runId}
+                        />
+                      ) : segment.type === "text" ? (
                         <MessageContent key={`t${at}`} content={segment.content || ""} />
                       ) : (
                         <ToolList
@@ -1768,6 +1869,7 @@ function ChatView({ id, providers, refresh, onNew }) {
                     )
                   ) : (
                     <>
+                      <TaskPlan plan={message.todos} live={false} />
                       <MessageContent content={message.content || ""} />
                       <ToolList tools={message.tools} />
                     </>

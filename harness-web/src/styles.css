@@ -2123,3 +2123,100 @@ kbd {
     display: none;
   }
 }
+
+/* The agent's plan, above its reply. */
+.task-plan {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  margin: 6px 0 10px;
+  padding: 10px 12px;
+}
+.task-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.task-plan-head small {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--text-3);
+}
+.task-plan ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+}
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+.task-item svg,
+.task-item .task-dot {
+  flex: none;
+  margin-top: 3px;
+}
+.task-item.completed {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+.task-item.completed svg {
+  color: var(--success);
+}
+.task-item.in_progress {
+  font-weight: 600;
+}
+.task-item.in_progress svg {
+  color: var(--accent);
+}
+.task-dot {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--text-3);
+  border-radius: 50%;
+  margin-left: 2px;
+}
+
+/* A question the agent put to the user (ask_user). */
+.prompt-box.question {
+  border-color: var(--accent);
+}
+.question-text {
+  margin: 8px 0 10px;
+  font-size: 14px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.question-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* What a tool call was for, beside its name. */
+.tool-detail summary .tool-headline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+.tool-detail summary > span:first-of-type {
+  flex: none;
+  color: var(--text);
+}
+.task-item.in_progress.settled {
+  font-weight: 400;
+}
+.task-item.in_progress.settled .task-dot {
+  border-color: var(--accent);
+}
