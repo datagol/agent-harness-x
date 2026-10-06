@@ -121,9 +121,21 @@ subagents.
   `IncompleteStreamError`, `StopReason.REFUSAL`, `StopReason.PAUSE_TURN`.
 - `RetryPolicy.stream_idle_timeout_seconds`, `Limits.final_answer_on_limit`,
   `ConversationMemory.prune_tool_results()`.
+- `ExecutionBackend`, the protocol the built-in tools run against. A backend
+  whose `owns_filesystem` is true takes the file tools too: `read_file`,
+  `write_file`, `edit_file`, `delete`, `glob`, `grep`, `list_directory` and
+  `generate_file` run inside it with the host tools' exact output, as POSIX
+  shell snippets through `execute_command`. The local `Sandbox` keeps file tools
+  on the host. Groundwork for a remote sandbox backend.
+- `Sandbox.execute_command(..., timeout=, stdin=)` and `execute(..., timeout=)`:
+  a call's own limit, capped by `SandboxConfig.timeout_seconds`, and input fed
+  to the command (process and seatbelt tiers). `Sandbox.resolve_path()`.
 
 ### Fixed
 
+- `run_bash` in a sandbox honours the model's `timeout` instead of always
+  using the sandbox's own limit. Sandbox commands get closed stdin rather than
+  inheriting the host process's.
 - Learned model limits are scoped to the provider and exact model/deployment;
   fallback member caps and repaired budgets survive snapshots. Configured
   fallback budgets cannot override a learned cap. Custom providers' existing

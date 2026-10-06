@@ -22,7 +22,7 @@ from .extensions.base import Extension, close_extensions, install_extensions, va
 from .mcp import MCPManager
 from .providers import LLMProvider, make_provider
 from .providers.registry import BUILTIN_PROVIDERS
-from .sandbox import Sandbox
+from .sandbox import ExecutionBackend
 from .skills import SkillManager
 from .knowledge import GitSource, KnowledgeManager
 from .subagents import SubAgent, install_subagent, prepare_subagents
@@ -64,7 +64,7 @@ class Agent:
         permissions: PermissionManager | None = None,
         hooks: HookManager | None = None,
         middleware: MiddlewarePipeline | None = None,
-        sandbox: Sandbox | None = None,
+        sandbox: ExecutionBackend | None = None,
         mcp: MCPManager | None = None,
         skills: SkillManager | list[str] | None = None,
         knowledge: KnowledgeManager | Sequence[str | Path | GitSource] | None = None,

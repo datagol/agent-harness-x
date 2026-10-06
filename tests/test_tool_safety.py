@@ -303,7 +303,7 @@ async def test_individual_bash_preserves_sandbox_option():
     registry.load_builtin("run_bash", sandbox=sandbox, permission=PermissionLevel.ALLOW)
     result = await call(registry, "run_bash", command="fixture command")
     assert result.content == "sandbox"
-    sandbox.execute_command.assert_awaited_once_with("fixture command")
+    sandbox.execute_command.assert_awaited_once_with("fixture command", timeout=30)
 
 
 def test_nullable_required_literal_and_nested_schemas():

@@ -43,7 +43,7 @@ from ._journal import RecordingError
 from .backends.temporal import TemporalBackend, RedisEvents
 from .artifacts import S3ArtifactStore
 from .backends import SQLiteBackend, PostgresBackend, SchemaError, StorageError, SessionBusyError, LeaseLostError
-from .sandbox import Sandbox
+from .sandbox import ExecutionBackend, Sandbox
 from .skills import Skill, SkillManager
 from .knowledge import GitSource, KnowledgeManager, OKFBundle, OKFConcept
 from .execution import RunEvent, RunEventType, RunResult, RunStatus, RunStream, RunFailure, PendingTool, ToolApprovalRequired, ToolExecutionContext, current_tool_context
@@ -111,7 +111,7 @@ __all__ = [
     # MCP
     "MCPManager", "MCPServerConfig", "MCPToolInfo",
     # Sandbox
-    "Sandbox", "SandboxConfig", "SandboxResult",
+    "Sandbox", "SandboxConfig", "SandboxResult", "ExecutionBackend",
     # Durable execution (also importable from harnessx.durable)
     "AgentRuntime", "RunHandle", "AgentRef", "AgentRegistry", "agents",
     "RuntimeConfig", "RuntimeState", "RuntimeStatus", "CheckpointData",

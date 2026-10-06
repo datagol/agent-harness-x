@@ -115,7 +115,7 @@ def register_bash_tools(
                 command: The shell command to execute.
                 timeout: Maximum seconds to wait (default 30).
             """
-            result = await sandbox.execute_command(command)
+            result = await sandbox.execute_command(command, timeout=timeout)
             output = ""
             if result.stdout:
                 output += result.stdout
