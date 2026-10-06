@@ -86,7 +86,7 @@ def observe_agents():
         agent.hooks.on(HookEvent.TOOL_CALL_START, started)
         agent.hooks.on(HookEvent.TOOL_CALL_END, ended)
 
-    Agent.__init__ = init
+    setattr(Agent, "__init__", init)  # every Agent the example builds, including subagents' children
 
 
 def main():
