@@ -399,9 +399,22 @@ def test_extension_registration_preserves_execution_metadata():
     assert definition.replay_policy == "safe" and definition.timeout_seconds == 2 and not definition.concurrent
 
 
+def _calculators():
+    import sys
+    from pathlib import Path
+
+    from example_loader import load_example
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness-web"))
+    from harness_web.calculator import calculate as workspace_calculate
+
+    return [load_example("01-basics/streaming_chat.py").calculate, workspace_calculate]
+
+
 @pytest.mark.asyncio
-async def test_example_calculator_rejects_code_and_reports_tool_errors():
-    from examples._calculator import calculate
+@pytest.mark.parametrize("which", [0, 1], ids=["streaming_chat example", "harness-web chat"])
+async def test_example_calculator_rejects_code_and_reports_tool_errors(which):
+    calculate = _calculators()[which]
 
     assert calculate("(25 * 4) + 50") == "150"
     assert calculate("144 / 12") == "12.0"

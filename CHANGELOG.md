@@ -15,6 +15,19 @@ subagents.
 
 ### Changed
 
+- **Examples are standalone scripts, grouped by topic, run by path.** The 20
+  modules under `examples/` became 25 files in `01-basics/` through
+  `07-sandboxes/`, renamed for what they teach (`simple_chat` is
+  `01-basics/streaming_chat.py`, `postgres_runtime` is
+  `05-durability/durable_crash_recovery.py`). Run them as
+  `python examples/04-control/loop_guard.py`; `python -m examples.*` no longer
+  works and `examples` is no longer a package. No file imports a shared
+  helper, so each can be copied out and run after `pip install harnessx`.
+  `jev_classification` is part of `06-quality/decisions_routing.py`;
+  `memory_agent` became the much shorter `03-context/custom_memory_tools.py`
+  over the built-in memory tools. Six new recipes cover loop guard, planning
+  to-dos, condensing, retries and fallback, session snapshots, and progress
+  events. harness-web runs every example by path and groups them by topic.
 - **Reply budgets come from the model.** With `AgentConfig.max_tokens` unset,
   the budget is the model's own output limit capped at 32K, fitted into what is
   left of the context window. Limits are resolved from what the application

@@ -1,8 +1,22 @@
-"""PostgreSQL examples: live chat, or a scripted crash/status/resume demonstration.
+"""Durable runs on PostgreSQL: a run that survives its process crashing, without repeating a tool.
 
-Run ``python -m examples.postgres_runtime --help`` for commands. Supply DATABASE_URL
-or --config PATH, and install the postgres extra. Only ``chat`` uses a model API key.
-See https://harnessx-site.vercel.app/docs/postgres-durability/ for the walkthrough and guarantee boundaries.
+AgentRuntime saves every step of a run in the database. The ``crash`` command starts a run whose
+tool writes a report, then kills the process (exit code 42) right after the tool's result is
+committed. ``resume``, in a new process, finishes the same run from the database: the report tool
+is not called again, because its saved result is replayed. ``status`` shows what was saved without
+changing it, ``check`` creates or validates the schema, and the default ``chat`` streams one live
+answer through the PostgreSQL runtime.
+
+Run:
+    python examples/05-durability/durable_crash_recovery.py check  --config examples/05-durability/postgres.config.json
+    python examples/05-durability/durable_crash_recovery.py crash  --config examples/05-durability/postgres.config.json
+    python examples/05-durability/durable_crash_recovery.py status --config examples/05-durability/postgres.config.json
+    python examples/05-durability/durable_crash_recovery.py resume --config examples/05-durability/postgres.config.json
+    python examples/05-durability/durable_crash_recovery.py chat   --config examples/05-durability/postgres.config.json
+Copy postgres.config.example.json beside this file to postgres.config.json and fill it in, or set DATABASE_URL.
+
+Needs: pip install "harnessx[postgres]" and a PostgreSQL database. Only ``chat`` (the default) calls a model,
+so it also needs ANTHROPIC_API_KEY. Walkthrough: https://harnessx-site.vercel.app/docs/postgres-durability/
 """
 
 import argparse
@@ -12,6 +26,8 @@ import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+from dotenv import load_dotenv
 
 from harnessx import (
     Agent,
@@ -27,7 +43,11 @@ from harnessx import (
 )
 from harnessx.providers import LLMProvider
 
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
 
+# The local config lives beside this file (git-ignored); the template next to it shows the fields.
+CONFIG_FILE = Path(__file__).resolve().with_name("postgres.config.json")
+CONFIG_TEMPLATE = CONFIG_FILE.with_name("postgres.config.example.json")
 REPORT = "Weekly sales report\nOrders: 12\nRevenue: $1,200\n"
 ANSWER = "The weekly report is ready: 12 orders, $1,200 revenue."
 
@@ -37,7 +57,7 @@ def load_connection_string(config: Path | None = None) -> str:
     if config is None:
         dsn = os.environ.get("DATABASE_URL")
         if not dsn:
-            raise SystemExit("Set DATABASE_URL or pass --config examples/postgres.config.json")
+            raise SystemExit(f"Set DATABASE_URL or pass --config {CONFIG_FILE} (copy {CONFIG_TEMPLATE.name})")
         return dsn
     try:
         settings = json.loads(config.read_text(encoding="utf-8"))
@@ -228,19 +248,19 @@ async def live_chat(dsn: str) -> None:
                 result = await stream.result()
             print("\nStatus:", result.status.value)
             if result.error:
-                raise RuntimeError(result.error["message"])
+                print("Error:", result.error["message"])
     finally:
         await backend.aclose()
 
 
-async def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "command", nargs="?", choices=("chat", "check", "crash", "status", "resume"), default="chat"
     )
     parser.add_argument(
         "--config", type=Path,
-        help="JSON connection config; overrides DATABASE_URL. See examples/postgres.config.example.json",
+        help=f"JSON connection config; overrides DATABASE_URL. Template: {CONFIG_TEMPLATE}",
     )
     parser.add_argument(
         "--workspace", type=Path, default=Path(".agent_sessions/postgres-demo"),
@@ -250,7 +270,11 @@ async def main(argv: list[str] | None = None) -> None:
         "--schema", default="harness_x",
         help="PostgreSQL schema for check or a new crash demo; status/resume use session.json",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     dsn = load_connection_string(args.config)
     if args.command == "chat":
         await live_chat(dsn)

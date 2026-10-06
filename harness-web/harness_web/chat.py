@@ -27,7 +27,7 @@ from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.execution import wire
 from harnessx.mcp import MCPManager
 from harnessx.providers import LLMProvider
-from examples._calculator import calculate
+from .calculator import calculate
 from .runs import Run
 
 

@@ -1,114 +1,86 @@
-"""LangSmith tracing example: full lifecycle observability for HarnessX agents.
+"""Trace an agent in LangSmith: one run tree per turn, with a child span for each model call and tool call.
 
-Demonstrates:
-  - Automatic LangSmith run tree creation for agent turns
-  - Nested child spans for LLM calls with token usage
-  - Child spans for tool executions with arguments and outputs
-  - Advanced manual delegation for a child with its own tracing extension
+Adding ``LangSmithExtension`` to an Agent is the whole integration. Each turn becomes a LangSmith run named
+``run_name``; every model call nests under it with its token usage, and every tool call with its arguments
+and result. Tags and metadata are attached to the run so you can filter for them in the LangSmith UI.
 
-For ordinary delegation, prefer Agent(subagents=[SubAgent(...)]); see multi_agent.py.
-
-Prerequisites:
-  pip install -e '.[langsmith]'
-  export ANTHROPIC_API_KEY=sk-ant-...
-  export LANGSMITH_API_KEY=lsv2_pt_...
-  export LANGSMITH_PROJECT="harnessx-demo"
-
-Run:
-  python -m examples.langsmith_tracing
+Run:   python examples/06-quality/tracing_with_langsmith.py
+Needs: pip install "harnessx[langsmith]", ANTHROPIC_API_KEY and LANGSMITH_API_KEY
+(optionally LANGSMITH_PROJECT, default "harnessx-demo").
 """
 
+import ast
 import asyncio
+import json
+import operator
 import os
 
-from harnessx import Agent, AgentConfig, LangSmithExtension, Limits, PermissionLevel
-from examples._calculator import calculate
-from examples._console import completed_output
+from dotenv import load_dotenv
+
+from harnessx import Agent, AgentConfig, LangSmithExtension, Limits, PermissionLevel, RunEventType, ToolCall, ToolResult
+
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
 
 
-async def run_specialist(topic: str) -> str:
-    """Specialist sub-agent.
+OPERATORS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
 
-    Because LangSmithExtension uses contextvars for parent span tracking,
-    this sub-agent automatically nests under the orchestrator's tool call span!
+
+def calculate(expression: str) -> str:
+    """Evaluate arithmetic with numbers, parentheses and + - * /.
+
+    Args:
+        expression: Arithmetic expression, such as '(25 * 4) + 50'.
     """
-    specialist = Agent(
-        config=AgentConfig(
-            model="claude-sonnet-4-6",
-            system_prompt="You are a concise research specialist. Give 2-3 bullet points.",
-            limits=Limits(max_iterations=5),
-        ),
-        extensions=[
-            LangSmithExtension(
-                run_name="Research Specialist",
-                tags=["specialist"],
-            )
-        ],
-    )
-    async with specialist:
-        return completed_output(
-            await specialist.run(f"Summarize key aspects of: {topic}")
-        )
+    # Walk the syntax tree instead of eval(), so the model can never run Python.
+    def evaluate(node):
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -evaluate(node.operand)
+        if isinstance(node, ast.BinOp) and type(node.op) in OPERATORS:
+            return OPERATORS[type(node.op)](evaluate(node.left), evaluate(node.right))
+        raise ValueError("Only numbers, parentheses and + - * / are allowed")
+
+    if len(expression) > 200:
+        raise ValueError("Expression must be at most 200 characters")
+    return str(evaluate(ast.parse(expression, mode="eval").body))
 
 
 async def main() -> None:
-    print("=" * 60)
-    print("HarnessX — LangSmith Observability Demo")
-    print("=" * 60)
-
-    # 1. Initialize LangSmith extension
     project = os.getenv("LANGSMITH_PROJECT", "harnessx-demo")
-    ls_ext = LangSmithExtension(
+    tracing = LangSmithExtension(
         project_name=project,
         run_name="Main Assistant",
         tags=["demo", "cli"],
         metadata={"environment": "development"},
     )
-
-    # 2. Create the primary agent with LangSmith tracing enabled
     agent = Agent(
         config=AgentConfig(
             model="claude-sonnet-4-6",
-            system_prompt=(
-                "You are a helpful assistant. Use tools when helpful. "
-                "Delegate in-depth research to the research_topic tool."
-            ),
-            limits=Limits(max_iterations=10),
+            system_prompt="You are a helpful assistant. Use the calculate tool for arithmetic.",
+            limits=Limits(max_iterations=5),
         ),
-        extensions=[ls_ext],
+        extensions=[tracing],
     )
+    agent.tools.register_tool(calculate, permission=PermissionLevel.ALLOW, replay_policy="safe")
 
+    # Leaving the context closes the extension, which flushes pending traces before exit.
     async with agent:
-        # 3. Register tools
-        agent.tools.register_tool(
-            calculate, permission=PermissionLevel.ALLOW, replay_policy="safe"
-        )
-
-        @agent.tools.register(permission=PermissionLevel.ALLOW)
-        async def research_topic(topic: str) -> str:
-            """Delegate research to a specialist sub-agent.
-
-            Args:
-                topic: The subject to research.
-            """
-            print(f"\n[Orchestrator] Delegating '{topic}' to Research Specialist...")
-            return await run_specialist(topic)
-
-        # 4. Run a turn that invokes both a tool and sub-agent
-        prompt = "What is 144 / 12, and can you research the difference between OLTP and OLAP?"
-        print(f"\nUser: {prompt}\n")
-        print("Running agent (tracing to LangSmith)...")
-
-        response = completed_output(await agent.run(prompt))
-
-        print("\nAgent Response:")
-        print("-" * 40)
-        print(response)
-        print("-" * 40)
-        print(f"\nConfigured LangSmith project: '{project}'")
-        print("View your traces at: https://smith.langchain.com")
-
-        # Flush traces cleanly on exit
+        prompt = "What is 144 / 12, and what is that times 7?"
+        print(f"You: {prompt}\n")
+        async with agent.run_stream(prompt) as stream:
+            async for event in stream:
+                if event.type == RunEventType.TEXT_DELTA:
+                    print(event.data, end="", flush=True)
+                elif event.type == RunEventType.TOOL_CALL_START and isinstance(event.data, ToolCall):
+                    print(f"  > {event.data.name}({json.dumps(event.data.input)[:120]})")
+                elif event.type == RunEventType.TOOL_RESULT and isinstance(event.data, ToolResult) and event.data.is_error:
+                    print(f"  ! {event.data.content}")
+            result = await stream.result()
+        print()
+        if result.error:
+            print("Error:", result.error["message"])
+        print(f"\nTraces are in LangSmith project {project!r}: https://smith.langchain.com")
 
 
 if __name__ == "__main__":

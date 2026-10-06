@@ -2,7 +2,6 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-import importlib.util
 import json
 from pathlib import Path
 import socket
@@ -21,7 +20,8 @@ from harness_web.files import open_workspace_file
 from harness_web.runs import RunManager
 from harness_web.server import create_app
 from harnessx import PermissionLevel, ProviderResponse, ToolCall
-from examples._fixtures import ScriptedProvider
+from example_loader import example_scripts
+from scripted_provider import ScriptedProvider
 
 
 @pytest.fixture(autouse=True)
@@ -75,14 +75,11 @@ def output(run):
 
 
 def test_catalog_covers_every_example_entry_point(tmp_path):
-    expected = {
-        path.stem
-        for path in (ROOT / "examples").glob("*.py")
-        if not path.name.startswith("_")
-    }
-    assert set(CATALOG) == expected
+    expected = {path.relative_to(ROOT / "examples").as_posix() for path in example_scripts()}
+    assert {item.path for item in CATALOG.values()} == expected
     for item in CATALOG.values():
-        assert importlib.util.find_spec(item.module)
+        assert item.file.is_file() and item.id == item.file.stem
+        assert item.command == f"python examples/{item.path}"
         config = {
             "server": "fixture",
             "command": "python3",
@@ -90,8 +87,8 @@ def test_catalog_covers_every_example_entry_point(tmp_path):
         }
         args = arguments(item, config, tmp_path)
         assert isinstance(args, list) and all(isinstance(arg, str) for arg in args)
-    assert arguments(CATALOG["run_evals"], {}, tmp_path) == ["--offline"]
-    assert arguments(CATALOG["run_evals"], {"mode": "live"}, tmp_path) == []
+    assert arguments(CATALOG["evaluating_with_datasets"], {}, tmp_path) == ["--offline"]
+    assert arguments(CATALOG["evaluating_with_datasets"], {"mode": "live"}, tmp_path) == []
     assert arguments(CATALOG["flight_recorder"], {}, tmp_path)[-1] == str(
         tmp_path / "incident.hx"
     )
@@ -104,7 +101,7 @@ async def test_health_missing_credentials_and_local_request_boundary(tmp_path):
         assert health["app"] == "harness-web"
         assert health["providers"][0]["missing"] == ["ANTHROPIC_API_KEY"]
         assert len((await client.get("/api/examples")).json()) == len(CATALOG)
-        response = await client.post("/api/runs", json={"example_id": "coding_agent"})
+        response = await client.post("/api/runs", json={"example_id": "filesystem_tools_and_permissions"})
         assert response.status_code == 422 and "ANTHROPIC_API_KEY" in response.text
         assert not app.state.manager.runs
         assert (
@@ -112,13 +109,13 @@ async def test_health_missing_credentials_and_local_request_boundary(tmp_path):
         ).status_code == 404
         assert (
             await client.post(
-                "/api/runs", json={"example_id": "skills_demo", "command_line": "bad"}
+                "/api/runs", json={"example_id": "skills_lazy_loading", "command_line": "bad"}
             )
         ).status_code == 422
         assert (
             await client.post(
                 "/api/runs",
-                json={"example_id": "skills_demo"},
+                json={"example_id": "skills_lazy_loading"},
                 headers={"origin": "https://unrelated.example"},
             )
         ).status_code == 403
@@ -141,7 +138,7 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
     monkeypatch.setattr("harness_web.catalog.installed", lambda module: True)
     async with web(tmp_path) as (app, client):
         body = {
-            "example_id": "provider_chat",
+            "example_id": "switching_providers",
             "provider": "openai",
             "model": "fixture-model",
             "streaming": False,
@@ -160,7 +157,7 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
         await run.task
         assert captured == [
             (
-                "provider_chat",
+                "switching_providers",
                 ["--provider", "openai", "--model=fixture-model", "--no-stream"],
                 "40 * 10",
             )
@@ -172,16 +169,15 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
 @pytest.mark.parametrize(
     "example_id, expected",
     [
-        ("skills_demo", "SKILL_INVOKED"),
+        ("skills_lazy_loading", "SKILL_INVOKED"),
         ("flight_recorder", "Playback made zero model/tool calls"),
-        ("run_evals", "SCRIPTED FIXTURE"),
-        ("jev_routing", '"route": "sql"'),
-        ("jev_classification", '"choice": "W2"'),
-        ("jev_answer_review", '"probability": 0.96'),
+        ("evaluating_with_datasets", "SCRIPTED FIXTURE"),
+        ("decisions_routing", '"route": "sql"'),
+        ("decisions_answer_review", '"probability": 0.96'),
     ],
 )
 async def test_real_offline_example_and_event_replay(tmp_path, example_id, expected):
-    if example_id == "run_evals":
+    if example_id == "evaluating_with_datasets":
         pytest.importorskip("langsmith")
     async with web(tmp_path) as (app, client):
         run_id = await start(client, example_id)
@@ -222,7 +218,7 @@ async def test_original_persisted_approval_waits_for_exact_browser_prompt(
     tmp_path, decision, exists
 ):
     async with web(tmp_path) as (app, client):
-        run_id = await start(client, "runtime_approvals")
+        run_id = await start(client, "tool_approvals_and_resume")
         run = app.state.manager.runs[run_id]
         await wait_status(run, "waiting")
         assert "Note exists: False" in output(run)
@@ -250,7 +246,7 @@ async def test_original_persisted_approval_waits_for_exact_browser_prompt(
 @pytest.mark.asyncio
 async def test_stop_pending_process_and_reject_late_approval(tmp_path):
     async with web(tmp_path) as (app, client):
-        run_id = await start(client, "runtime_approvals")
+        run_id = await start(client, "tool_approvals_and_resume")
         run = app.state.manager.runs[run_id]
         await wait_status(run, "waiting")
         prompt = run.pending["id"]
@@ -588,7 +584,7 @@ async def test_bounded_history_reports_gap_and_early_cancel_is_terminal(
 
 
 def test_mcp_arguments_validate_transports_and_keep_shell_characters_literal(tmp_path):
-    item = CATALOG["mcp_agent"]
+    item = CATALOG["mcp_servers"]
     with pytest.raises(ValueError):
         arguments(
             item,

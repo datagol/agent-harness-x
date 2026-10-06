@@ -303,14 +303,12 @@ async def test_old_history_is_sanitized_without_changing_tool_data(mode):
 
 @pytest.mark.asyncio
 async def test_simple_chat_calculates_with_streaming_sdk_across_turns(tmp_path, monkeypatch, capsys):
-    from examples import _console, simple_chat
+    from example_loader import load_example
 
+    simple_chat = load_example("01-basics/streaming_chat.py")
     monkeypatch.chdir(tmp_path)
     answers = iter(["wht 40*10", "what is 40*10", "quit"])
-    monkeypatch.setattr(simple_chat, "get_user_input", lambda: next(answers))
-    errors = []
-    monkeypatch.setattr(simple_chat, "print_error", errors.append)
-    monkeypatch.setattr(_console, "print_error", errors.append)
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     requests = []
     responses = [
         message([
@@ -328,31 +326,32 @@ async def test_simple_chat_calculates_with_streaming_sdk_across_turns(tmp_path, 
             "harnessx.core.make_provider", lambda *args, **kwargs: AnthropicProvider(client),
         )
         await simple_chat.main()
-    assert not errors
+    out = capsys.readouterr().out
+    assert "Error:" not in out
     assert len(requests) == 3 and all(request["stream"] for request in requests)
     result = requests[1]["messages"][2]["content"][0]
     assert result["tool_use_id"] == "math" and result["content"] == "400"
     assert not result.get("is_error")
-    assert "The answer is still 400." in capsys.readouterr().out
+    assert "The answer is still 400." in out
 
 
 @pytest.mark.asyncio
 async def test_coding_agent_streams_real_sdk_tool_call(tmp_path, monkeypatch, capsys):
-    from examples import _console, coding_agent
+    from example_loader import load_example
 
+    coding_agent = load_example("02-tools/filesystem_tools_and_permissions.py")
     monkeypatch.chdir(tmp_path)
-    answers = iter(["Write a Fibonacci program", "quit"])
-    monkeypatch.setattr(coding_agent, "get_user_input", lambda: next(answers))
+    messages = iter(["Write a Fibonacci program", "quit"])
     approvals = []
 
-    def approve(prompt):
+    def typed(prompt=""):
+        # The chat prompt is exactly "You: "; anything else is the permission question.
+        if prompt == "You: ":
+            return next(messages)
         approvals.append(prompt)
         return "y"
 
-    monkeypatch.setattr("builtins.input", approve)
-    errors = []
-    monkeypatch.setattr(coding_agent, "print_error", errors.append)
-    monkeypatch.setattr(_console, "print_error", errors.append)
+    monkeypatch.setattr("builtins.input", typed)
     requests = []
     responses = [
         tool_message(),
@@ -364,8 +363,9 @@ async def test_coding_agent_streams_real_sdk_tool_call(tmp_path, monkeypatch, ca
             lambda *args, **kwargs: AnthropicProvider(client),
         )
         await coding_agent.main()
-    assert not errors
+    out = capsys.readouterr().out
+    assert "Error:" not in out
     assert len(approvals) == 1 and "write_file" in approvals[0]
     assert len(requests) == 2 and all(request["stream"] for request in requests)
     assert (tmp_path / "fibonacci.py").read_text() == PROGRAM
-    assert "Created fibonacci.py." in capsys.readouterr().out
+    assert "Created fibonacci.py." in out

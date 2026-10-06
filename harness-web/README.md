@@ -62,35 +62,48 @@ the configuration API or entered into a browser form. Other chat providers use
 SDK extras. Enter the model ID when selecting a provider without a default.
 Restart the server after changing environment variables.
 
-Without a key, start with **Flight recorder**, **Durable approvals**, or **Skill
-discovery**. General chat also offers an explicitly labelled **Local demo** that
+Without a key, start with **Flight recorder**, **Approvals and resume**, **Loop
+guard**, or **Skills, loaded on demand**. General chat also offers an explicitly labelled **Local demo** that
 uses scripted responses and the real calculator; it is not a language model.
 Try `What is 48 * 12?`.
 
 ## Example coverage
 
-| UI entry | Python entry point | Setup / behavior |
-|---|---|---|
-| Flight recorder | `examples.flight_recorder` | Offline; download `incident.hx` after completion |
-| Durable approvals | `examples.runtime_approvals` | Offline; choose Allow once or Deny in the browser |
-| Skill discovery | `examples.skills_demo` | Offline; displays real skill and hook events |
-| Simple chat | `examples.simple_chat` | Anthropic; send follow-up messages or `quit` |
-| Provider chat | `examples.provider_chat` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
-| Coding agent | `examples.coding_agent` | Anthropic; writes and shell commands ask for approval |
-| Memory agent | `examples.memory_agent` | Anthropic; notes belong to the example's working directory |
-| Specialist agents | `examples.multi_agent` | Anthropic; constructor-defined specialists |
-| Skills agent | `examples.skills_agent` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
-| Knowledge agent | `examples.knowledge_agent` | BM25F retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL; configured provider/model |
-| Sandboxed coder | `examples.sandboxed_coder` | Anthropic; process resource limits, temporary execution directory |
-| Workflow evaluations | `examples.run_evals` | `langsmith` extra; offline by default, optional live model mode |
-| LangSmith tracing | `examples.langsmith_tracing` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
-| PostgreSQL runtime | `examples.postgres_runtime` | `postgres` extra, `DATABASE_URL`, Anthropic key |
-| MCP agent | `examples.mcp_agent` | `mcp` extra, Anthropic key, stdio command or SSE URL |
+The library lists every script in `examples/`, grouped by the same topics as the
+folders. Each entry runs the file unchanged, as `python examples/<topic>/<file>.py`.
+
+| Topic | UI entry | Script | Setup / behavior |
+|---|---|---|---|
+| Basics | Prompt caching | `01-basics/prompt_caching.py` | Offline |
+| Basics | Progress and waiting | `01-basics/progress_and_waiting.py` | Offline; prints every event as it arrives |
+| Basics | Streaming chat | `01-basics/streaming_chat.py` | Anthropic; send follow-up messages or `quit` |
+| Basics | Switching providers | `01-basics/switching_providers.py` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
+| Tools | Filesystem tools and permissions | `02-tools/filesystem_tools_and_permissions.py` | Anthropic; writes and shell commands ask for approval |
+| Tools | MCP servers | `02-tools/mcp_servers.py` | `mcp` extra, Anthropic key, stdio command or SSE URL |
+| Tools | Skills, loaded on demand | `02-tools/skills_lazy_loading.py` | Offline; displays real skill and hook events |
+| Tools | Skills with a live model | `02-tools/skills_interactive.py` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
+| Context | Knowledge bundles (OKF) | `03-context/knowledge_bundles_okf.py` | Retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL |
+| Context | Memory tools | `03-context/custom_memory_tools.py` | Anthropic; notes belong to the run's working directory |
+| Context | Planning with to-dos | `03-context/planning_todos.py` | Offline |
+| Context | Condensing a long history | `03-context/condensing_a_long_history.py` | Offline |
+| Control | Loop guard | `04-control/loop_guard.py` | Offline |
+| Control | Retries and fallback | `04-control/retries_and_fallback.py` | Offline |
+| Control | Delegating to subagents | `04-control/delegating_to_subagents.py` | Anthropic; constructor-defined specialists |
+| Control | Autonomous task runner | `04-control/autonomous_task_runner.py` | Anthropic; one task, writes and runs the deliverable |
+| Durability | Approvals and resume | `05-durability/tool_approvals_and_resume.py` | Offline; choose Allow once or Deny in the browser |
+| Durability | Durable runs on PostgreSQL | `05-durability/durable_crash_recovery.py` | `postgres` extra, `DATABASE_URL`, Anthropic key |
+| Durability | Session snapshots | `05-durability/session_snapshots.py` | Offline |
+| Quality | Evaluating with datasets | `06-quality/evaluating_with_datasets.py` | `langsmith` extra; offline by default, optional live model mode |
+| Quality | Decisions: routing and classification | `06-quality/decisions_routing.py` | Offline fixed decisions |
+| Quality | Decisions: answer review | `06-quality/decisions_answer_review.py` | Offline fixed decisions |
+| Quality | Tracing with LangSmith | `06-quality/tracing_with_langsmith.py` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
+| Quality | Flight recorder | `06-quality/flight_recorder.py` | Offline; download `incident.hx` after completion |
+| Sandboxes | Sandbox isolation tiers | `07-sandboxes/sandbox_isolation_tiers.py` | Anthropic; process tier by default |
 
 Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool
-behavior. The launcher bridges `input()` and the shared console prompt through a
-separate control pipe, so ordinary tool output cannot be confused with a prompt.
+behavior. The launcher runs the script with `runpy.run_path` and bridges its `input()` calls
+through a separate control pipe, so ordinary tool output cannot be confused with a prompt.
 An answer must match the exact pending prompt ID; duplicate and stale approvals
 are rejected. Closing an output tab does not stop a run. Use **Stop run** to
 terminate the managed process group. Deliberately detached child processes are

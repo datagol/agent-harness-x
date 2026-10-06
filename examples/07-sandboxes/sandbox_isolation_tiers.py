@@ -1,54 +1,83 @@
-"""Coding agent with a temporary workdir and process resource limits.
+"""A coding agent that runs the Python it writes inside a `Sandbox`, and the three isolation tiers to choose from.
 
-The process tier retains host filesystem/network access. Use Docker or Seatbelt
-when access isolation is required. Demonstrates execution with resource limits,
-and the AgentRuntime for lifecycle management with checkpointing.
+`SandboxConfig(tier=...)` picks how code runs:
+  - "process" (default): a subprocess with a temporary workdir and CPU, memory, file-size, and time limits. It is NOT
+    an isolation boundary: the code keeps the host's filesystem and network access.
+  - "docker": a container with memory, CPU, and network limits; network off unless enabled.
+  - "seatbelt": macOS's OS-enforced sandbox profile; network off unless enabled.
+Pick docker or seatbelt whenever the code is untrusted. The agent runs inside an `AgentRuntime`, which checkpoints
+each run to SQLite under `.sandbox_sessions/`. Type `status` for the runtime state, `quit` to exit.
 
-Run: python -m examples.sandboxed_coder
+Run:
+    python examples/07-sandboxes/sandbox_isolation_tiers.py
+    python examples/07-sandboxes/sandbox_isolation_tiers.py --tier docker    # or --tier seatbelt on macOS
+Needs: ANTHROPIC_API_KEY (and Docker running for --tier docker).
 """
 
+import argparse
 import asyncio
+import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from harnessx import (
-    Limits,
     AgentConfig,
     AgentRuntime,
+    HookContext,
+    HookManager,
+    Limits,
     PermissionLevel,
     RuntimeConfig,
     Sandbox,
     SandboxConfig,
 )
-from examples._console import (
-    console,
-    create_hooks,
-    get_user_input,
-    print_banner,
-    print_error,
-    print_response,
-    print_status,
-    completed_output,
-)
 from harnessx.builtin.filesystem import register_filesystem_tools
 
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
 
-async def main():
-    # Configure sandbox
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="A coding agent whose code runs in a sandbox tier of your choice.")
+    parser.add_argument(
+        "--tier", choices=("process", "docker", "seatbelt"), default="process", help="Sandbox tier (default: process)."
+    )
+    return parser.parse_args(argv)
+
+
+def print_tool_calls() -> HookManager:
+    # runtime.run() returns only the final result, so hooks are what show the calls while they happen.
+    hooks = HookManager()
+
+    @hooks.before_tool
+    async def show_call(ctx: HookContext):
+        call = ctx.data.get("tool_call")
+        if call:
+            print(f"  > {call.name}({json.dumps(call.input)[:120]})")
+
+    @hooks.after_tool
+    async def show_error(ctx: HookContext):
+        result = ctx.data.get("result")
+        if result and result.is_error:
+            print(f"  ! {result.content}")
+
+    return hooks
+
+
+async def main(tier: str = "process") -> None:
     sandbox_config = SandboxConfig(
         timeout_seconds=15,
         max_memory_mb=256,
         max_cpu_seconds=10,
         max_file_size_mb=50,
-        tier="process",  # Use "docker" or "seatbelt" for stronger isolation
+        tier=tier,
     )
 
-    hooks = create_hooks()
-
-    # Create sandbox
     async with Sandbox(sandbox_config) as sandbox:
-        console.print(f"  [info]Sandbox workdir:[/info] {sandbox.workdir}")
+        print(f"Sandbox tier: {tier} | workdir: {sandbox.workdir}")
+        if tier == "process":
+            print("The process tier limits resources only; the host filesystem and network stay reachable.")
 
-        # Create runtime
         runtime = AgentRuntime(
             agent_config=AgentConfig(
                 system_prompt=(
@@ -64,19 +93,14 @@ async def main():
                 ),
                 limits=Limits(max_iterations=25),
             ),
-            runtime_config=RuntimeConfig(
-                storage_dir=".sandbox_sessions",
-            ),
-            hooks=hooks,
+            runtime_config=RuntimeConfig(storage_dir=".sandbox_sessions"),
+            hooks=print_tool_calls(),
         )
 
         async with runtime:
-            # Start runtime
-            session_id = runtime.session_id
             agent = runtime.agent
-            console.print(f"  [info]Session:[/info] {session_id}")
+            print(f"Session: {runtime.session_id}")
 
-            # Register sandbox tools
             @agent.tools.register(permission=PermissionLevel.ALLOW)
             async def write_code(filename: str, code: str) -> str:
                 """Write a Python file to the sandbox.
@@ -95,11 +119,8 @@ async def main():
                 Args:
                     filename: Name of the file to run (must be in sandbox).
                 """
-                code = await sandbox.read_file(filename)
-                result = await sandbox.execute(code)
-
-                output = f"Exit code: {result.exit_code}\n"
-                output += f"Time: {result.execution_time_ms:.0f}ms\n"
+                result = await sandbox.execute(await sandbox.read_file(filename))
+                output = f"Exit code: {result.exit_code}\nTime: {result.execution_time_ms:.0f}ms\n"
                 if result.timed_out:
                     output += "STATUS: TIMED OUT\n"
                 if result.memory_exceeded:
@@ -120,7 +141,6 @@ async def main():
                     code: Python code to execute.
                 """
                 result = await sandbox.execute(code)
-
                 output = f"Exit code: {result.exit_code} | Time: {result.execution_time_ms:.0f}ms"
                 if result.timed_out:
                     output += " | TIMED OUT"
@@ -145,43 +165,35 @@ async def main():
                 files = await sandbox.list_files()
                 return "\n".join(files) if files else "(empty)"
 
-            # Also register filesystem tools for reading existing code
-            register_filesystem_tools(
-                agent.tools,
-                include=["read_file", "list_directory"],
-                base_path=str(Path.cwd()),
-            )
+            # Read-only access to the existing code in this workspace, for context.
+            register_filesystem_tools(agent.tools, include=["read_file", "list_directory"], base_path=str(Path.cwd()))
 
-            print_banner(
-                "HarnessX — Sandboxed Coder",
-                subtitle="Process resource limits; host filesystem and network remain accessible",
-                commands={"quit": "Exit", "status": "Runtime status"},
-            )
-
+            print("Type 'status' for the runtime state, 'quit' to exit.")
             while True:
-                user_input = get_user_input()
-                if user_input is None or user_input.lower() == "quit":
-                    break
-                if not user_input:
-                    continue
-                if user_input.lower() == "status":
-                    status = await runtime.status()
-                    print_status(
-                        {
-                            "State": status["state"],
-                            "Usage": agent.guardrails.usage_summary,
-                        }
-                    )
-                    continue
-
                 try:
-                    response = completed_output(await runtime.run(user_input))
-                    print_response(response)
-                except Exception as e:
-                    print_error(e)
+                    text = input("You: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if text.lower() in ("quit", "exit"):
+                    break
+                if not text:
+                    continue
+                if text.lower() == "status":
+                    status = await runtime.status()
+                    print(f"State: {status['state']} | Usage: {agent.guardrails.usage_summary}")
+                    continue
+                try:
+                    result = await runtime.run(text)
+                except Exception as exc:
+                    print(f"Error: {exc}")
+                    continue
+                if result.status != "completed":
+                    print(f"Error: {result.error['message'] if result.error else f'Run status: {result.status.value}'}")
+                else:
+                    print(result.output)
 
-        print_status({"State": "stopped"})
+    print("Stopped.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(parse_args().tier))

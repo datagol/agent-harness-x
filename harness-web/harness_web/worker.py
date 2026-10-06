@@ -1,4 +1,4 @@
-"""Run unmodified example entry points with browser-backed terminal input."""
+"""Run unmodified example scripts with browser-backed terminal input."""
 
 import builtins
 import json
@@ -25,7 +25,11 @@ def send(event):
 def ask(prompt="", *, kind="input"):
     with _input_lock:
         request_id = uuid.uuid4().hex
-        if "allow" in str(prompt).lower():
+        text = str(prompt).strip()
+        if text == "You:":
+            # Examples ask for the next chat message with exactly this prompt.
+            kind = "message"
+        elif "allow" in text.lower() or "approve" in text.lower():
             kind = "approval"
         send(
             {
@@ -46,12 +50,13 @@ def ask(prompt="", *, kind="input"):
 
 def main():
     example = CATALOG[sys.argv[1]]
-    sys.argv = [example.module, *sys.argv[2:]]
+    script = str(example.file)
+    # Exactly what `python examples/<folder>/<file>.py` sets up: the script as
+    # argv[0] and its own folder first on the import path.
+    sys.argv = [script, *sys.argv[2:]]
+    sys.path.insert(0, os.path.dirname(script))
     builtins.input = ask
-    from examples import _console
-
-    _console.get_user_input = lambda prompt="You": ask(prompt, kind="message")
-    runpy.run_module(example.module, run_name="__main__")
+    runpy.run_path(script, run_name="__main__")
 
 
 if __name__ == "__main__":

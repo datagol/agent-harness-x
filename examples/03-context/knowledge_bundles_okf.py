@@ -1,51 +1,38 @@
-"""Interactive agent that answers from an Open Knowledge Format (OKF) bundle.
+"""Chat with an agent that answers from an Open Knowledge Format (OKF) bundle, pulling concepts in on demand.
 
-The bundle lives in examples/knowledge/: markdown concepts with YAML
-frontmatter, an index.md for progressive disclosure, and links between
-concepts. The agent sees only the bundle index in its system prompt and pulls
-concepts into context lazily with `search_concepts`, `read_concept`, and
-`get_neighbors`. The KNOWLEDGE_ACCESSED hook fires on every call so we can
-show a live indicator.
+`Agent(knowledge=[...])` loads a bundle: markdown concepts with YAML frontmatter, an index.md, and links
+between concepts. Only the bundle index goes into the system prompt; the model fetches what it needs with
+`search_concepts`, `read_concept`, and `get_neighbors`, and the KNOWLEDGE_ACCESSED hook fires on each call,
+which this example prints as a live indicator. The sample bundle is examples/knowledge/.
 
-Run (Anthropic, default):
-    python -m examples.knowledge_agent
-
-Point it at another bundle — a folder or a git URL — with AGENT_KNOWLEDGE:
+Run:
+    python examples/03-context/knowledge_bundles_okf.py
     AGENT_KNOWLEDGE=https://github.com/GoogleCloudPlatform/open-knowledge-format/tree/main/bundles/ga4 \\
-        python -m examples.knowledge_agent
+        python examples/03-context/knowledge_bundles_okf.py
 
-Other providers require their optional SDK extra, API key, and AGENT_MODEL.
-Set AGENT_PROVIDER and AGENT_MODEL before running this module.
+AGENT_KNOWLEDGE takes a folder or git URL (several, comma-separated). AGENT_PROVIDER and AGENT_MODEL pick
+another provider.
 
-Try prompts like:
-  • "How are active users defined, and which events count?"
-  • "What table feeds the engagement metrics, and how is it partitioned?"
-  • "Walk me through the weekly report. Is that guidance final?"
+Needs: ANTHROPIC_API_KEY (or another provider's key, its SDK extra, and AGENT_PROVIDER + AGENT_MODEL)
+
+Try:
+  - "How are active users defined, and which events count?"
+  - "What table feeds the engagement metrics, and how is it partitioned?"
+  - "Walk me through the weekly report. Is that guidance final?"
 """
 
-from __future__ import annotations
-
 import asyncio
+import json
 import os
 from pathlib import Path
 
-from harnessx import (
-    Agent,
-    AgentConfig,
-    HookContext,
-    HookEvent,
-)
-from examples._console import (
-    console,
-    get_user_input,
-    print_banner,
-    print_error,
-    print_status,
-    completed_output,
-)
+from dotenv import load_dotenv
 
+from harnessx import Agent, AgentConfig, HookContext, HookEvent, RunEventType, ToolCall, ToolResult
 
-KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
+
+KNOWLEDGE_DIR = Path(__file__).resolve().parents[1] / "knowledge"
 
 
 def _build_agent() -> Agent:
@@ -74,72 +61,74 @@ def _build_agent() -> Agent:
     )
 
 
+async def stream_reply(agent: Agent, text: str) -> None:
+    midline = False  # streamed text has no trailing newline until the answer ends
+    async with agent.run_stream(text) as stream:
+        async for event in stream:
+            if event.type is RunEventType.TEXT_DELTA:
+                print(event.data, end="", flush=True)
+                midline = True
+            elif event.type is RunEventType.TOOL_CALL_START and isinstance(event.data, ToolCall):
+                args = json.dumps(event.data.input, default=str)[:120]
+                print(("\n" if midline else "") + f"  > {event.data.name}({args})")
+                midline = False
+            elif event.type is RunEventType.TOOL_RESULT and isinstance(event.data, ToolResult) and event.data.is_error:
+                print(f"  ! {event.data.content[:200]}")
+        result = await stream.result()
+    if midline:
+        print()
+    if result.status != "completed":
+        print(f"Error: {result.error['message'] if result.error else result.status.value}")
+
+
 async def main() -> None:
     agent = _build_agent()
 
     async with agent:
-        # ── Live indicator when the model touches the bundle ────────────────
+
         async def on_knowledge(ctx: HookContext) -> None:
             data = ctx.data
             target = data.get("query") or data.get("path") or ""
             if data.get("found", True):
-                extra = f" → {data['hits']} hits" if "hits" in data else ""
-                console.print(
-                    f"  [info]📖 {data['tool']}[/info] [tool.name]{target}[/tool.name]"
-                    f"[dim]{extra} ({data.get('bundle')})[/dim]"
-                )
+                hits = f", {data['hits']} hits" if "hits" in data else ""
+                print(f"  [{data['tool']} {target}{hits} ({data.get('bundle')})]")
             else:
-                console.print(f"  [warning]⚠ {data['tool']} found nothing for:[/warning] {target}")
+                print(f"  [{data['tool']} found nothing for: {target}]")
 
         agent.hooks.on(HookEvent.KNOWLEDGE_ACCESSED, on_knowledge)
 
-        assert agent.knowledge is not None
-        bundle_lines = "\n".join(
-            f"  • [tool.name]{b.name}[/tool.name] — {len(b.concepts)} concepts"
-            + (f", okf_version {b.okf_version}" if b.okf_version else "")
-            for b in agent.knowledge.list()
-        )
-        print_banner(
-            "HarnessX — Knowledge Demo (OKF)",
-            subtitle=f"provider={agent.config.provider}  model={agent.config.model}",
-            commands={
-                "quit": "Exit",
-                "usage": "Token stats",
-                "index": "Show the bundle index",
-                "warnings": "Show loader warnings",
-            },
-        )
-        console.print("[bold]Loaded bundles:[/bold]")
-        console.print(bundle_lines)
-        console.print()
+        print(f"Knowledge agent (provider={agent.config.provider}, model={agent.config.model})")
+        print("Loaded bundles:")
+        for bundle in agent.knowledge.list():
+            version = f", okf_version {bundle.okf_version}" if bundle.okf_version else ""
+            print(f"  - {bundle.name}: {len(bundle.concepts)} concepts{version}")
+        print("Commands: index, warnings, usage, quit")
 
         while True:
-            user_input = get_user_input()
-            if user_input is None or user_input.lower() == "quit":
-                break
-            if not user_input:
-                continue
-            if user_input.lower() == "usage":
-                print_status({"Usage": agent.guardrails.usage_summary})
-                continue
-            if user_input.lower() == "index":
-                for bundle in agent.knowledge.list():
-                    console.print(bundle.render_summary())
-                continue
-            if user_input.lower() == "warnings":
-                warnings = agent.knowledge.warnings()
-                console.print("\n".join(warnings) if warnings else "[dim]no warnings[/dim]")
-                continue
-
             try:
-                response = completed_output(await agent.run(user_input))
-                console.print()
-                console.print(f"[agent.label]assistant[/agent.label] {response}")
-                console.print()
-            except Exception as e:
-                print_error(e)
+                text = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if text.lower() in ("quit", "exit"):
+                break
+            if not text:
+                continue
+            if text.lower() == "usage":
+                print(f"Usage: {agent.guardrails.usage_summary}")
+                continue
+            if text.lower() == "index":
+                for bundle in agent.knowledge.list():
+                    print(bundle.render_summary())
+                continue
+            if text.lower() == "warnings":
+                print("\n".join(agent.knowledge.warnings()) or "no warnings")
+                continue
+            try:
+                await stream_reply(agent, text)
+            except Exception as exc:
+                print(f"Error: {exc}")
 
-        console.print("\nGoodbye!")
+        print("Goodbye!")
 
 
 if __name__ == "__main__":

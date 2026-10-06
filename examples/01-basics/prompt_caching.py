@@ -1,31 +1,29 @@
-"""Prompt caching: keep the prefix stable and watch cache reads arrive.
+"""Prompt caching: keep the request prefix stable and watch cache reads arrive.
 
-Every iteration of the agent loop resends the system prompt, the tool list,
-and the conversation. HarnessX computes a stable prefix key for that request
-and tells the provider where the reusable prefix ends; each provider translates
-the hint into its vendor's caching mechanism. Caching is on by default.
+Every iteration of the agent loop resends the system prompt, the tool list, and the conversation. HarnessX computes
+a stable prefix key for that request and tells the provider where the reusable prefix ends; each provider translates
+the hint into its vendor's caching mechanism. Caching is on by default; `AgentConfig(prompt_cache=...)` tunes it.
+This runs a two-iteration loop (one tool call, one answer), records the prefix key of every model request through
+the LLM_REQUEST hook, and prints the cache counters from the usage summary.
 
-This example runs a two-iteration loop (one tool call, one answer), records the
-prefix key of every model request through the LLM_REQUEST hook, and prints the
-cache counters from the usage summary. It is self-contained: copy this file
-anywhere after `pip install harnessx`.
+Run:
+    python examples/01-basics/prompt_caching.py            # scripted provider
+    python examples/01-basics/prompt_caching.py --off      # same, with caching disabled
+    python examples/01-basics/prompt_caching.py --live     # a real model
+Needs: Nothing: a scripted model, no network. `--live` needs ANTHROPIC_API_KEY.
 
-    python -m examples.prompt_caching            # scripted provider, no keys
-    python -m examples.prompt_caching --off      # same, with caching disabled
-    python -m examples.prompt_caching --live     # real model via ANTHROPIC_API_KEY
-
-Live note: vendors only cache prefixes above a minimum size (Anthropic: about
-1,024 tokens on most models), so a short system prompt shows zero cache reads
-even though the request carried the markers. Cache writes cost slightly more
-than plain input on Anthropic; reads cost much less.
+Live note: vendors only cache prefixes above a minimum size (Anthropic: about 1,024 tokens on most models), so a
+short system prompt shows zero cache reads even though the request carried the markers. Cache writes cost slightly
+more than plain input on Anthropic; reads cost much less.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 from typing import Any
+
+from dotenv import load_dotenv
 
 from harnessx import (
     Agent,
@@ -40,6 +38,8 @@ from harnessx import (
     ToolCall,
 )
 from harnessx.providers import LLMProvider
+
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
 
 SYSTEM_PROMPT = (
     "You are a pricing assistant for a hardware store. Use the lookup_price tool "
@@ -119,7 +119,7 @@ async def main(live: bool = False, disabled: bool = False) -> int:
         usage = agent.guardrails.total_usage
 
     if result.error:
-        print(f"Run failed: {result.error['message']}", file=sys.stderr)
+        print(f"Error: {result.error['message']}")
         return 1
 
     print(f"Answer: {result.output}")

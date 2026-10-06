@@ -1,23 +1,38 @@
-"""Persisted tool approval with a scripted provider and temporary SQLite store.
+"""Pause a run for a human decision, persist it, and finish the same run after approval.
 
-Run: python -m examples.runtime_approvals
-No model API key is required. The terminal prompts before creating a fixture note.
+A tool registered with PermissionLevel.ASK does not run on its own: the run stops as
+``awaiting_input`` and the pending call is saved in the runtime's store (SQLite here, in
+a temporary directory). ``runtime.approve(pending, allow=..., resume=True)`` records the
+decision and runs the turn to its end, so approving later, even from another process,
+continues the run instead of starting over.
+
+Run:   python examples/05-durability/tool_approvals_and_resume.py
+Needs: Nothing: a scripted model, no network. It asks one question before writing a note.
 """
 
 import asyncio
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
-from harnessx import (
-    Agent,
-    AgentRuntime,
-    PermissionLevel,
-    ProviderResponse,
-    RunResult,
-    SQLiteBackend,
-    ToolCall,
-)
-from examples._fixtures import ScriptedProvider
+from dotenv import load_dotenv
+
+from harnessx import Agent, AgentRuntime, PermissionLevel, ProviderResponse, RunResult, SQLiteBackend, ToolCall
+from harnessx.providers import LLMProvider
+
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
+
+
+class ScriptedProvider(LLMProvider):
+    """Fixed replies, so the example runs the real engine without a model."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+
+    async def create(self, **kwargs):
+        return self.replies.pop(0)
+
+    async def count_tokens(self, **kwargs):
+        return 0
 
 
 async def decide(runtime: AgentRuntime, result: RunResult) -> RunResult:
@@ -26,60 +41,44 @@ async def decide(runtime: AgentRuntime, result: RunResult) -> RunResult:
     if pending.status != "approval":
         print("Tool outcome needs reconciliation:", pending.execution_key)
         return result
-    answer = await asyncio.to_thread(
-        input, f"Allow {pending.call.name} {pending.call.input}? [y/N] "
-    )
-    # approve(..., resume=True) persists the decision and runs the turn to its end.
+    # input() runs in a thread so the runtime keeps renewing its session lease while a person decides.
+    try:
+        answer = await asyncio.to_thread(input, f"Allow {pending.call.name}({pending.call.input})? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    # resume=True persists the decision and runs the turn to its end.
     # With several pending tools, approve each without resume, then resume once.
-    return await runtime.approve(
-        pending, allow=answer.strip().lower() == "y", resume=True
-    )
+    return await runtime.approve(pending, allow=answer.strip().lower() == "y", resume=True)
 
 
 async def main() -> None:
     with tempfile.TemporaryDirectory(prefix="harnessx-approval-") as directory:
         note = Path(directory) / "note.txt"
-        provider = ScriptedProvider(
-            [
-                ProviderResponse(
-                    tool_calls=[
-                        ToolCall("note", "create_note", {"text": "Reviewed fixture"})
-                    ],
-                    stop_reason="tool_use",
-                ),
-                ProviderResponse(text="The approval decision has been processed."),
-            ]
-        )
-        agent = Agent(provider=provider)
+        provider = ScriptedProvider([
+            ProviderResponse(
+                tool_calls=[ToolCall("note", "create_note", {"text": "Reviewed fixture"})], stop_reason="tool_use",
+            ),
+            ProviderResponse(text="The approval decision has been processed."),
+        ])
+        async with Agent(provider=provider) as agent:
 
-        @agent.tools.register(permission=PermissionLevel.ASK, replay_policy="manual")
-        def create_note(text: str) -> str:
-            """Create a note in this example's temporary directory."""
-            note.write_text(text)
-            return "Note created"
+            @agent.tools.register(permission=PermissionLevel.ASK, replay_policy="manual")
+            def create_note(text: str) -> str:
+                """Create a note in this example's temporary directory."""
+                note.write_text(text)
+                return "Note created"
 
-        backend = SQLiteBackend(str(Path(directory) / "runtime.db"))
-        try:
-            async with AgentRuntime(agent, backend=backend) as runtime:
-                result = await runtime.run("Create a review note")
-                print(
-                    "Before approval:",
-                    result.status.value,
-                    "| Note exists:",
-                    note.exists(),
-                )
-                if result.needs_input:
-                    result = await decide(runtime, result)
-                print(
-                    "After approval:",
-                    result.status.value,
-                    "| Note exists:",
-                    note.exists(),
-                )
-                if result.error:
-                    raise RuntimeError(result.error["message"])
-        finally:
-            await backend.aclose()
+            async with SQLiteBackend(str(Path(directory) / "runtime.db")) as backend:
+                async with AgentRuntime(agent, backend=backend) as runtime:
+                    result = await runtime.run("Create a review note")
+                    print("Before approval:", result.status.value, "| Note exists:", note.exists())
+                    if result.needs_input:
+                        result = await decide(runtime, result)
+                    print("After approval:", result.status.value, "| Note exists:", note.exists())
+                    if result.error:
+                        print("Error:", result.error["message"])
+                    else:
+                        print("Answer:", result.output)
 
 
 if __name__ == "__main__":

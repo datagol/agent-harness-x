@@ -1,4 +1,3 @@
-import importlib
 import json
 import socket
 from copy import deepcopy
@@ -10,11 +9,15 @@ from harnessx.decisions import (
     BooleanQuestion, ChoiceAnswer, ChoiceQuestion, DecisionBatch,
     DecisionError, DecisionProvider, ScoreQuestion,
 )
-from examples._decision_fixtures import FixedDecisionProvider
-from examples._fixtures import ScriptedProvider
-from examples.jev_answer_review import COVERAGE_LEVELS, review_answer
-from examples.jev_classification import DOCUMENT_TYPES, classify_document
-from examples.jev_routing import ROUTES, choose_route, run_routed_query
+from example_loader import load_example
+from scripted_provider import ScriptedProvider
+
+_routing = load_example("06-quality/decisions_routing.py")
+_review = load_example("06-quality/decisions_answer_review.py")
+FixedDecisionProvider = _routing.FixedDecisionProvider
+ROUTES, choose_route, run_routed_query = _routing.ROUTES, _routing.choose_route, _routing.run_routed_query
+DOCUMENT_TYPES, classify_document = _routing.DOCUMENT_TYPES, _routing.classify_document
+COVERAGE_LEVELS, review_answer = _review.COVERAGE_LEVELS, _review.review_answer
 
 
 @pytest.fixture(autouse=True)
@@ -26,11 +29,11 @@ def no_network(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("module,args", [
-    ("jev_routing", ["--min-confidence", "0.8"]),
-    ("jev_classification", []), ("jev_answer_review", []),
+    ("06-quality/decisions_routing.py", ["--min-confidence", "0.8"]),
+    ("06-quality/decisions_answer_review.py", []),
 ])
 async def test_examples_default_offline_without_constructing_jev(module, args, monkeypatch, capsys):
-    example = importlib.import_module("examples." + module)
+    example = load_example(module)
 
     def forbidden():
         pytest.fail("offline examples must not construct a live decision provider")
@@ -142,7 +145,7 @@ async def test_review_skips_unsuccessful_runs(status):
 
 @pytest.mark.asyncio
 async def test_live_routing_requires_explicit_model():
-    from examples.jev_routing import main
+    main = load_example("06-quality/decisions_routing.py").main
     with pytest.raises(SystemExit) as exc:
         await main(["--live", "--min-confidence", ".8"])
     assert exc.value.code == 2
@@ -150,11 +153,11 @@ async def test_live_routing_requires_explicit_model():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("module,args", [
-    ("jev_routing", ["--min-confidence", ".8", "--model", "test-model"]),
-    ("jev_classification", []), ("jev_answer_review", []),
+    ("06-quality/decisions_routing.py", ["--min-confidence", ".8", "--model", "test-model"]),
+    ("06-quality/decisions_answer_review.py", []),
 ])
 async def test_live_flag_explicitly_selects_jev_without_live_calls(module, args, monkeypatch):
-    example = importlib.import_module("examples." + module)
+    example = load_example(module)
     selected = []
 
     def live():

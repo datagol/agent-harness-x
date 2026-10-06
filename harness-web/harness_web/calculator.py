@@ -1,4 +1,4 @@
-"""Small, bounded arithmetic evaluator for the chat example; never executes Python."""
+"""Small, bounded arithmetic evaluator for the chat workspace; never executes Python."""
 
 import ast
 import math

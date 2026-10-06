@@ -182,7 +182,7 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             run.mode = (
                 "offline"
                 if example.offline
-                and not (example.id == "run_evals" and body.mode == "live")
+                and not (example.id == "evaluating_with_datasets" and body.mode == "live")
                 else "live"
             )
             args = arguments(example, config, run.workdir)

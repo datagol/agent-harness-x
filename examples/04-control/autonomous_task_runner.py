@@ -1,17 +1,16 @@
-"""One-shot CLI agent: give it a task, it researches, writes files, and runs them.
+"""Autonomous task runner: give it a task on the command line; it researches, writes files, runs them, and exits.
 
-    python -m examples.task_agent "Chart this month's downloads as an HTML page" -o chart.html
+Unlike the interactive examples, this takes the whole task up front and exits when the work is done, which suits
+a script, a cron job, or a CI step. Hooks narrate the run as it goes (steps, tool calls, retries, loops), so a long
+task is not a silent one. Everything optional degrades rather than fails: web search appears only with a Tavily
+key (over MCP), tracing only with a LangSmith key. The file and shell tools are always there, which is enough to
+produce a deliverable in any format.
 
-Unlike the interactive examples, this one takes the whole task on the command
-line and exits when the work is done. That shape suits a script, a cron job, or
-a CI step.
-
-Everything optional degrades rather than fails. Web search appears only with a
-Tavily key, tracing only with a LangSmith key. The agent always has the file
-and shell tools, which is enough to produce a deliverable in any format.
-
-Requires an Anthropic key. Set TAVILY_API_KEY for web search and
-LANGSMITH_API_KEY for tracing.
+Run:
+    python examples/04-control/autonomous_task_runner.py "Chart this month's downloads as an HTML page" -o chart.html
+    python examples/04-control/autonomous_task_runner.py "Write a CSV of the first 20 primes" --max-iterations 10
+Needs: ANTHROPIC_API_KEY. Optional: TAVILY_API_KEY for web search, LANGSMITH_API_KEY for tracing
+(`pip install "harnessx[langsmith]"`).
 """
 
 from __future__ import annotations
@@ -21,10 +20,8 @@ import asyncio
 import os
 import time
 
-from rich.panel import Panel
-from rich.table import Table
+from dotenv import load_dotenv
 
-from examples._console import console
 from harnessx import (
     Agent,
     AgentConfig,
@@ -36,6 +33,8 @@ from harnessx import (
     PermissionLevel,
 )
 from harnessx.builtin import edit_file, read_file, run_bash, write_file
+
+load_dotenv()  # finds the repository's .env from this file's folder; never overrides set variables
 
 SYSTEM_PROMPT = (
     "You are an autonomous engineer. You research, write code, and produce the "
@@ -52,66 +51,41 @@ SYSTEM_PROMPT = (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("task", help="What you want done.")
     parser.add_argument("-o", "--output", help="Where the deliverable should go.")
-    parser.add_argument(
-        "--max-iterations", type=int, default=25, help="Loop budget (default: 25)."
-    )
-    parser.add_argument(
-        "--max-cost", type=float, default=None, help="Stop above this spend, in dollars."
-    )
-    return parser.parse_args()
+    parser.add_argument("--max-iterations", type=int, default=25, help="Loop budget (default: 25).")
+    parser.add_argument("--max-cost", type=float, default=None, help="Stop above this spend, in dollars.")
+    return parser.parse_args(argv)
 
 
 def build_hooks() -> HookManager:
-    """Narrate the run as it happens, so a long task is not a silent one."""
+    """Narrate the run as it happens."""
     hooks = HookManager()
 
-    def preview(value: object, limit: int = 70) -> str:
-        text = repr(value)
-        return text if len(text) <= limit else text[: limit - 3] + "..."
+    def tool_start(ctx) -> None:
+        call = ctx.data["tool_call"]
+        arguments = ", ".join(f"{k}={v!r}" for k, v in call.input.items())
+        print(f"  > {call.name}({arguments[:120]})")
 
-    def _iteration(ctx) -> None:
-        console.print(f"[warning]step {ctx.data.get('iteration', 1)}[/warning]")
+    def tool_end(ctx) -> None:
+        result = ctx.data["result"]
+        body = str(result.content)[:100].replace("\n", " ")
+        print(f"  ! {body}" if result.is_error else f"    {len(str(result.content))} chars: {body}")
 
-    @hooks.before_tool
-    def _tool_start(ctx) -> None:
-        call = ctx.data.get("tool_call")
-        if call:
-            arguments = ", ".join(f"{k}={preview(v)}" for k, v in call.input.items())
-            console.print(f"  [tool.name]{call.name}[/tool.name]([tool.input]{arguments}[/tool.input])")
-
-    @hooks.after_tool
-    def _tool_end(ctx) -> None:
-        result = ctx.data.get("result")
-        body = str(getattr(result, "content", ""))[:100].replace("\n", " ")
-        if getattr(result, "is_error", False):
-            console.print(f"  [tool.error]failed:[/tool.error] {body}")
-        else:
-            console.print(f"  [info]{len(str(getattr(result, 'content', '')))} chars[/info] {body}")
-
-    def _repetition(ctx) -> None:
-        console.print(f"[warning]going in circles: cycle of {ctx.data['period']}[/warning]")
-
-    def _retry(ctx) -> None:
-        console.print(f"[warning]retrying in {ctx.data['wait_seconds']:.1f}s: {ctx.data['error']}[/warning]")
-
-    def _error(ctx) -> None:
-        console.print(f"[tool.error]{ctx.data.get('error')}[/tool.error]")
-
-    hooks.on(HookEvent.LOOP_ITERATION_START, _iteration)
-    hooks.on(HookEvent.REPETITION, _repetition)
-    hooks.on(HookEvent.RETRY, _retry)
-    hooks.on(HookEvent.ERROR, _error)
+    hooks.on(HookEvent.LOOP_ITERATION_START, lambda ctx: print(f"step {ctx.data['iteration']}"))
+    hooks.on(HookEvent.TOOL_CALL_START, tool_start)
+    hooks.on(HookEvent.TOOL_CALL_END, tool_end)
+    hooks.on(HookEvent.REPETITION, lambda ctx: print(f"going in circles: cycle of {ctx.data['period']}"))
+    hooks.on(HookEvent.RETRY, lambda ctx: print(f"retrying in {ctx.data['wait_seconds']:.1f}s: {ctx.data['error']}"))
+    hooks.on(HookEvent.ERROR, lambda ctx: print(f"  ! {ctx.data.get('error')}"))
     return hooks
 
 
 def build_extensions() -> list:
     """LangSmith tracing, when a key is configured."""
-    key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
-    if not key:
+    if not (os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")):
         return []
     from harnessx import LangSmithExtension
 
@@ -133,45 +107,22 @@ async def connect_search(mcp: MCPManager) -> bool:
     return True
 
 
-def report(result, agent, elapsed: float) -> None:
-    table = Table(title="Run", show_header=False)
-    table.add_column("", style="dim")
-    table.add_column("", justify="right")
-    table.add_row("Status", str(result.status.value))
-    table.add_row("Steps", str(agent.guardrails.iteration_count))
-    table.add_row("Input tokens", f"{result.usage.input_tokens:,}")
-    table.add_row("Output tokens", f"{result.usage.output_tokens:,}")
-    table.add_row("Cache reads", f"{result.usage.cache_read_input_tokens:,}")
-    table.add_row("Elapsed", f"{elapsed:.1f}s")
-    table.add_row("Estimated cost", f"${agent.guardrails.estimated_cost:.4f}")
-    console.print(table)
-
-
-async def main() -> None:
-    args = parse_args()
-
+async def main(args: argparse.Namespace | None = None) -> int:
+    args = args or parse_args()
     task = args.task
     if args.output:
         task += f"\n\nSave the deliverable to {args.output}."
-
     limits = Limits(max_iterations=args.max_iterations, max_cost_dollars=args.max_cost)
-    hooks = build_hooks()
 
     async with MCPManager() as mcp:
         searching = await connect_search(mcp)
-        console.print(
-            Panel(
-                f"[user.label]{args.task}[/user.label]",
-                title="task" + ("  ·  web search on" if searching else ""),
-                border_style="cyan",
-            )
-        )
+        print(f"Task: {args.task}" + ("  (web search on)" if searching else ""))
 
         async with Agent(
             config=AgentConfig(system_prompt=SYSTEM_PROMPT, limits=limits),
             tools=[run_bash, write_file, edit_file, read_file],
             mcp=mcp,
-            hooks=hooks,
+            hooks=build_hooks(),
             extensions=build_extensions(),
         ) as agent:
             # Tavily ships several tools; one search is all this agent needs.
@@ -183,10 +134,18 @@ async def main() -> None:
             result = await agent.run(task)
             elapsed = time.perf_counter() - started
 
-    console.print(Panel(result.output or "(no output)", title="result", border_style="green"))
-    report(result, agent, elapsed)
-    result.raise_for_status()
+    if result.error:
+        print(f"Error: {result.error['message']}")
+    else:
+        print(f"\n{result.output or '(no output)'}")
+    usage = result.usage
+    print(
+        f"\nStatus {result.status.value} | steps {agent.guardrails.iteration_count} | "
+        f"tokens in {usage.input_tokens:,} out {usage.output_tokens:,} cache reads {usage.cache_read_input_tokens:,} | "
+        f"{elapsed:.1f}s | ${agent.guardrails.estimated_cost:.4f}"
+    )
+    return 0 if result.status.value == "completed" else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

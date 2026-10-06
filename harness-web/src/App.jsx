@@ -41,6 +41,10 @@ import {
   Zap,
   Brain,
   AlertCircle,
+  Layers,
+  Repeat,
+  RefreshCw,
+  Save,
 } from "lucide-react";
 import { api, finished, initialFeed, reduceFeed } from "./api.js";
 
@@ -58,14 +62,21 @@ const ICONS = {
   database: Database,
   plug: Plug,
   globe: Globe,
+  list: ListChecks,
+  layers: Layers,
+  repeat: Repeat,
+  refresh: RefreshCw,
+  save: Save,
 };
 const CATEGORIES = [
   "All examples",
-  "Agents",
-  "Runtime",
-  "Skills",
-  "Evaluation",
-  "Integrations",
+  "Basics",
+  "Tools",
+  "Context",
+  "Control",
+  "Durability",
+  "Quality",
+  "Sandboxes",
 ];
 const go = (path) => {
   window.location.hash = path;
@@ -218,7 +229,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const missing =
-    example.id === "provider_chat"
+    example.id === "switching_providers"
       ? providers.find((provider) => provider.id === config.provider)
           ?.missing || []
       : config.mode === "live"
@@ -252,7 +263,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
           </div>
         </div>
         <p className="detail-note">{example.detail}</p>
-        {example.id === "provider_chat" && (
+        {example.id === "switching_providers" && (
           <div className="form-group">
             <label>
               Provider
@@ -301,7 +312,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             </label>
           </div>
         )}
-        {example.id === "run_evals" && (
+        {example.id === "evaluating_with_datasets" && (
           <label>
             Evaluation mode
             <select
@@ -324,7 +335,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             />
           </label>
         )}
-        {example.id === "mcp_agent" && (
+        {example.id === "mcp_servers" && (
           <div className="form-group">
             <label>
               Server name
@@ -402,7 +413,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
         <ErrorNotice message={error} />
         <div className="modal-footer">
           <span className="muted">
-            <Terminal size={14} /> {example.module}
+            <Terminal size={14} /> {example.command}
           </span>
           <button
             className="button primary"
@@ -410,7 +421,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             disabled={
               busy ||
               !!missing.length ||
-              (example.id === "provider_chat" && !config.model.trim())
+              (example.id === "switching_providers" && !config.model.trim())
             }
           >
             {busy ? (
@@ -581,8 +592,8 @@ function Library({ examples, loading, onSelect }) {
         </div>
       )}
       <div className="library-footnote">
-        <Code2 size={15} /> Every example runs the Python module in this
-        repository.
+        <Code2 size={15} /> Every example is a script in this repository's
+        examples folder, unchanged.
       </div>
     </div>
   );
@@ -888,7 +899,7 @@ function RunView({ id, refresh, examples }) {
             </h3>
             <dl>
               <dt>Entry point</dt>
-              <dd>{example?.module || run?.example_id}</dd>
+              <dd>{example?.command || run?.example_id}</dd>
               <dt>Run ID</dt>
               <dd className="mono">{id.slice(0, 12)}</dd>
               <dt>Execution</dt>
