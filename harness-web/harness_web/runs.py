@@ -250,6 +250,9 @@ async def run_example(run, example, args, initial_prompt=""):
                     if event["kind"] == "message" and initial_prompt:
                         value, initial_prompt = initial_prompt, ""
                         await run.reply(event["id"], value)
+                elif kind == "agent":
+                    # A tool call or result from an agent inside the example.
+                    await run.emit("agent", event=event["event"])
                 elif kind == "web_ready":
                     run.url = event["url"]
                     await run.state("running")

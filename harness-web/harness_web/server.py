@@ -29,7 +29,9 @@ from .catalog import (
     public_catalog,
     requirements,
 )
-from .chat import DOWNLOADS_DIR, Chat, close_chat, create_chat, rebuild_chat, run_chat, set_tool_enabled
+from .chat import (
+    DOWNLOADS_DIR, Chat, close_chat, create_chat, rebuild_chat, run_chat, set_tool_enabled, validate_subagents,
+)
 from .files import open_workspace_file
 from .runs import RunManager, run_example
 
@@ -66,6 +68,19 @@ class MessageRequest(BaseModel):
 
 class ChatSetupRequest(BaseModel):
     system_prompt: str = Field(min_length=1, max_length=20000)
+
+
+class SubAgentSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=55)
+    description: str = Field(min_length=1, max_length=1000)
+    instructions: str = Field(min_length=1, max_length=20000)
+    tools: list[str] = Field(default_factory=list, max_length=100)
+
+
+class SubAgentsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subagents: list[SubAgentSpec] = Field(default_factory=list, max_length=10)
 
 
 class SkillUploadRequest(BaseModel):
@@ -182,7 +197,7 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             run.mode = (
                 "offline"
                 if example.offline
-                and not (example.id == "run_evals" and body.mode == "live")
+                and not (example.id == "evaluating_with_datasets" and body.mode == "live")
                 else "live"
             )
             args = arguments(example, config, run.workdir)
@@ -342,6 +357,24 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
         except Exception as exc:
             chat.system_prompt = previous
             raise HTTPException(422, f"Could not apply system prompt: {exc}") from exc
+        return chat.public()
+
+    @app.put("/api/chats/{chat_id}/subagents")
+    async def set_chat_subagents(chat_id: str, body: SubAgentsRequest):
+        """Replace the specialists this conversation's agent can delegate to."""
+        chat = get_chat(chat_id)
+        ensure_chat_idle(chat)
+        try:
+            cleaned = validate_subagents(chat, [spec.model_dump() for spec in body.subagents])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        previous = chat.subagents
+        chat.subagents = cleaned
+        try:
+            await rebuild_chat(chat)
+        except Exception as exc:
+            chat.subagents = previous
+            raise HTTPException(422, f"Could not apply subagents: {exc}") from exc
         return chat.public()
 
     @app.post("/api/chats/{chat_id}/skills", status_code=201)

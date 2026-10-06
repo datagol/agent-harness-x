@@ -24,6 +24,7 @@ export const initialFeed = () => ({
   tools: [],
   segments: [],
   files: [],
+  todos: null,
   phase: null,
   phaseAt: 0,
   error: "",
@@ -37,10 +38,22 @@ export function reduceFeed(state, data) {
   if (data.type === "state") {
     next.run = data;
     if (data.pending && state.phase !== "approval") {
-      next.phase = "approval";
+      next.phase = data.pending.kind === "question" ? "question" : "approval";
       next.phaseAt = Date.now();
-    } else if (!data.pending && state.phase === "approval") {
+    } else if (!data.pending && (state.phase === "approval" || state.phase === "question")) {
       next.phase = "waiting";
+      next.phaseAt = Date.now();
+    }
+  }
+  // The server announces a prompt with its own event, then repeats it inside
+  // the next `state`. Acting on the announcement means the approval buttons
+  // appear as soon as they are asked for, and keeps working if the follow-up
+  // state event is missed: a reconnect, a trimmed buffer, or a late subscribe.
+  if (data.type === "input_required") {
+    const { seq, type, ...prompt } = data;
+    next.run = { ...(state.run || {}), pending: prompt, status: "waiting" };
+    if (state.phase !== prompt.kind && (prompt.kind === "approval" || prompt.kind === "question")) {
+      next.phase = prompt.kind;
       next.phaseAt = Date.now();
     }
   }
@@ -60,6 +73,7 @@ export function reduceFeed(state, data) {
     next.tools = data.message.tools;
     next.segments = data.message.segments || state.segments;
     next.files = data.message.files || state.files;
+    next.todos = data.message.todos || state.todos;
     next.usage = data.usage;
     next.phase = null;
     if (data.message.error) next.error = data.message.error;
@@ -84,6 +98,7 @@ export function reduceFeed(state, data) {
       next.segments = last && last.type === "text" ? state.segments.slice(0, -1) : state.segments;
     }
     if (type === "error") next.error = payload;
+    if (type === "todos_updated") next.todos = payload;
     if (type === "tool_call_start") {
       next.tools = [
         ...state.tools.filter((t) => t.id !== payload.id),

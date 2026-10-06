@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import functools
 import re
 from contextlib import contextmanager
 import errno
 import os
 import stat
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import uuid
 
 from harnessx.types import PermissionLevel
@@ -446,7 +447,7 @@ def register_filesystem_tools(
     exclude: list[str] | None = None, permission: PermissionLevel | None = None,
     base_path: str | None = None, max_read_bytes: int = 1_000_000,
     max_write_bytes: int = 10_000_000, max_directory_entries: int = 1_000,
-    output_dir: str | None = None, replace: bool = False,
+    output_dir: str | None = None, replace: bool = False, sandbox: Any | None = None,
 ) -> list[str]:
     """Register filesystem tools; omitted permissions inherit the manager default.
 
@@ -455,6 +456,11 @@ def register_filesystem_tools(
     process's filesystem permissions apply. For inspection only, include read_file
     and list_directory. Limits and output_dir are application configuration, hidden
     from model input. Downloads use a separate application-owned output directory.
+
+    A sandbox whose ``owns_filesystem`` is true (the registry's own when none is
+    passed) takes the tools inside it, with the same output; the sandbox decides
+    which paths exist, so base_path does not apply. The local ``Sandbox`` leaves
+    them on the host.
     """
     names = select_tools(
         registry,
@@ -464,32 +470,48 @@ def register_filesystem_tools(
     )
     if not names:
         return []
-    fs = _Filesystem(base_path, max_read_bytes=max_read_bytes, max_write_bytes=max_write_bytes,
-                     max_directory_entries=max_directory_entries, output_dir=output_dir)
+    if sandbox is None:
+        sandbox = getattr(registry, "sandbox", None)
+    limits = dict(max_read_bytes=max_read_bytes, max_write_bytes=max_write_bytes,
+                  max_directory_entries=max_directory_entries, output_dir=output_dir)
+    if getattr(sandbox, "owns_filesystem", False):
+        if base_path is not None:
+            raise ValueError("base_path does not apply to a sandbox that owns its filesystem")
+        from .sandbox_filesystem import SandboxFilesystem
+
+        remote = SandboxFilesystem(sandbox, **limits)
+
+        async def call(operation: str, *args: Any) -> str:
+            return await getattr(remote, operation)(*args)
+    else:
+        fs = _Filesystem(base_path, **limits)
+
+        async def call(operation: str, *args: Any) -> str:
+            return await asyncio.to_thread(getattr(fs, operation), *args)
 
     async def scoped_read(path: str, offset: int = 0, limit: int = 100_000) -> str:
-        return await asyncio.to_thread(fs.read, path, offset, limit)
+        return await call("read", path, offset, limit)
 
     async def scoped_write(path: str, content: str, overwrite: bool = False) -> str:
-        return await asyncio.to_thread(fs.write, path, content, overwrite)
+        return await call("write", path, content, overwrite)
 
     async def scoped_list(path: str = ".") -> str:
-        return await asyncio.to_thread(fs.list, path)
+        return await call("list", path)
 
     async def scoped_generate(path: str, content: str, display_name: str = "", overwrite: bool = False) -> str:
-        return await asyncio.to_thread(fs.generate, path, content, display_name, overwrite)
+        return await call("generate", path, content, display_name, overwrite)
 
     async def scoped_edit(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-        return await asyncio.to_thread(fs.edit, path, old_string, new_string, replace_all)
+        return await call("edit", path, old_string, new_string, replace_all)
 
     async def scoped_delete(path: str, recursive: bool = False) -> str:
-        return await asyncio.to_thread(fs.delete, path, recursive)
+        return await call("delete", path, recursive)
 
     async def scoped_glob(pattern: str, path: str = ".") -> str:
-        return await asyncio.to_thread(fs.glob, pattern, path)
+        return await call("glob", pattern, path)
 
     async def scoped_grep(pattern: str, path: str = ".", include: str = "") -> str:
-        return await asyncio.to_thread(fs.grep, pattern, path, include)
+        return await call("grep", pattern, path, include)
 
     # (handler, public twin for the docstring, safe to run concurrently)
     handlers = {
@@ -505,6 +527,21 @@ def register_filesystem_tools(
     for name in names:
         handler, public, concurrent = handlers[name]
         handler.__doc__ = public.__doc__
+        _mark_builtin(handler, sandbox if getattr(sandbox, "owns_filesystem", False) else None, functools.partial(
+            register_filesystem_tools, include=[name], permission=permission, replace=True,
+            max_read_bytes=max_read_bytes, max_write_bytes=max_write_bytes,
+            max_directory_entries=max_directory_entries, output_dir=output_dir,
+        ))
         registry.register_tool(handler, name=name, permission=permission,
                                concurrent=concurrent, replace=replace)
     return names
+
+
+def _mark_builtin(handler: Any, backend: Any, rebind: Any) -> None:
+    """Remember where a built-in runs and how to register it again elsewhere.
+
+    ``normalize_tool_registry`` uses this to move built-ins registered before
+    the registry met a backend that owns its filesystem into that backend.
+    """
+    handler._harnessx_backend = backend
+    handler._harnessx_rebind = rebind

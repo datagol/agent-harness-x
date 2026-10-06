@@ -1,9 +1,14 @@
 # harness-web
 
-A local workspace for **every HarnessX example entry point**, plus a separate
-general chat interface. It runs the repository's real examples, streams their
-output, presents terminal input and approvals in the browser, and makes generated
-files available to download.
+A local workspace with two halves:
+
+- **Examples.** Every script in `examples/`, grouped by topic. Each runs
+  unchanged; you see its output stream, every tool call its agents make (with
+  arguments, result and status), its prompts and approvals in the browser, and
+  the files it writes, ready to download.
+- **Build your agent.** One conversation-scoped agent you shape yourself: write
+  its system prompt, choose provider and model, switch tools on and off, upload
+  skills, connect MCP servers, and add subagents it can delegate to.
 
 `datagol-web` was inspected before building this app. It is a React/Vite marketing
 site with Datagol colors and animated landing-page components. This app reuses its
@@ -22,8 +27,37 @@ npm --prefix harness-web run build
 python3 harness-web/run.py
 ```
 
-Open **http://127.0.0.1:8765**. Use `--port 8766` to choose another port.
+Open **http://127.0.0.1:8765**. Use `--port 8766` to choose another port, and
+`--host 0.0.0.0` to accept connections from outside this machine. It binds
+localhost by default because the app runs example code.
 The frontend build is served by the Python server; no second server is needed.
+
+## Run everything in containers
+
+No Python, no Node, and every optional service provisioned:
+
+```bash
+docker compose up
+```
+
+That builds the frontend, installs the SDK with every extra, and starts
+PostgreSQL, Temporal and Redis alongside the app on
+**http://localhost:8765**. The durable and Temporal examples are runnable with
+nothing further to configure.
+
+Model API keys come from your own `.env`, read at run time and never baked into
+an image. Without them the offline examples still run and the live ones say
+what is missing.
+
+To run the suite with those services reachable, which is the only way nothing
+is skipped:
+
+```bash
+docker compose run --rm tests
+```
+
+## Credentials and scope
+
 The app lives in this checkout and is not bundled in the SDK wheel.
 
 The existing repository `.env` is loaded without overriding environment variables.
@@ -33,57 +67,84 @@ the configuration API or entered into a browser form. Other chat providers use
 SDK extras. Enter the model ID when selecting a provider without a default.
 Restart the server after changing environment variables.
 
-Without a key, start with **Flight recorder**, **Durable approvals**, or **Skill
-discovery**. General chat also offers an explicitly labelled **Local demo** that
+Without a key, start with **Flight recorder**, **Approvals and resume**, **Loop
+guard**, or **Skills, loaded on demand**. General chat also offers an explicitly labelled **Local demo** that
 uses scripted responses and the real calculator; it is not a language model.
 Try `What is 48 * 12?`.
 
 ## Example coverage
 
-| UI entry | Python entry point | Setup / behavior |
-|---|---|---|
-| Flight recorder | `examples.flight_recorder` | Offline; download `incident.hx` after completion |
-| Durable approvals | `examples.runtime_approvals` | Offline; choose Allow once or Deny in the browser |
-| Skill discovery | `examples.skills_demo` | Offline; displays real skill and hook events |
-| Simple chat | `examples.simple_chat` | Anthropic; send follow-up messages or `quit` |
-| Provider chat | `examples.provider_chat` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
-| Coding agent | `examples.coding_agent` | Anthropic; writes and shell commands ask for approval |
-| Memory agent | `examples.memory_agent` | Anthropic; notes belong to the example's working directory |
-| Specialist agents | `examples.multi_agent` | Anthropic; constructor-defined specialists |
-| Skills agent | `examples.skills_agent` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
-| Knowledge agent | `examples.knowledge_agent` | BM25F retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL; configured provider/model |
-| Sandboxed coder | `examples.sandboxed_coder` | Anthropic; process resource limits, temporary execution directory |
-| Workflow evaluations | `examples.run_evals` | `langsmith` extra; offline by default, optional live model mode |
-| LangSmith tracing | `examples.langsmith_tracing` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
-| PostgreSQL runtime | `examples.postgres_runtime` | `postgres` extra, `DATABASE_URL`, Anthropic key |
-| MCP agent | `examples.mcp_agent` | `mcp` extra, Anthropic key, stdio command or SSE URL |
+The library lists every script in `examples/`, grouped by the same topics as the
+folders. Each entry runs the file unchanged, as `python examples/<topic>/<file>.py`.
+
+| Topic | UI entry | Script | Setup / behavior |
+|---|---|---|---|
+| Basics | Prompt caching | `01-basics/prompt_caching.py` | Offline |
+| Basics | Progress and waiting | `01-basics/progress_and_waiting.py` | Offline; prints every event as it arrives |
+| Basics | Streaming chat | `01-basics/streaming_chat.py` | Anthropic; send follow-up messages or `quit` |
+| Basics | Switching providers | `01-basics/switching_providers.py` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
+| Tools | Filesystem tools and permissions | `02-tools/filesystem_tools_and_permissions.py` | Anthropic; writes and shell commands ask for approval |
+| Tools | MCP servers | `02-tools/mcp_servers.py` | `mcp` extra, Anthropic key, stdio command or SSE URL |
+| Skills | Skills, loaded on demand | `03-skills/skills_lazy_loading.py` | Offline; displays real skill and hook events |
+| Skills | Skills with a live model | `03-skills/skills_interactive.py` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
+| Context | Knowledge bundles (OKF) | `04-context/knowledge_bundles_okf.py` | Retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL |
+| Context | Memory tools | `04-context/custom_memory_tools.py` | Anthropic; notes belong to the run's working directory |
+| Context | Planning with to-dos | `04-context/planning_todos.py` | Offline |
+| Context | Condensing a long history | `04-context/condensing_a_long_history.py` | Offline |
+| Control | Loop guard | `05-control/loop_guard.py` | Offline |
+| Control | Retries and fallback | `05-control/retries_and_fallback.py` | Offline |
+| Control | Delegating to subagents | `05-control/delegating_to_subagents.py` | Anthropic; constructor-defined specialists |
+| Control | Autonomous task runner | `05-control/autonomous_task_runner.py` | Anthropic; one task, writes and runs the deliverable |
+| Durability | Approvals and resume | `06-durability/tool_approvals_and_resume.py` | Offline; choose Allow once or Deny in the browser |
+| Durability | Durable runs on PostgreSQL | `06-durability/durable_crash_recovery.py` | `postgres` extra, `DATABASE_URL`, Anthropic key |
+| Durability | Session snapshots | `06-durability/session_snapshots.py` | Offline |
+| Quality | Evaluating with datasets | `07-quality/evaluating_with_datasets.py` | `langsmith` extra; offline by default, optional live model mode |
+| Quality | Decisions: routing and classification | `07-quality/decisions_routing.py` | Offline fixed decisions |
+| Quality | Decisions: answer review | `07-quality/decisions_answer_review.py` | Offline fixed decisions |
+| Quality | Tracing with LangSmith | `07-quality/tracing_with_langsmith.py` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
+| Quality | Flight recorder | `07-quality/flight_recorder.py` | Offline; download `incident.hx` after completion |
+| Sandboxes | Sandbox isolation tiers | `08-sandboxes/sandbox_isolation_tiers.py` | Anthropic; process tier by default |
+| Sandboxes | Tools in an OpenShell sandbox | `08-sandboxes/openshell_backend.py` | `openshell` extra, a running OpenShell gateway, Anthropic key |
 
 Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool
-behavior. The launcher bridges `input()` and the shared console prompt through a
-separate control pipe, so ordinary tool output cannot be confused with a prompt.
+behavior. The launcher runs the script with `runpy.run_path` and bridges its `input()` calls
+through a separate control pipe, so ordinary tool output cannot be confused with a prompt.
+It also adds tool hooks to every `Agent` the script constructs, so each tool call
+and result reaches the browser as a card beside the output; the example file
+itself is not changed.
 An answer must match the exact pending prompt ID; duplicate and stale approvals
 are rejected. Closing an output tab does not stop a run. Use **Stop run** to
 terminate the managed process group. Deliberately detached child processes are
 outside that cleanup guarantee.
 
-The original web demo retains automatic permissions for its host tools; it opens
-in another tab. It is independent of the new General chat interface.
-
-## General chat
+## Build your agent
 
 Each conversation owns a separate `Agent`, message history, and working directory.
-The assistant can calculate, list/read workspace files, and request file changes.
-File changes wait for the SDK's permission callback and an explicit browser
-decision. There is no shell tool in general chat. Tool calls and their results are
-correlated by ID, and streamed failures are visible. A conversation permits one
-active turn at a time; separate conversations can run concurrently.
+Out of the box the agent can calculate, read and write workspace files, run shell
+commands in that directory, and ask you a question when a request is ambiguous.
+Writes and shell commands wait for an explicit browser decision. Tool calls and
+their results are correlated by ID, and streamed failures are visible. A
+conversation permits one active turn at a time; separate conversations can run
+concurrently.
 
-Use the **conversation setup** button beside the chat title to configure a chat
-before or after its first turn. It can change the system prompt, upload Markdown
-skills, and connect a local stdio or remote HTTP/SSE MCP server. Skills are made
-available through the lazy `Skill` tool. MCP tool calls default to `ASK`; the setup
-screen also permits an explicit `ALLOW` or `DENY` policy.
+The settings button beside the agent's name opens **Build your agent**, before or
+after the first turn:
+
+- **System prompt.** The agent's instructions.
+- **Tools.** Every tool the agent can call, grouped by where it comes from, with
+  its permission; switch any off for the next turn.
+- **Skills.** Upload Markdown skills; the agent loads one only when it calls the
+  lazy `Skill` tool.
+- **MCP servers.** Connect a local stdio or remote HTTP/SSE server. Its tools
+  default to `ASK`; `ALLOW` or `DENY` can be chosen instead.
+- **Subagents.** Add a specialist with a name, a description that tells your
+  agent when to delegate, its own instructions, and the tools it may use (taken
+  from this conversation, so file tools stay in its directory and approvals still
+  come to the browser). Each becomes a `delegate_<name>` tool; every delegation
+  runs a fresh child agent on the conversation's provider and model and returns
+  its answer. With the local demo provider, subagents still run on Anthropic
+  and need `ANTHROPIC_API_KEY`.
 
 Setup changes retain conversation history and rebuild only that conversation's
 agent. They cannot be made during a response. Uploaded skills live in that

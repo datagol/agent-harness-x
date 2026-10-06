@@ -22,7 +22,7 @@ from .extensions.base import Extension, close_extensions, install_extensions, va
 from .mcp import MCPManager
 from .providers import LLMProvider, make_provider
 from .providers.registry import BUILTIN_PROVIDERS
-from .sandbox import Sandbox
+from .sandbox import ExecutionBackend
 from .skills import SkillManager
 from .knowledge import GitSource, KnowledgeManager
 from .subagents import SubAgent, install_subagent, prepare_subagents
@@ -64,7 +64,7 @@ class Agent:
         permissions: PermissionManager | None = None,
         hooks: HookManager | None = None,
         middleware: MiddlewarePipeline | None = None,
-        sandbox: Sandbox | None = None,
+        sandbox: ExecutionBackend | None = None,
         mcp: MCPManager | None = None,
         skills: SkillManager | list[str] | None = None,
         knowledge: KnowledgeManager | Sequence[str | Path | GitSource] | None = None,
@@ -98,6 +98,9 @@ class Agent:
         self.middleware = middleware or MiddlewarePipeline()
         if sandbox is not None and getattr(sandbox, "hooks", None) is None:
             sandbox.hooks = self.hooks  # SANDBOX_EXEC events reach this agent's observers
+        bind = getattr(sandbox, "bind_agent", None)
+        if callable(bind):
+            bind(self)  # an agent-owned backend (OpenShell) starts, syncs and closes with this agent
         limits = self.config.limits
         self.guardrails = GuardrailsEngine(
             max_iterations=limits.max_iterations, max_cost_dollars=limits.max_cost_dollars,
@@ -207,6 +210,11 @@ class Agent:
         if self._owns_memory:
             try:
                 await self.memory.aclose()
+            except Exception as exc:
+                errors.append(exc)
+        if getattr(self.sandbox, "agent_owned", False):
+            try:
+                await self.sandbox.aclose()
             except Exception as exc:
                 errors.append(exc)
         materialized = getattr(self, "_materialized_artifacts", None)

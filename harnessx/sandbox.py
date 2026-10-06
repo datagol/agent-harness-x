@@ -20,9 +20,38 @@ import shutil
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from .types import SandboxConfig, SandboxResult
+
+
+@runtime_checkable
+class ExecutionBackend(Protocol):
+    """Where the built-in tools run.
+
+    ``run_bash`` needs only ``execute_command``. When ``owns_filesystem`` is
+    true the file tools run there too: every path goes through
+    ``resolve_path`` and every operation is a shell snippet passed to
+    ``execute_command``, so a backend only has to run ``sh`` with coreutils and
+    ``find``. The local :class:`Sandbox` leaves file tools on the host.
+    """
+
+    owns_filesystem: bool
+    hooks: Any
+
+    async def execute_command(
+        self, command: str, *, timeout: int | None = None, stdin: bytes | None = None,
+    ) -> SandboxResult: ...
+
+    async def execute(self, code: str, language: str = "python", *, timeout: int | None = None) -> SandboxResult: ...
+
+    def resolve_path(self, path: str, *, write: bool = False) -> str:
+        """The backend-side absolute path for a tool's ``path``.
+
+        Raises PermissionError for a path the backend does not expose, or that
+        it exposes read-only when ``write`` is true.
+        """
+        ...
 
 
 class Sandbox:
@@ -33,6 +62,9 @@ class Sandbox:
             result = await sandbox.execute("print('hello')")
             result = await sandbox.execute_command("ls -la")
     """
+
+    # File tools stay on the host; only run_bash executes here.
+    owns_filesystem = False
 
     def __init__(self, config: SandboxConfig | None = None, *, hooks: Any | None = None) -> None:
         self.config = config or SandboxConfig()
@@ -51,6 +83,7 @@ class Sandbox:
             data={
                 "kind": kind, "tier": self.config.tier, "exit_code": result.exit_code,
                 "timed_out": result.timed_out, "execution_time_ms": result.execution_time_ms,
+                "denials": list(result.denials),
             },
         ))
 
@@ -89,39 +122,72 @@ class Sandbox:
             self._workdir = self._temp_dir_obj.name
         return self._workdir
 
-    async def execute(self, code: str, language: str = "python") -> SandboxResult:
-        """Execute code in the sandbox."""
+    def _timeout(self, timeout: int | None) -> int:
+        """A call's own limit, never above the configured one."""
+        if timeout is None:
+            return self.config.timeout_seconds
+        if type(timeout) is not int or timeout <= 0:
+            raise ValueError("timeout must be a positive integer")
+        return min(timeout, self.config.timeout_seconds)
+
+    async def execute(self, code: str, language: str = "python", *, timeout: int | None = None) -> SandboxResult:
+        """Execute code in the sandbox.
+
+        ``timeout`` shortens the configured limit for this call; it cannot extend it.
+        """
         self._validate_backend()
         self._ensure_workdir()
+        limit = self._timeout(timeout)
 
         tier = self.config.tier
         if tier == "docker":
-            result = await self._execute_docker(code, language)
+            result = await self._execute_docker(code, language, limit)
         elif tier == "seatbelt":
-            result = await self._execute_seatbelt(code, language)
+            result = await self._execute_seatbelt(code, language, limit)
         else:
-            result = await self._execute_process(code, language)
+            result = await self._execute_process(code, language, limit)
         await self._observe("code", result)
         return result
 
-    async def execute_command(self, command: str) -> SandboxResult:
-        """Execute a shell command in the sandbox."""
+    async def execute_command(
+        self, command: str, *, timeout: int | None = None, stdin: bytes | None = None,
+    ) -> SandboxResult:
+        """Execute a shell command in the sandbox.
+
+        ``timeout`` shortens the configured limit for this call; it cannot
+        extend it. ``stdin`` is fed to the command (process and seatbelt tiers).
+        """
         self._validate_backend()
         self._ensure_workdir()
+        limit = self._timeout(timeout)
+        if stdin is not None and not isinstance(stdin, bytes):
+            raise TypeError("stdin must be bytes")
 
         tier = self.config.tier
         if tier == "docker":
-            result = await self._execute_docker_command(command)
+            if stdin is not None:
+                raise ValueError("The docker tier does not support stdin")
+            result = await self._execute_docker_command(command, limit)
         elif tier == "seatbelt":
-            result = await self._execute_seatbelt_command(command)
+            result = await self._execute_seatbelt_command(command, limit, stdin)
         else:
-            result = await self._execute_process_command(command)
+            result = await self._execute_process_command(command, limit, stdin)
         await self._observe("command", result)
         return result
 
+    def resolve_path(self, path: str, *, write: bool = False) -> str:
+        """``path`` inside the working directory; anything outside is refused."""
+        if not isinstance(path, str) or not path or "\0" in path:
+            raise ValueError("path must be a nonempty string without NUL bytes")
+        workdir = self._ensure_workdir()
+        target = os.path.normpath(os.path.join(workdir, path))
+        if os.path.commonpath([workdir, target]) != workdir:
+            raise PermissionError(f"Access denied: path {path!r} is outside the sandbox")
+        return target
+
     # ── Tier 1: Process sandbox ──────────────────────────────────────────
 
-    async def _execute_process(self, code: str, language: str) -> SandboxResult:
+    async def _execute_process(self, code: str, language: str, timeout: int) -> SandboxResult:
         """Run a host subprocess in a temporary working directory."""
         workdir = self._ensure_workdir()
         start = time.monotonic()
@@ -138,18 +204,17 @@ class Sandbox:
                 exit_code=1,
             )
 
-        return await self._run_subprocess(cmd, workdir, start)
+        return await self._run_subprocess(cmd, workdir, start, timeout)
 
-    async def _execute_process_command(self, command: str) -> SandboxResult:
+    async def _execute_process_command(self, command: str, timeout: int, stdin: bytes | None) -> SandboxResult:
         workdir = self._ensure_workdir()
         start = time.monotonic()
         cmd = ["/bin/sh", "-c", command]
-        return await self._run_subprocess(cmd, workdir, start)
+        return await self._run_subprocess(cmd, workdir, start, timeout, stdin)
 
     async def _run_subprocess(
-        self, cmd: list[str], workdir: str, start: float
+        self, cmd: list[str], workdir: str, start: float, timeout: int, stdin: bytes | None = None,
     ) -> SandboxResult:
-        timeout = self.config.timeout_seconds
         env = self._build_env(workdir)
 
         # Build preexec_fn for resource limits (Unix only)
@@ -158,6 +223,7 @@ class Sandbox:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir,
@@ -168,7 +234,7 @@ class Sandbox:
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
+                    proc.communicate(stdin), timeout=timeout
                 )
             except asyncio.TimeoutError:
                 try:
@@ -267,7 +333,7 @@ class Sandbox:
 
     # ── Tier 2: Docker sandbox ───────────────────────────────────────────
 
-    async def _execute_docker(self, code: str, language: str) -> SandboxResult:
+    async def _execute_docker(self, code: str, language: str, timeout: int) -> SandboxResult:
         """Docker container with resource limits and network isolation."""
         try:
             import docker  # noqa: F401  (availability probe)
@@ -286,7 +352,7 @@ class Sandbox:
             return SandboxResult(stderr=f"Unsupported language: {language}", exit_code=1)
 
         try:
-            return await self._run_docker(["python3", "/sandbox/_sandbox_code.py"], workdir, start)
+            return await self._run_docker(["python3", "/sandbox/_sandbox_code.py"], workdir, start, timeout)
         except Exception as e:
             elapsed = (time.monotonic() - start) * 1000
             error_msg = str(e)
@@ -298,7 +364,7 @@ class Sandbox:
                 execution_time_ms=elapsed,
             )
 
-    async def _execute_docker_command(self, command: str) -> SandboxResult:
+    async def _execute_docker_command(self, command: str, timeout: int) -> SandboxResult:
         try:
             import docker  # noqa: F401  (availability probe)
         except ImportError as exc:
@@ -308,12 +374,12 @@ class Sandbox:
         start = time.monotonic()
 
         try:
-            return await self._run_docker(["/bin/sh", "-c", command], workdir, start)
+            return await self._run_docker(["/bin/sh", "-c", command], workdir, start, timeout)
         except Exception as e:
             elapsed = (time.monotonic() - start) * 1000
             return SandboxResult(stderr=str(e), exit_code=-1, execution_time_ms=elapsed)
 
-    async def _run_docker(self, command, workdir, start):
+    async def _run_docker(self, command, workdir, start, timeout):
         import docker  # noqa: F401  (availability probe)
         client = await asyncio.to_thread(docker.from_env)
         container = None
@@ -338,7 +404,7 @@ class Sandbox:
                 container = await create
                 raise
             try:
-                outcome = await asyncio.to_thread(container.wait, timeout=self.config.timeout_seconds)
+                outcome = await asyncio.to_thread(container.wait, timeout=timeout)
             except Exception as exc:
                 # The SDK wait uses an HTTP timeout; always remove/kill on failure.
                 return SandboxResult(stderr=str(exc), exit_code=-1, timed_out="timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower())
@@ -356,7 +422,7 @@ class Sandbox:
 
     # ── Tier 3: macOS Seatbelt sandbox ───────────────────────────────────
 
-    async def _execute_seatbelt(self, code: str, language: str) -> SandboxResult:
+    async def _execute_seatbelt(self, code: str, language: str, timeout: int) -> SandboxResult:
         """Run under the configured macOS Seatbelt access profile."""
         if language != "python":
             return SandboxResult(stderr=f"Unsupported language: {language}", exit_code=1)
@@ -379,9 +445,9 @@ class Sandbox:
             sys.executable, code_file,
         ]
 
-        return await self._run_subprocess(cmd, workdir, start)
+        return await self._run_subprocess(cmd, workdir, start, timeout)
 
-    async def _execute_seatbelt_command(self, command: str) -> SandboxResult:
+    async def _execute_seatbelt_command(self, command: str, timeout: int, stdin: bytes | None) -> SandboxResult:
         workdir = self._ensure_workdir()
         start = time.monotonic()
 
@@ -391,7 +457,7 @@ class Sandbox:
             f.write(profile)
 
         cmd = ["sandbox-exec", "-f", profile_file, "/bin/sh", "-c", command]
-        return await self._run_subprocess(cmd, workdir, start)
+        return await self._run_subprocess(cmd, workdir, start, timeout, stdin)
 
     def _generate_seatbelt_profile(self, workdir: str) -> str:
         """Generate a Seatbelt .sb profile for macOS sandboxing."""

@@ -15,6 +15,19 @@ subagents.
 
 ### Changed
 
+- **Examples are standalone scripts, grouped by topic, run by path.** The 20
+  modules under `examples/` became 26 files in `01-basics/` through
+  `08-sandboxes/`, renamed for what they teach (`simple_chat` is
+  `01-basics/streaming_chat.py`, `postgres_runtime` is
+  `06-durability/durable_crash_recovery.py`). Run them as
+  `python examples/05-control/loop_guard.py`; `python -m examples.*` no longer
+  works and `examples` is no longer a package. No file imports a shared
+  helper, so each can be copied out and run after `pip install harnessx`.
+  `jev_classification` is part of `07-quality/decisions_routing.py`;
+  `memory_agent` became the much shorter `04-context/custom_memory_tools.py`
+  over the built-in memory tools. Six new recipes cover loop guard, planning
+  to-dos, condensing, retries and fallback, session snapshots, and progress
+  events. harness-web runs every example by path and groups them by topic.
 - **Reply budgets come from the model.** With `AgentConfig.max_tokens` unset,
   the budget is the model's own output limit capped at 32K, fitted into what is
   left of the context window. Limits are resolved from what the application
@@ -108,9 +121,44 @@ subagents.
   `IncompleteStreamError`, `StopReason.REFUSAL`, `StopReason.PAUSE_TURN`.
 - `RetryPolicy.stream_idle_timeout_seconds`, `Limits.final_answer_on_limit`,
   `ConversationMemory.prune_tool_results()`.
+- `ExecutionBackend`, the protocol the built-in tools run against. A backend
+  whose `owns_filesystem` is true takes the file tools too: `read_file`,
+  `write_file`, `edit_file`, `delete`, `glob`, `grep`, `list_directory` and
+  `generate_file` run inside it with the host tools' exact output, as POSIX
+  shell snippets through `execute_command`. The local `Sandbox` keeps file tools
+  on the host. Groundwork for a remote sandbox backend.
+- `Sandbox.execute_command(..., timeout=, stdin=)` and `execute(..., timeout=)`:
+  a call's own limit, capped by `SandboxConfig.timeout_seconds`, and input fed
+  to the command (process and seatbelt tiers). `Sandbox.resolve_path()`.
+- `harnessx.openshell.OpenShellSandbox` (`pip install harnessx[openshell]`):
+  NVIDIA OpenShell as the execution backend. `Agent(config,
+  sandbox=OpenShellSandbox(project="./repo"))` runs `run_bash` and the file
+  tools in an OpenShell sandbox while the loop, model calls and memory stay
+  here. The agent creates the sandbox on the first tool call that needs it,
+  copies the project in, copies changed and deleted files back after every
+  run, and deletes the sandbox when it closes (`keep=True` leaves it). A local
+  file edited during a run is never overwritten; the sandbox's version is
+  written beside it as `<file>.sandbox`. Local paths into the project are
+  translated; `inputs=` adds read-only folders. The sandbox is named after the
+  session, so a resumed session finds it again. Try it with
+  `examples/08-sandboxes/openshell_backend.py`.
+- `SandboxResult.denials` and `SandboxExecData.denials`: what a sandbox's
+  network policy refused. `run_bash` tells the model when a command was
+  blocked by policy rather than by the network.
+- `OpenShellSandbox(allow=, secrets=, policy=, providers=)`. `allow` opens
+  hosts (with well-known companions) to every command the agent runs; `secrets`
+  makes environment variables usable but unreadable in the sandbox, bound to
+  their hosts through a provider HarnessX creates and removes; `policy` takes
+  OpenShell's own YAML. A refused connection is reported from OpenShell's
+  audit log, so the model learns which host was blocked rather than reading
+  "Permission denied". `pending_rules()`, `approve_rule()`, `reject_rule()`
+  and `policy()` reach OpenShell's drafted rules and the live policy.
 
 ### Fixed
 
+- `run_bash` in a sandbox honours the model's `timeout` instead of always
+  using the sandbox's own limit. Sandbox commands get closed stdin rather than
+  inheriting the host process's.
 - Learned model limits are scoped to the provider and exact model/deployment;
   fallback member caps and repaired budgets survive snapshots. Configured
   fallback budgets cannot override a learned cap. Custom providers' existing
@@ -122,6 +170,7 @@ subagents.
   scheduling changes are guarded by the `harness-reliability-v2` patch marker.
 - Concurrent MCP callers share discovery and its result; cancelling a waiter
   leaves the connection owner alive. Disconnect releases pending waiters.
+- Docker Compose publishes the web app and Temporal ports on loopback only.
 - Condensing mid-run no longer reports itself as a retry: no spurious
   `ATTEMPT_RESET`, no usage marked incomplete, and the summary keeps its full
   retry budget.

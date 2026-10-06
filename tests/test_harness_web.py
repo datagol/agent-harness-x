@@ -2,7 +2,6 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-import importlib.util
 import json
 from pathlib import Path
 import socket
@@ -21,7 +20,8 @@ from harness_web.files import open_workspace_file
 from harness_web.runs import RunManager
 from harness_web.server import create_app
 from harnessx import PermissionLevel, ProviderResponse, ToolCall
-from examples._fixtures import ScriptedProvider
+from example_loader import example_scripts
+from scripted_provider import ScriptedProvider
 
 
 @pytest.fixture(autouse=True)
@@ -75,14 +75,11 @@ def output(run):
 
 
 def test_catalog_covers_every_example_entry_point(tmp_path):
-    expected = {
-        path.stem
-        for path in (ROOT / "examples").glob("*.py")
-        if not path.name.startswith("_")
-    }
-    assert set(CATALOG) == expected
+    expected = {path.relative_to(ROOT / "examples").as_posix() for path in example_scripts()}
+    assert {item.path for item in CATALOG.values()} == expected
     for item in CATALOG.values():
-        assert importlib.util.find_spec(item.module)
+        assert item.file.is_file() and item.id == item.file.stem
+        assert item.command == f"python examples/{item.path}"
         config = {
             "server": "fixture",
             "command": "python3",
@@ -90,8 +87,8 @@ def test_catalog_covers_every_example_entry_point(tmp_path):
         }
         args = arguments(item, config, tmp_path)
         assert isinstance(args, list) and all(isinstance(arg, str) for arg in args)
-    assert arguments(CATALOG["run_evals"], {}, tmp_path) == ["--offline"]
-    assert arguments(CATALOG["run_evals"], {"mode": "live"}, tmp_path) == []
+    assert arguments(CATALOG["evaluating_with_datasets"], {}, tmp_path) == ["--offline"]
+    assert arguments(CATALOG["evaluating_with_datasets"], {"mode": "live"}, tmp_path) == []
     assert arguments(CATALOG["flight_recorder"], {}, tmp_path)[-1] == str(
         tmp_path / "incident.hx"
     )
@@ -104,7 +101,7 @@ async def test_health_missing_credentials_and_local_request_boundary(tmp_path):
         assert health["app"] == "harness-web"
         assert health["providers"][0]["missing"] == ["ANTHROPIC_API_KEY"]
         assert len((await client.get("/api/examples")).json()) == len(CATALOG)
-        response = await client.post("/api/runs", json={"example_id": "coding_agent"})
+        response = await client.post("/api/runs", json={"example_id": "filesystem_tools_and_permissions"})
         assert response.status_code == 422 and "ANTHROPIC_API_KEY" in response.text
         assert not app.state.manager.runs
         assert (
@@ -112,13 +109,13 @@ async def test_health_missing_credentials_and_local_request_boundary(tmp_path):
         ).status_code == 404
         assert (
             await client.post(
-                "/api/runs", json={"example_id": "skills_demo", "command_line": "bad"}
+                "/api/runs", json={"example_id": "skills_lazy_loading", "command_line": "bad"}
             )
         ).status_code == 422
         assert (
             await client.post(
                 "/api/runs",
-                json={"example_id": "skills_demo"},
+                json={"example_id": "skills_lazy_loading"},
                 headers={"origin": "https://unrelated.example"},
             )
         ).status_code == 403
@@ -141,7 +138,7 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
     monkeypatch.setattr("harness_web.catalog.installed", lambda module: True)
     async with web(tmp_path) as (app, client):
         body = {
-            "example_id": "provider_chat",
+            "example_id": "switching_providers",
             "provider": "openai",
             "model": "fixture-model",
             "streaming": False,
@@ -160,7 +157,7 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
         await run.task
         assert captured == [
             (
-                "provider_chat",
+                "switching_providers",
                 ["--provider", "openai", "--model=fixture-model", "--no-stream"],
                 "40 * 10",
             )
@@ -169,19 +166,36 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
 
 
 @pytest.mark.asyncio
+async def test_an_example_run_reports_every_tool_call_as_a_structured_event(tmp_path):
+    async with web(tmp_path) as (app, client):
+        run_id = await start(client, "loop_guard")
+        run = app.state.manager.runs[run_id]
+        await asyncio.wait_for(run.task, 30)
+        assert run.status == "completed", output(run)
+        events = [event["event"] for event in run.events if event["type"] == "agent"]
+        starts = [e["data"] for e in events if e["type"] == "tool_call_start"]
+        results = [e["data"] for e in events if e["type"] == "tool_result"]
+        assert [call["name"] for call in starts] == ["check_build"] * 3
+        assert starts[0]["input"] == {"job": "1234"} and starts[0]["agent"] == 1
+        # Results pair with their calls and carry what the tool returned.
+        assert [r["tool_call_id"] for r in results] == [call["id"] for call in starts]
+        assert results[-1]["content"] == "build 1234: queued (position 4)"
+        assert not any(r["is_error"] for r in results)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "example_id, expected",
     [
-        ("skills_demo", "SKILL_INVOKED"),
+        ("skills_lazy_loading", "SKILL_INVOKED"),
         ("flight_recorder", "Playback made zero model/tool calls"),
-        ("run_evals", "SCRIPTED FIXTURE"),
-        ("jev_routing", '"route": "sql"'),
-        ("jev_classification", '"choice": "W2"'),
-        ("jev_answer_review", '"probability": 0.96'),
+        ("evaluating_with_datasets", "SCRIPTED FIXTURE"),
+        ("decisions_routing", '"route": "sql"'),
+        ("decisions_answer_review", '"probability": 0.96'),
     ],
 )
 async def test_real_offline_example_and_event_replay(tmp_path, example_id, expected):
-    if example_id == "run_evals":
+    if example_id == "evaluating_with_datasets":
         pytest.importorskip("langsmith")
     async with web(tmp_path) as (app, client):
         run_id = await start(client, example_id)
@@ -222,7 +236,7 @@ async def test_original_persisted_approval_waits_for_exact_browser_prompt(
     tmp_path, decision, exists
 ):
     async with web(tmp_path) as (app, client):
-        run_id = await start(client, "runtime_approvals")
+        run_id = await start(client, "tool_approvals_and_resume")
         run = app.state.manager.runs[run_id]
         await wait_status(run, "waiting")
         assert "Note exists: False" in output(run)
@@ -250,7 +264,7 @@ async def test_original_persisted_approval_waits_for_exact_browser_prompt(
 @pytest.mark.asyncio
 async def test_stop_pending_process_and_reject_late_approval(tmp_path):
     async with web(tmp_path) as (app, client):
-        run_id = await start(client, "runtime_approvals")
+        run_id = await start(client, "tool_approvals_and_resume")
         run = app.state.manager.runs[run_id]
         await wait_status(run, "waiting")
         prompt = run.pending["id"]
@@ -515,6 +529,8 @@ async def test_chat_setup_rebuilds_prompt_skills_and_mcp_without_losing_history(
         }
         assert tools["calculate"]["source"] == "builtin" and tools["calculate"]["permission"] == "allow"
         assert tools["write_file"]["permission"] == "ask" and tools["Skill"]["source"] == "skill"
+        assert tools["run_bash"]["source"] == "builtin" and tools["run_bash"]["permission"] == "ask"
+        assert tools["ask_user"]["permission"] == "allow", "a question needs no approval to be asked"
         assert all(tool["enabled"] for tool in tools.values())
 
         # Switch the MCP tool off: it leaves the model's registry but stays listed.
@@ -586,7 +602,7 @@ async def test_bounded_history_reports_gap_and_early_cancel_is_terminal(
 
 
 def test_mcp_arguments_validate_transports_and_keep_shell_characters_literal(tmp_path):
-    item = CATALOG["mcp_agent"]
+    item = CATALOG["mcp_servers"]
     with pytest.raises(ValueError):
         arguments(
             item,
@@ -616,3 +632,58 @@ def test_download_pins_the_file_before_a_concurrent_path_swap(tmp_path):
         assert stream.read() == b"intended download"
     with pytest.raises(OSError):
         open_workspace_file(workspace, "report.txt")
+
+
+@pytest.mark.asyncio
+async def test_build_your_agent_adds_subagents_that_delegate_with_only_their_tools(tmp_path, monkeypatch):
+    async with web(tmp_path) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()["id"]
+        chat = app.state.chats[chat_id]
+        (chat.directory / "notes.txt").write_text("ship on friday")
+        reviewer = {
+            "name": "reviewer", "description": "Reviews a file when asked for a second opinion.",
+            "instructions": "You review files and answer in one sentence.", "tools": ["read_file", "list_directory"],
+        }
+        updated = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [reviewer]})
+        assert updated.status_code == 200, updated.text
+        body = updated.json()
+        assert body["subagents"] == [{**reviewer, "tools": ["list_directory", "read_file"]}]
+        tools = {tool["name"]: tool for tool in body["tools"]}
+        assert tools["delegate_reviewer"]["source"] == "subagent"
+
+        # Bad definitions are refused and leave the agent as it was.
+        for bad, why in [
+            ({**reviewer, "tools": ["no_such_tool"]}, "does not have"),
+            ({**reviewer, "name": "two words"}, "use 1-55"),
+        ]:
+            refused = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [bad]})
+            assert refused.status_code == 422 and why in refused.text
+        twice = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [reviewer, reviewer]})
+        assert twice.status_code == 422 and "Two subagents" in twice.text
+        assert chat.agent.tools.has_tool("delegate_reviewer")
+
+        # A delegation runs a fresh child with the subagent's prompt and tools.
+        seen = []
+
+        def child_provider(*args, **kwargs):
+            class Child(ScriptedProvider):
+                async def create(self, **request):
+                    seen.append(request)
+                    return await super().create(**request)
+
+            return Child([
+                ProviderResponse(tool_calls=[ToolCall("r", "read_file", {"path": "notes.txt"})], stop_reason="tool_use"),
+                ProviderResponse(text="The note says to ship on Friday."),
+            ])
+
+        monkeypatch.setattr("harnessx.core.make_provider", child_provider)
+        result = await chat.agent.tools.execute(
+            ToolCall("d", "delegate_reviewer", {"task": "What does notes.txt say?"}), permissions=chat.agent.permissions,
+        )
+        assert not result.is_error and result.content == "The note says to ship on Friday."
+        assert seen[0]["system"].startswith("You review files")
+        # Its own tools, plus read_tool_result, which every agent has for spilled results.
+        assert sorted(tool["name"] for tool in seen[0]["tools"]) == ["list_directory", "read_file", "read_tool_result"]
+
+        cleared = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": []})
+        assert cleared.json()["subagents"] == [] and not chat.agent.tools.has_tool("delegate_reviewer")

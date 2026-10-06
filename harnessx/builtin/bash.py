@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import signal
 from typing import TYPE_CHECKING, Any
 
 from harnessx.types import PermissionLevel
 from ._registration import select_tools
+from .filesystem import _mark_builtin
 
 if TYPE_CHECKING:
     from harnessx.tools import ToolRegistry
@@ -115,7 +117,7 @@ def register_bash_tools(
                 command: The shell command to execute.
                 timeout: Maximum seconds to wait (default 30).
             """
-            result = await sandbox.execute_command(command)
+            result = await sandbox.execute_command(command, timeout=timeout)
             output = ""
             if result.stdout:
                 output += result.stdout
@@ -125,8 +127,14 @@ def register_bash_tools(
                 output += f"\n[timed out after {timeout}s]"
             if result.exit_code != 0:
                 output += f"\n[exit code: {result.exit_code}]"
+            denials = getattr(result, "denials", None)
+            if denials:
+                output += (f"\n[blocked by the sandbox's network policy: {', '.join(denials)}. "
+                           "This is not a network fault; ask the user to allow it.]")
             return output.strip() or "(no output)"
 
+        _mark_builtin(sandboxed_run_bash, sandbox, functools.partial(
+            register_bash_tools, include=["run_bash"], permission=permission, replace=True))
         registry.register_tool(sandboxed_run_bash, name="run_bash", permission=permission, replace=replace)
     elif cwd is not None:
         async def scoped_run_bash(command: str, timeout: int = 30) -> str:
@@ -138,8 +146,17 @@ def register_bash_tools(
             """
             return await _run_bash(command, timeout, cwd)
 
+        _mark_builtin(scoped_run_bash, None, functools.partial(
+            register_bash_tools, include=["run_bash"], permission=permission, replace=True))
         registry.register_tool(scoped_run_bash, name="run_bash", permission=permission, replace=replace)
     else:
-        registry.register_tool(run_bash, name="run_bash", permission=permission, replace=replace)
+        # The public function is shared, so the mark goes on a per-registration wrapper.
+        async def host_run_bash(command: str, timeout: int = 30) -> str:
+            return await run_bash(command, timeout)
+
+        host_run_bash.__doc__ = run_bash.__doc__
+        _mark_builtin(host_run_bash, None, functools.partial(
+            register_bash_tools, include=["run_bash"], permission=permission, replace=True))
+        registry.register_tool(host_run_bash, name="run_bash", permission=permission, replace=replace)
 
     return ["run_bash"]

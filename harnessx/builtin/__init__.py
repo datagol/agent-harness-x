@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .ask import register_ask_user_tool
 from .bash import register_bash_tools, run_bash
 from .file_output import make_downloadable
 from .filesystem import (
@@ -48,7 +49,7 @@ def register_all_tools(
 
     Args:
         registry: Target tool registry.
-        sandbox: Optional sandbox execution engine for bash.
+        sandbox: Optional execution backend for bash, and for the file tools when it owns its filesystem.
         long_term: Optional LongTermMemory instance.
         agent_memory: Optional AgentMemory instance.
         vector_store: Optional VectorMemoryStore instance.
@@ -76,6 +77,7 @@ def register_all_tools(
             max_directory_entries=max_directory_entries,
             output_dir=output_dir,
             replace=replace,
+            sandbox=sandbox,
         )
     )
     registered.extend(

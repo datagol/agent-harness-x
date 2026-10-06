@@ -6,7 +6,7 @@ import pytest
 from harnessx import Agent, PermissionLevel, PermissionManager, ToolCall, ToolRegistry
 from harnessx.builtin import register_all_tools, register_filesystem_tools, register_web_tools
 from harnessx.builtin.web import fetch_url
-from examples._fixtures import ScriptedProvider
+from scripted_provider import ScriptedProvider
 
 
 @pytest.mark.asyncio

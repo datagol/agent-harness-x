@@ -1,138 +1,125 @@
 # HarnessX examples
 
-Run these examples as modules from a checkout of the repository. The `examples`
-package loads the repository's `.env` without replacing variables already set in
-your environment. Examples are not included in the installed SDK wheel.
-
-To launch every example from a browser, use [harness-web](../harness-web/README.md).
-It includes live output, input and approval controls, generated-file downloads,
-and a separate general chat workspace.
+Every example is one Python file you run by its path:
 
 ```bash
 uv sync --all-extras
-uv run python -m examples.skills_demo
+python examples/05-control/loop_guard.py
 ```
 
-`uv sync` alone installs the SDK without integrations; add `--extra NAME` for only the extras
-listed below. Most interactive examples use the SDK's default Anthropic provider
-and require `ANTHROPIC_API_KEY`; they make billable model calls.
+They are plain scripts, not a package. Each file imports only `harnessx`, the
+standard library, `python-dotenv`, and the optional SDK it is about. Each loads
+the repository's `.env` without replacing variables already set in your shell.
+So you can copy any file into your own project after `pip install harnessx` and
+it runs the same. Examples are not part of the installed wheel.
 
-## Start without external services
+The folders go in reading order, from a first chat to isolation. Inside each
+folder, the files that need no API key come first in the tables below.
+
+To launch every example from a browser, with tool calls shown as they happen,
+use [harness-web](../harness-web/README.md). It also has a workspace where you
+build your own agent. In containers, with PostgreSQL, Temporal and Redis already
+running and no Python or Node to install:
 
 ```bash
-python -m examples.skills_demo
-python -m examples.prompt_caching
-python -m examples.runtime_approvals
-python -m examples.flight_recorder --output /tmp/invoice-incident.hx
-python -m examples.run_evals --offline  # Requires the langsmith extra.
-python -m examples.jev_routing --min-confidence 0.8
-python -m examples.jev_classification
-python -m examples.jev_answer_review
+docker compose up                                          # the browser at localhost:8765
+docker compose run --rm web python examples/03-skills/skills_lazy_loading.py
 ```
 
-These examples use scripted `LLMProvider` responses while exercising the real SDK
-engine, tools, hooks, approvals, recording, or evaluations. Their outcomes verify
-integration behavior, not model quality. The approval example prompts before
-writing a temporary note. The recorder's destination must not already exist;
-`.hx` is a ZIP archive of JSON records and optional captured artifacts.
+## No API key needed
 
-## All entry points
+These use a scripted model and run the real engine, tools, hooks, approvals,
+recording or evaluations. They verify integration behaviour, not model quality.
 
-| Command | Demonstrates | Requirements |
+```bash
+python examples/01-basics/prompt_caching.py
+python examples/01-basics/progress_and_waiting.py
+python examples/03-skills/skills_lazy_loading.py
+python examples/04-context/planning_todos.py
+python examples/04-context/condensing_a_long_history.py
+python examples/05-control/loop_guard.py
+python examples/05-control/retries_and_fallback.py
+python examples/06-durability/tool_approvals_and_resume.py   # asks one question
+python examples/06-durability/session_snapshots.py
+python examples/07-quality/decisions_routing.py --min-confidence 0.8
+python examples/07-quality/decisions_answer_review.py
+python examples/07-quality/flight_recorder.py --output /tmp/invoice-incident.hx
+python examples/07-quality/evaluating_with_datasets.py --offline   # needs the langsmith extra
+```
+
+## 01-basics
+
+| File | What it shows | Needs |
 |---|---|---|
-| `python -m examples.simple_chat` | Streaming chat, bounded arithmetic, workspace reads | Anthropic key |
-| `python -m examples.provider_chat --provider PROVIDER --model MODEL_ID` | Same calculator agent across five providers, streaming or ordinary runs | Selected provider's SDK extra and API key |
-| `python -m examples.coding_agent` | Coding tools, middleware, terminal permissions | Anthropic key; writes and shell calls ask for approval |
-| `python -m examples.memory_agent` | Persistent markdown notes and structured facts | Anthropic key; stores data in `.agent_memory/` |
-| `python -m examples.multi_agent` | Constructor-defined specialists with isolated conversations | Anthropic key; URL research requests ask for approval |
-| `python -m examples.skills_agent` | Interactive lazy skill loading | Anthropic key by default |
-| `python -m examples.skills_demo` | Skill invocation and hook ordering | No external services |
-| `python -m examples.knowledge_agent` | BM25F search, concept reads, and graph traversal over an OKF bundle | Anthropic key by default |
-| `python -m examples.prompt_caching` | Stable prompt prefix, the cache hint a provider receives, and cache read/write counters | No external services by default; `--live` uses the Anthropic key |
-| `python -m examples.jev_routing --min-confidence 0.8` | Choice selects one fixed agent factory; general fallback | No external services by default |
-| `python -m examples.jev_classification` | Choice classifies W2, Deposit, Insurance, Payroll, or unknown | No external services by default |
-| `python -m examples.jev_answer_review` | Score checks coverage; Noul checks evidence support after a completed run | No external services by default |
-| `python -m examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |
-| `python -m examples.runtime_approvals` | Persisted `ASK` approval finished with `approve(pending, resume=True)` | No external services; terminal input |
-| `python -m examples.flight_recorder --output incident.hx` | Retry history, middleware boundaries, offline playback | No external services; unused output path |
-| `python -m examples.postgres_runtime` | PostgreSQL runtime streaming and cleanup | `postgres` extra, `DATABASE_URL` or `--config PATH`, Anthropic key |
-| `python -m examples.postgres_runtime check` / `crash` / `status` / `resume` | Check storage, write a report, crash, and finish the same run without repeating the tool | `postgres` extra and `DATABASE_URL` or `--config PATH`; no model key |
-| `python -m examples.langsmith_tracing` | Explicit tracing and specialist spans | `langsmith` extra, Anthropic and LangSmith keys |
-| `python -m examples.run_evals --offline` | Three scripted math/selection evaluations | `langsmith` extra; no keys or uploads |
-| `python -m examples.run_evals` | The same cases against a live model | `langsmith` extra, Anthropic key; upload enabled when a LangSmith key exists |
-| `python -m examples.task_agent "TASK" -o FILE` | One-shot CLI agent: researches, writes the deliverable, runs it | Anthropic key; `TAVILY_API_KEY` adds web search, `LANGSMITH_API_KEY` adds tracing |
-| `python -m examples.mcp_agent --server NAME --command COMMAND` | Local MCP tools alongside native tools | `mcp` extra, Anthropic key, an installed MCP server |
+| `prompt_caching.py` | A stable prompt prefix, the cache hint a provider receives, cache read and write counters | Nothing; `--live` uses `ANTHROPIC_API_KEY` |
+| `progress_and_waiting.py` | A long run's event stream, including the `waiting` events sent while a slow model call is quiet (`ProgressPolicy`) | Nothing |
+| `streaming_chat.py` | Interactive streaming chat with a bounded calculator and workspace reads; `usage` prints token counts | `ANTHROPIC_API_KEY` |
+| `switching_providers.py` | The same agent on Anthropic, OpenAI, Gemini or OpenRouter; streaming or not; one-shot with `--prompt` | The provider's key and extra (below) |
 
-The files `_console.py`, `_calculator.py`, `_fixtures.py`, and `_decision_fixtures.py` are shared helpers.
-The `.md` files under `skills/` are sample skill inputs. `knowledge/` is a sample
-Open Knowledge Format bundle for `knowledge_agent`; set `AGENT_KNOWLEDGE` to a
-folder or git URL to load a different one.
+## 02-tools
 
-Jev examples print fixed fixture outputs unless `--live` is supplied. They do not
-measure model quality offline. For live decisions install `.[jev]` and set
-`TYPESAFE_API_KEY`. Live routing additionally requires `--model MODEL_ID` and the
-selected `--provider` credentials/extra. Live answer review sends a fixed answer
-and evidence to Jev; the agent remains scripted. See the [decision SDK guide](../doc/decisions.md)
-for the API, usage semantics, lifecycle, and examples. Routing requires an explicit
-confidence threshold; `0.8` demonstrates configuration and is not a calibrated default.
+| File | What it shows | Needs |
+|---|---|---|
+| `filesystem_tools_and_permissions.py` | The file and shell built-ins under `CliPermissionManager`: reads allowed, writes and commands asked first | `ANTHROPIC_API_KEY` |
+| `mcp_servers.py` | An MCP server's tools next to native ones; approvals for MCP tools | `ANTHROPIC_API_KEY`, `harnessx[mcp]`, an MCP server |
 
-`simple_chat` registers its calculator with `Agent(tools=[calculate])`; custom
-tools default to `ALLOW`, including tools registered after agent construction.
-Built-in helpers inherit the same policy. Examples that use `CliPermissionManager`
-opt into an `ASK` default, so writes and shell calls still request approval in the
-coding example. Explicit permissions and manager overrides take precedence.
+## 03-skills
 
-`multi_agent` uses `Agent(subagents=[SubAgent(...)])` to declare specialists.
-Each task receives a fresh conversation and returns its result to the orchestrator.
-See [subagents](../doc/subagents.md) and [tool registration](../doc/tools.md) for
-the API, permissions, and recovery boundary. `langsmith_tracing` retains a manual
-wrapper to demonstrate a child with its own tracing extension.
+| File | What it shows | Needs |
+|---|---|---|
+| `skills_lazy_loading.py` | The model sees a skill catalog and loads one body with the `Skill` tool; hook order | Nothing |
+| `skills_interactive.py` | A live model picking skills from `examples/skills/` when the task calls for them | `ANTHROPIC_API_KEY` (or `AGENT_PROVIDER` + `AGENT_MODEL`) |
 
-`skills_agent` and `knowledge_agent` also accept `AGENT_PROVIDER` and `AGENT_MODEL`. When choosing a
-different provider, install its SDK extra, set its API key, and specify a compatible
-model explicitly. `provider_chat` accepts the command-line selection described
-below. The remaining live examples use Anthropic unless edited.
+## 04-context
 
-## Try PostgreSQL recovery
+| File | What it shows | Needs |
+|---|---|---|
+| `planning_todos.py` | `write_todos` and `read_todos` on a multi-step task, and the `TODOS_UPDATED` events | Nothing |
+| `condensing_a_long_history.py` | Old tool output cleared first, then a summary, when the history outgrows `max_context_tokens` | Nothing |
+| `knowledge_bundles_okf.py` | Search, concept reads and link traversal over the OKF bundle in `examples/knowledge/` | `ANTHROPIC_API_KEY` (or `AGENT_PROVIDER` + `AGENT_MODEL`) |
+| `custom_memory_tools.py` | The built-in `save_memory` and `recall_memories`, plus two tools of your own over the same stores | `ANTHROPIC_API_KEY` |
 
-Follow the [PostgreSQL durability walkthrough](../doc/postgres_durability.md) for
-installation, connection setup, expected output, and recovery limits. Once
-the `postgres` extra is installed, use `examples/postgres.config.json` for local
-credentials. Copy `postgres.config.example.json` to that name if needed; the local
-file is Git-ignored. Fill in its connection details and password field, leaving
-`{password}` in the URL. Password URL encoding is automatic.
+## 05-control
 
-```bash
-python -m examples.postgres_runtime check --config examples/postgres.config.json
-python -m examples.postgres_runtime crash --config examples/postgres.config.json  # Exit 42.
-python -m examples.postgres_runtime status --config examples/postgres.config.json
-# Wait at least 30 seconds after the crash for the worker lease to expire.
-python -m examples.postgres_runtime resume --config examples/postgres.config.json
-```
+| File | What it shows | Needs |
+|---|---|---|
+| `loop_guard.py` | `LoopGuard` catching the same call repeating; the `REPETITION` hook; the note the model reads | Nothing |
+| `retries_and_fallback.py` | `RetryPolicy` retrying a 503, then `FallbackProvider` switching to a backup | Nothing |
+| `delegating_to_subagents.py` | An orchestrator handing one task to declared specialists (`Agent(subagents=[...])`) | `ANTHROPIC_API_KEY` |
+| `autonomous_task_runner.py` | One task from the command line: it writes the deliverable and runs it | `ANTHROPIC_API_KEY`; `TAVILY_API_KEY` adds web search, `LANGSMITH_API_KEY` tracing |
 
-`check` connects and prepares the runtime schema without running an agent. To use
-the live Anthropic model, run `python -m examples.postgres_runtime chat --config
-examples/postgres.config.json` with `ANTHROPIC_API_KEY` set. An explicit config
-overrides `DATABASE_URL`. If you prefer the environment variable, omit `--config`.
-The harness-web launcher continues to use `DATABASE_URL` from its environment.
+## 06-durability
 
-The default workspace is `.agent_sessions/postgres-demo`. Use the same checkout,
-database, and workspace for every command. For another experiment, pass a fresh
-`--workspace` to all three commands. The test uses fixed report data and scripted
-model responses; no model service is called. Running the module without a command
-still runs the original live-model streaming example, including in harness-web.
+| File | What it shows | Needs |
+|---|---|---|
+| `tool_approvals_and_resume.py` | A run paused on an `ASK` tool, persisted, then finished with `approve(pending, resume=True)` | Nothing; answers one question |
+| `session_snapshots.py` | `save_session` and `Agent.load_session` into a fresh agent: the step before a durable runtime | Nothing |
+| `durable_crash_recovery.py` | A run that survives its process crashing, on PostgreSQL, without repeating its tool | `harnessx[postgres]` and a database; `chat` also `ANTHROPIC_API_KEY` |
 
-Both PostgreSQL examples construct an `Agent` and pass it directly to
-`AgentRuntime(agent, backend=backend)`. The recovery process creates a fresh agent
-with the same configuration and tools before calling `resume(session_id)`;
-`AgentRegistry` and `AgentRef` are not required.
+## 07-quality
+
+| File | What it shows | Needs |
+|---|---|---|
+| `decisions_routing.py` | A decision model classifies a document, then routes a query to one of three agents | Nothing by default; `--live` needs `harnessx[jev]`, `TYPESAFE_API_KEY`, `--model` |
+| `decisions_answer_review.py` | Score for coverage and Noul for evidence support after a completed run | Nothing by default; `--live` needs `harnessx[jev]` and `TYPESAFE_API_KEY` |
+| `flight_recorder.py` | A run recorded, exported as an `.hx` bundle, and played back with zero model or tool calls | Nothing; the `--output` file must not exist |
+| `evaluating_with_datasets.py` | A small dataset of tool-selection and arithmetic cases, scored | `harnessx[langsmith]`; live mode `ANTHROPIC_API_KEY` |
+| `tracing_with_langsmith.py` | One run tree per turn in LangSmith, with spans for model and tool calls | `harnessx[langsmith]`, `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY` |
+
+## 08-sandboxes
+
+| File | What it shows | Needs |
+|---|---|---|
+| `sandbox_isolation_tiers.py` | A coding agent running its Python in a `Sandbox`; `--tier process` (default, not an isolation boundary), `docker` or `seatbelt` | `ANTHROPIC_API_KEY`; Docker for `--tier docker` |
+| `openshell_backend.py` | `OpenShellSandbox`: the agent stays here, its shell and file tools run in NVIDIA OpenShell; the project is copied in and changes come back after each run; `--allow` and `--secret` open hosts and pass secrets | `harnessx[openshell]`, a running OpenShell gateway, `ANTHROPIC_API_KEY` |
+
+`skills/` holds sample skills and `knowledge/` a sample Open Knowledge Format
+bundle; set `AGENT_KNOWLEDGE` to a folder or git URL to load another.
 
 ## Choose a provider
 
-`Agent()` and `simple_chat` default to **Anthropic** with `claude-sonnet-4-6`.
-The new `provider_chat` example uses that same default, and accepts an explicit
-provider and model on the command line. Configure the key for your chosen provider
-in the repository's `.env` or your environment:
+`Agent()` and the chat examples default to **Anthropic** with `claude-sonnet-4-6`.
+`switching_providers.py` takes the provider and model on the command line:
 
 | Provider | Add the extra | API key |
 |---|---|---|
@@ -143,93 +130,65 @@ in the repository's `.env` or your environment:
 | `azure` | `uv add "harnessx[azure]"` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_VERSION`; `--model` is the deployment name |
 
 ```bash
-python3 -m examples.provider_chat
-python3 -m examples.provider_chat --provider openai --model YOUR_OPENAI_MODEL
-python3 -m examples.provider_chat --provider gemini --model YOUR_GEMINI_MODEL
-python3 -m examples.provider_chat --provider openrouter --model YOUR_OPENROUTER_MODEL
-
-# One turn, without streaming (Anthropic by default):
-python3 -m examples.provider_chat --no-stream --prompt "What is 40 * 10?"
+python examples/01-basics/switching_providers.py
+python examples/01-basics/switching_providers.py --provider openai --model YOUR_OPENAI_MODEL
+python examples/01-basics/switching_providers.py --no-stream --prompt "What is 40 * 10?"
 ```
 
-Replace the `YOUR_..._MODEL` placeholders with model IDs available to your account
-that support tool calling. Non-Anthropic providers require `--model`; the example
-does not guess a compatible model or switch providers based on which key is set.
-It uses `AgentConfig(provider=..., model=...)` and `Agent(tools=[calculate])`.
-Both run modes use the same tools. Interactive mode keeps history across turns;
-use `usage` for token counts and `quit` to close the agent. `--prompt` exits with
-status 1 if the run fails. No files or shell commands are exposed by this example.
-
-In `harness-web`, select **Provider chat** and choose the provider, model, and
-response mode in its launch dialog. Credentials remain in the server environment.
+Non-Anthropic providers require `--model`; the example does not guess a model or
+switch providers based on which key is set.
 
 ## MCP connections
 
-Arguments in `--args` use shell-style quoting; the command is launched by MCP, not
-by a shell. Supply exactly one transport:
+`--args` uses shell-style quoting; MCP launches the command, not a shell. Give
+exactly one transport:
 
 ```bash
-python -m examples.mcp_agent --server files --command npx \
+python examples/02-tools/mcp_servers.py --server files --command npx \
   --args='-y @modelcontextprotocol/server-filesystem /tmp'
-
-python -m examples.mcp_agent --server remote --url http://localhost:8000/sse
+python examples/02-tools/mcp_servers.py --server remote --url http://localhost:8000/sse
 ```
 
-For local MCP servers, install the server's runtime separately. Tools default to
-terminal approval; `--permission allow` or `--permission deny` changes that policy.
+Tools default to terminal approval; `--permission allow` or `--permission deny`
+changes that.
 
-## Execution and persistence boundaries
+## PostgreSQL recovery
 
-The coding and web examples expose host tools. The web app is a trusted local,
-single-conversation demo with automatic tool permissions and no authentication.
-It serializes requests and session/tool changes. Changing MCP connections or
-clearing the session starts a new conversation. Its save/load endpoints use
-`Agent.save_session()` and `Agent.load_session()` with tools/skills rebound; snapshots
-restore conversation state, not in-flight execution.
+Follow the [PostgreSQL durability walkthrough](../doc/postgres_durability.md).
+Copy `06-durability/postgres.config.example.json` to `postgres.config.json` in
+the same folder (it is Git-ignored), fill in the connection details and password,
+and leave `{password}` in the URL:
 
-`sandboxed_coder` uses the **process** tier, which retains host filesystem and
-network access. Its working directory is temporary and removed on exit; the
-runtime's SQLite checkpoints do not make those temporary files durable. Docker
-and Seatbelt require their own configuration and qualification.
+```bash
+python examples/06-durability/durable_crash_recovery.py check  --config examples/06-durability/postgres.config.json
+python examples/06-durability/durable_crash_recovery.py crash  --config examples/06-durability/postgres.config.json  # exits 42
+python examples/06-durability/durable_crash_recovery.py status --config examples/06-durability/postgres.config.json
+# Wait at least 30 seconds after the crash for the worker lease to expire.
+python examples/06-durability/durable_crash_recovery.py resume --config examples/06-durability/postgres.config.json
+```
 
-The PostgreSQL example requires an existing database and permissions to provision
-the HarnessX schema. It does not start a database server. Recorder support is
-locally verified with SQLite; PostgreSQL recording needs live qualification and
-Temporal recording is not implemented. The remaining roadmap work is deferred.
+`check` prepares the schema without running an agent. With no command it runs
+the live streaming example. `--config` overrides `DATABASE_URL`. Use the same
+database and `--workspace` (default `.agent_sessions/postgres-demo`) for every
+command.
+
+## Boundaries
+
+- The filesystem example exposes host tools. A working directory is not a sandbox.
+- `sandbox_isolation_tiers.py` defaults to the **process** tier, which keeps host
+  filesystem and network access. Docker and Seatbelt are the isolating tiers.
+- Decision examples print fixed fixture outputs unless `--live` is given; offline
+  they do not measure model quality. Routing needs an explicit confidence
+  threshold; `0.8` demonstrates the setting and is not a calibrated default.
 
 ## Verification
 
 ```bash
-python -m pytest tests/test_examples.py tests/test_anthropic_provider.py -q
+python -m pytest tests/test_examples.py -q
 python -m mypy
 ```
 
-The smoke suite runs every Python example's main flow and the declared specialists.
-Provider chat is exercised for all four provider selections in both run modes,
-with scripted responses, real calculator execution, and cleanup checks.
-Interactive cases invoke their featured tools, including actual process execution
-of a fixed print statement in the sandbox example.
-It exercises the web routes using an in-process ASGI client, including concurrent
-tool-result correlation, SSE, snapshots, skills, and cleanup. Model, MCP, tracing,
-and PostgreSQL services are replaced with controlled stand-ins; network connections
-are blocked. PostgreSQL runtime flow uses SQLite in these smoke tests. The existing
-service integration tests separately require explicitly configured services.
-
-The Anthropic regression suite uses the installed SDK with in-memory HTTP and
-streaming responses. It covers nested caller/citation metadata, tool execution,
-follow-up request serialization, snapshot save/load, the simple chat calculator
-across turns, and the coding agent's CLI flow with a file-write approval. Requests
-are checked against the installed SDK's content-block parameter fields, including
-exclusion of SDK-only `parsed_output` metadata. Previously saved history is also
-checked through ordinary, streaming, and token-count requests. These tests do not
-call the live Anthropic API.
-
-The no-service demos also run as separate CLI processes with network access
-blocked. Type checking includes the entire examples directory in the normal
-project check, so future SDK changes are checked against these examples.
-
-The general evaluation runner's `offline=True` and `harnessx.evals.cli --offline`
-disable LangSmith upload; they still execute the supplied/live model. Only
-`examples.run_evals --offline` selects the scripted provider. Use the general eval
-CLI for broader benchmark suites; this example is intentionally limited to its
-three custom cases.
+The suite checks that every file stands alone. It runs every no-key example by
+path from a temporary directory, and drives the interactive ones through
+`input()` with scripted models. Model, MCP, tracing and PostgreSQL services are
+replaced with stand-ins, and network connections are blocked.

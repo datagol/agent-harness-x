@@ -17,6 +17,7 @@ import {
   Globe,
   History,
   LayoutGrid,
+  ListChecks,
   LoaderCircle,
   Menu,
   MessageSquare,
@@ -40,6 +41,10 @@ import {
   Zap,
   Brain,
   AlertCircle,
+  Layers,
+  Repeat,
+  RefreshCw,
+  Save,
 } from "lucide-react";
 import { api, finished, initialFeed, reduceFeed } from "./api.js";
 
@@ -57,14 +62,22 @@ const ICONS = {
   database: Database,
   plug: Plug,
   globe: Globe,
+  list: ListChecks,
+  layers: Layers,
+  repeat: Repeat,
+  refresh: RefreshCw,
+  save: Save,
 };
 const CATEGORIES = [
   "All examples",
-  "Agents",
-  "Runtime",
+  "Basics",
+  "Tools",
   "Skills",
-  "Evaluation",
-  "Integrations",
+  "Context",
+  "Control",
+  "Durability",
+  "Quality",
+  "Sandboxes",
 ];
 const go = (path) => {
   window.location.hash = path;
@@ -217,7 +230,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const missing =
-    example.id === "provider_chat"
+    example.id === "switching_providers"
       ? providers.find((provider) => provider.id === config.provider)
           ?.missing || []
       : config.mode === "live"
@@ -251,7 +264,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
           </div>
         </div>
         <p className="detail-note">{example.detail}</p>
-        {example.id === "provider_chat" && (
+        {example.id === "switching_providers" && (
           <div className="form-group">
             <label>
               Provider
@@ -300,7 +313,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             </label>
           </div>
         )}
-        {example.id === "run_evals" && (
+        {example.id === "evaluating_with_datasets" && (
           <label>
             Evaluation mode
             <select
@@ -323,7 +336,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             />
           </label>
         )}
-        {example.id === "mcp_agent" && (
+        {example.id === "mcp_servers" && (
           <div className="form-group">
             <label>
               Server name
@@ -401,7 +414,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
         <ErrorNotice message={error} />
         <div className="modal-footer">
           <span className="muted">
-            <Terminal size={14} /> {example.module}
+            <Terminal size={14} /> {example.command}
           </span>
           <button
             className="button primary"
@@ -409,7 +422,7 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             disabled={
               busy ||
               !!missing.length ||
-              (example.id === "provider_chat" && !config.model.trim())
+              (example.id === "switching_providers" && !config.model.trim())
             }
           >
             {busy ? (
@@ -455,7 +468,7 @@ function Library({ examples, loading, onSelect }) {
       <div className="featured">
         <div className="featured-copy">
           <div className="featured-label">
-            <Radio size={16} /> START HERE <span>NO API KEY</span>
+            <Radio size={16} /> START HERE <span>RUNS OFFLINE</span>
           </div>
           <h2>A complete run. Every detail.</h2>
           <p>
@@ -513,7 +526,7 @@ function Library({ examples, loading, onSelect }) {
             checked={offlineOnly}
             onChange={(e) => setOfflineOnly(e.target.checked)}
           />{" "}
-          No API key needed
+          Runs offline
         </label>
       </div>
       <div className="tabs" role="tablist" aria-label="Example categories">
@@ -557,7 +570,7 @@ function Library({ examples, loading, onSelect }) {
                   <span
                     className={`mode-label ${example.offline ? "offline" : ""}`}
                   >
-                    {example.offline ? "No API key" : "Live model"}
+                    {example.offline ? "Runs offline" : "Live model"}
                   </span>
                 </div>
                 <h3>{example.title}</h3>
@@ -580,8 +593,8 @@ function Library({ examples, loading, onSelect }) {
         </div>
       )}
       <div className="library-footnote">
-        <Code2 size={15} /> Every example runs the Python module in this
-        repository.
+        <Code2 size={15} /> Every example is a script in this repository's
+        examples folder, unchanged.
       </div>
     </div>
   );
@@ -628,14 +641,20 @@ function Prompt({ run, onReply }) {
     }
   }
   const approval = run.pending.kind === "approval";
+  const question = run.pending.kind === "question";
+  const choices = question ? run.pending.choices || [] : [];
   const tool = run.pending.tool;
   const summary = tool ? summarizeInput(tool.input) : [];
   return (
-    <div className={`prompt-box ${approval ? "approval" : ""}`}>
+    <div className={`prompt-box ${approval ? "approval" : ""} ${question ? "question" : ""}`}>
       <div className="prompt-title">
         {approval ? <ShieldCheck size={18} /> : <MessageSquare size={18} />}
         <strong>
-          {approval ? "Your approval is needed" : "Continue the conversation"}
+          {approval
+            ? "Your approval is needed"
+            : question
+              ? "The agent has a question"
+              : "Continue the conversation"}
         </strong>
         {approval && (
           <div className="approval-actions">
@@ -676,6 +695,17 @@ function Prompt({ run, onReply }) {
           )}
         </>
       ) : (
+        <>
+        {question && <p className="question-text">{run.pending.prompt}</p>}
+        {choices.length > 0 && (
+          <div className="question-choices">
+            {choices.map((choice) => (
+              <button key={choice} className="button" disabled={busy} onClick={() => send(choice)}>
+                {choice}
+              </button>
+            ))}
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -692,7 +722,11 @@ function Prompt({ run, onReply }) {
             placeholder={
               run.pending.kind === "message"
                 ? "Send a message, or type quit to finish…"
-                : run.pending.prompt || "Enter a response…"
+                : question
+                  ? choices.length
+                    ? "Or type your own answer…"
+                    : "Type your answer…"
+                  : run.pending.prompt || "Enter a response…"
             }
             disabled={busy}
             autoComplete="off"
@@ -706,6 +740,7 @@ function Prompt({ run, onReply }) {
             <span className="sr-only">Send reply</span>
           </button>
         </form>
+        </>
       )}
       <ErrorNotice message={error} />
     </div>
@@ -857,6 +892,17 @@ function RunView({ id, refresh, examples }) {
             </div>
           </section>
           <Prompt run={run} />
+          <section className="detail-panel run-tools">
+            <h3>
+              <Wrench size={17} /> Tool calls{" "}
+              <span className="count-pill">{feed.tools.length}</span>
+            </h3>
+            {feed.tools.length ? (
+              <ToolList tools={feed.tools} showAgent={new Set(feed.tools.map((t) => t.agent)).size > 1} />
+            ) : (
+              <p>Every tool call an agent in this example makes appears here, with its arguments and result.</p>
+            )}
+          </section>
         </div>
         <aside className="run-details">
           <div className="detail-panel">
@@ -865,7 +911,7 @@ function RunView({ id, refresh, examples }) {
             </h3>
             <dl>
               <dt>Entry point</dt>
-              <dd>{example?.module || run?.example_id}</dd>
+              <dd>{example?.command || run?.example_id}</dd>
               <dt>Run ID</dt>
               <dd className="mono">{id.slice(0, 12)}</dd>
               <dt>Execution</dt>
@@ -958,6 +1004,7 @@ function TurnActivity({ phase, since }) {
   const seconds = since ? Math.max(0, Math.round((now - since) / 1000)) : 0;
   let label = "Thinking";
   if (phase === "approval") label = "Waiting for your approval";
+  else if (phase === "question") label = "Waiting for your answer";
   else if (phase === "model" || phase === "text") label = "Working on the reply";
   else if (phase?.startsWith("tool:")) label = `Running ${phase.slice(5)}`;
   else if (phase === "waiting") label = "Reading the tool result";
@@ -994,12 +1041,83 @@ function FileLinks({ files = [] }) {
   );
 }
 
-function ToolList({ tools = [] }) {
+const PLAN_TOOLS = new Set(["write_todos", "read_todos"]);
+
+// The plan belongs where the agent wrote it, not pinned above work it did
+// before it had one. The first write_todos becomes the plan card, kept current
+// as items are ticked off; later edits and reads of the list are not repeated.
+function planSegments(message) {
+  const tools = new Map((message.tools || []).map((tool) => [tool.id, tool]));
+  const out = [];
+  let placed = false;
+  for (const segment of message.segments) {
+    const name = segment.type === "tool" ? tools.get(segment.id)?.name : null;
+    if (name && PLAN_TOOLS.has(name)) {
+      if (!placed && name === "write_todos" && message.todos?.todos?.length) {
+        out.push({ type: "plan" });
+        placed = true;
+      }
+      continue;
+    }
+    out.push(segment);
+  }
+  return out;
+}
+
+// The agent's own plan (write_todos), kept current as it ticks items off. The
+// spinner means "being worked on now", so it only spins while the run is live;
+// afterwards an unfinished item says so instead.
+function TaskPlan({ plan, live }) {
+  if (!plan?.todos?.length) return null;
+  const open = plan.total - plan.completed;
+  return (
+    <div className="task-plan">
+      <div className="task-plan-head">
+        <ListChecks size={14} />
+        <span>Plan</span>
+        <small>
+          {plan.completed}/{plan.total} done
+          {!live && open > 0 ? ` · ${open} left unfinished` : ""}
+        </small>
+      </div>
+      <ul>
+        {plan.todos.map((item, at) => (
+          <li key={at} className={`task-item ${item.status}${live ? "" : " settled"}`}>
+            {item.status === "completed" ? (
+              <Check size={13} />
+            ) : item.status === "in_progress" && live ? (
+              <LoaderCircle size={13} className="spin" />
+            ) : (
+              <span className="task-dot" />
+            )}
+            <span>{item.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// The argument that tells one call from another: the search, the file, the command.
+const HEADLINE_KEYS = ["query", "command", "path", "url", "pattern", "expression", "question", "task", "name"];
+
+function toolHeadline(input) {
+  if (!input || typeof input !== "object") return "";
+  const key = HEADLINE_KEYS.find((k) => typeof input[k] === "string" && input[k].trim());
+  const value = key ? input[key] : Object.values(input).find((v) => typeof v === "string" && v.trim());
+  if (!value) return "";
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > 90 ? `${oneLine.slice(0, 90)}…` : oneLine;
+}
+
+function ToolList({ tools = [], showAgent = false }) {
   return tools.map((tool) => (
     <details className="tool-detail" key={tool.id}>
       <summary>
         <Code2 size={14} />
+        {showAgent && tool.agent && <span className="tool-agent">agent {tool.agent}</span>}
         <span>{tool.name}</span>
+        {toolHeadline(tool.input) && <span className="tool-headline">{toolHeadline(tool.input)}</span>}
         <Badge status={tool.status} />
         <ChevronDown size={13} />
       </summary>
@@ -1009,7 +1127,7 @@ function ToolList({ tools = [] }) {
   ));
 }
 
-const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP" };
+const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP", subagent: "Subagents" };
 
 function groupTools(tools = []) {
   const groups = [];
@@ -1110,6 +1228,10 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
   const [args, setArgs] = useState("");
   const [url, setUrl] = useState("");
   const [permission, setPermission] = useState("ask");
+  const [subName, setSubName] = useState("");
+  const [subDescription, setSubDescription] = useState("");
+  const [subInstructions, setSubInstructions] = useState("");
+  const [subTools, setSubTools] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef(null);
@@ -1192,16 +1314,50 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
       }),
     );
   }
+  // Tools a subagent can be given: everything here except other delegations.
+  const delegable = (chat.tools || []).filter((tool) => tool.source !== "subagent");
+  async function saveSubagents(subagents) {
+    return apply(() =>
+      api(`/chats/${chat.id}/subagents`, { method: "PUT", body: { subagents } }),
+    );
+  }
+  async function addSubagent(event) {
+    event.preventDefault();
+    const updated = await saveSubagents([
+      ...(chat.subagents || []),
+      {
+        name: subName.trim(),
+        description: subDescription.trim(),
+        instructions: subInstructions.trim(),
+        tools: subTools,
+      },
+    ]);
+    if (updated) {
+      setSubName("");
+      setSubDescription("");
+      setSubInstructions("");
+      setSubTools([]);
+    }
+  }
+  async function removeSubagent(name) {
+    await saveSubagents((chat.subagents || []).filter((item) => item.name !== name));
+  }
+  function toggleSubTool(name) {
+    setSubTools((current) =>
+      current.includes(name) ? current.filter((item) => item !== name) : [...current, name],
+    );
+  }
   async function switchTool(name, enabled) {
     await apply(() =>
       api(`/chats/${chat.id}/tools`, { method: "PATCH", body: { name, enabled } }),
     );
   }
   return (
-    <Modal title="Conversation setup" onClose={onClose}>
+    <Modal title="Build your agent" onClose={onClose}>
       <p className="detail-note">
-        Changes apply to this conversation’s next turn. Its history stays in
-        place; active responses must finish or be stopped first.
+        Shape the agent for this conversation: its instructions, tools, skills,
+        MCP servers, and subagents. Changes apply to the next turn and keep the
+        history; an active response must finish or be stopped first.
       </p>
       <form onSubmit={savePrompt}>
         <label>
@@ -1400,6 +1556,98 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
           </button>
         </form>
       </section>
+      <section className="setup-section">
+        <div className="setup-section-title">
+          <div>
+            <Network size={17} />
+            <strong>Subagents</strong>
+            <span className="count">{(chat.subagents || []).length}</span>
+          </div>
+        </div>
+        <p className="detail-copy">
+          A subagent is a specialist your agent can hand a task to. Each one
+          gets a fresh conversation with its own instructions and only the
+          tools you give it, then reports back. Your agent sees it as a{" "}
+          <code>delegate_name</code> tool and uses the description to decide
+          when to call it.
+        </p>
+        {chat.subagents?.length ? (
+          <div className="setup-list">
+            {chat.subagents.map((item) => (
+              <div key={item.name} className="setup-row">
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.description}</span>
+                  <small>
+                    {item.tools.length
+                      ? `Tools: ${item.tools.join(", ")}`
+                      : "No tools: it answers from its instructions alone"}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={`Remove subagent ${item.name}`}
+                  disabled={busy}
+                  onClick={() => removeSubagent(item.name)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="setup-empty">No subagents yet.</p>
+        )}
+        <form className="mcp-form" onSubmit={addSubagent}>
+          <label>
+            Name
+            <input
+              required
+              value={subName}
+              pattern="[A-Za-z_][A-Za-z0-9_\-]{0,54}"
+              title="Letters, digits, _ or -, starting with a letter"
+              onChange={(event) => setSubName(event.target.value)}
+              placeholder="researcher"
+            />
+          </label>
+          <label>
+            When to delegate
+            <input
+              required
+              value={subDescription}
+              onChange={(event) => setSubDescription(event.target.value)}
+              placeholder="Looks things up and summarizes sources"
+            />
+          </label>
+          <label className="wide">
+            Instructions
+            <textarea
+              required
+              rows={3}
+              value={subInstructions}
+              onChange={(event) => setSubInstructions(event.target.value)}
+              placeholder="You research a question and answer with cited facts."
+            />
+          </label>
+          <fieldset className="wide subagent-tools">
+            <legend>Tools it may use</legend>
+            {delegable.map((tool) => (
+              <label key={tool.name} className="check-label">
+                <input
+                  type="checkbox"
+                  checked={subTools.includes(tool.name)}
+                  onChange={() => toggleSubTool(tool.name)}
+                />{" "}
+                {tool.name}
+              </label>
+            ))}
+          </fieldset>
+          <button className="button primary" disabled={busy}>
+            <Plus size={15} /> Add subagent
+          </button>
+        </form>
+      </section>
       <ErrorNotice message={error} onDismiss={() => setError("")} />
     </Modal>
   );
@@ -1577,6 +1825,7 @@ function ChatView({ id, providers, refresh, onNew }) {
           tools: feed.tools,
           segments: feed.segments?.length ? feed.segments : message.segments,
           files: feed.files?.length ? feed.files : message.files,
+          todos: feed.todos || message.todos,
           phase: feed.phase,
           phaseAt: feed.phaseAt,
           error: feed.error,
@@ -1589,7 +1838,7 @@ function ChatView({ id, providers, refresh, onNew }) {
       <div className="chat-toolbar">
         <div>
           <MessageSquare size={19} />
-          <strong>General chat</strong>
+          <strong>Your agent</strong>
           <span className="toolbar-divider" />{" "}
           <span>{chat?.model || model || "Choose a model"}</span>
           {(chat?.provider || selectedProvider) === "demo" && (
@@ -1691,10 +1940,6 @@ function ChatView({ id, providers, refresh, onNew }) {
                 <Mark />
               </div>
               <div className="eyebrow">YOUR HARNESS-X ASSISTANT</div>
-              <h1>
-                A little curiosity.
-                <br />A lot of possibility.
-              </h1>
               <p>
                 Think through an idea, work with code, or ask a question.
                 <br />
@@ -1756,8 +2001,14 @@ function ChatView({ id, providers, refresh, onNew }) {
                       message.status === "cancelled" && <span>Stopped</span>}
                   </div>
                   {message.segments?.length ? (
-                    message.segments.map((segment, at) =>
-                      segment.type === "text" ? (
+                    planSegments(message).map((segment, at) =>
+                      segment.type === "plan" ? (
+                        <TaskPlan
+                          key="plan"
+                          plan={message.todos}
+                          live={active && message.run_id === runId}
+                        />
+                      ) : segment.type === "text" ? (
                         <MessageContent key={`t${at}`} content={segment.content || ""} />
                       ) : (
                         <ToolList
@@ -1768,6 +2019,7 @@ function ChatView({ id, providers, refresh, onNew }) {
                     )
                   ) : (
                     <>
+                      <TaskPlan plan={message.todos} live={false} />
                       <MessageContent content={message.content || ""} />
                       <ToolList tools={message.tools} />
                     </>
@@ -1932,7 +2184,7 @@ function RunsList({ runs }) {
                 <strong>{run.title}</strong>
                 <span>
                   {run.example_id === "chat"
-                    ? "General chat"
+                    ? "Your agent"
                     : `examples.${run.example_id}`}{" "}
                   · {date(run.created_at)}
                 </span>
@@ -2061,7 +2313,7 @@ export default function App() {
             className={page === "chat" ? "active" : ""}
             onClick={() => go("chat")}
           >
-            <MessageSquare size={18} /> General chat{" "}
+            <MessageSquare size={18} /> Build your agent{" "}
             <Plus size={14} className="nav-end" />
           </button>
           <button
@@ -2118,7 +2370,7 @@ export default function App() {
             <ChevronRight size={14} />
             <strong>
               {page === "chat"
-                ? "General chat"
+                ? "Build your agent"
                 : page === "runs"
                   ? "Recent runs"
                   : "Examples"}

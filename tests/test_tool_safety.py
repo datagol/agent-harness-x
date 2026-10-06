@@ -303,7 +303,7 @@ async def test_individual_bash_preserves_sandbox_option():
     registry.load_builtin("run_bash", sandbox=sandbox, permission=PermissionLevel.ALLOW)
     result = await call(registry, "run_bash", command="fixture command")
     assert result.content == "sandbox"
-    sandbox.execute_command.assert_awaited_once_with("fixture command")
+    sandbox.execute_command.assert_awaited_once_with("fixture command", timeout=30)
 
 
 def test_nullable_required_literal_and_nested_schemas():
@@ -399,9 +399,22 @@ def test_extension_registration_preserves_execution_metadata():
     assert definition.replay_policy == "safe" and definition.timeout_seconds == 2 and not definition.concurrent
 
 
+def _calculators():
+    import sys
+    from pathlib import Path
+
+    from example_loader import load_example
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness-web"))
+    from harness_web.calculator import calculate as workspace_calculate
+
+    return [load_example("01-basics/streaming_chat.py").calculate, workspace_calculate]
+
+
 @pytest.mark.asyncio
-async def test_example_calculator_rejects_code_and_reports_tool_errors():
-    from examples._calculator import calculate
+@pytest.mark.parametrize("which", [0, 1], ids=["streaming_chat example", "harness-web chat"])
+async def test_example_calculator_rejects_code_and_reports_tool_errors(which):
+    calculate = _calculators()[which]
 
     assert calculate("(25 * 4) + 50") == "150"
     assert calculate("144 / 12") == "12.0"
@@ -557,3 +570,35 @@ def test_bash_can_start_in_a_given_directory(tmp_path):
     result = asyncio.run(registry.execute(ToolCall("1", "run_bash", {"command": "pwd && ls"})))
     assert str(tmp_path.resolve()) in result.content and "marker.txt" in result.content
     assert set(registry.get_tool("run_bash").input_schema["properties"]) == {"command", "timeout"}
+
+
+def test_ask_user_puts_the_question_through_the_application_and_returns_the_answer():
+    import asyncio
+
+    from harnessx.builtin.ask import NO_ONE_TO_ASK, register_ask_user_tool
+    from harnessx.tools import ToolRegistry
+    from harnessx.types import ToolCall
+
+    asked = []
+
+    async def ask(question, choices):
+        asked.append((question, choices))
+        return "The HarnessX Jev decision layer"
+
+    registry = ToolRegistry()
+    register_ask_user_tool(registry, ask)
+    definition = registry.get_tool("ask_user")
+    assert definition.timeout_seconds >= 3600, "waiting on a person, not a machine"
+    assert "ambiguous" in definition.description
+    call = ToolCall("1", "ask_user", {"question": "Which Jev?", "choices": ["Jevons paradox", "Jev decisions", " "]})
+    result = asyncio.run(registry.execute(call))
+    assert result.content == "The user answered: The HarnessX Jev decision layer"
+    assert asked == [("Which Jev?", ["Jevons paradox", "Jev decisions"])]
+
+    async def nobody(question, choices):
+        return None
+
+    lonely = ToolRegistry()
+    register_ask_user_tool(lonely, nobody)
+    answer = asyncio.run(lonely.execute(ToolCall("2", "ask_user", {"question": "Which?"})))
+    assert answer.content == NO_ONE_TO_ASK and "assumption" in answer.content

@@ -70,6 +70,15 @@ uv sync --all-extras          # SDK, every integration, and the dev tools
 uv run pytest -q              # the suite runs offline
 ```
 
+Eleven of those tests skip, because PostgreSQL, Temporal and Redis are not
+running. To get all of them, and the example browser, without installing
+anything:
+
+```bash
+docker compose up                  # the app on http://localhost:8765
+docker compose run --rm tests      # the suite with nothing skipped
+```
+
 Set your key (a root `.env` is auto-loaded by the `examples` package):
 
 ```bash
@@ -78,28 +87,29 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 ```
 
-The examples live in the repository, not in the package. Run them as modules
-from the checkout root, through the environment uv created:
+The examples live in the repository, not in the package. Each is one standalone
+script, grouped by topic, that you run by its path:
 
 ```bash
-uv run python -m examples.simple_chat
+uv run python examples/01-basics/streaming_chat.py
 ```
 
-See the [examples guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md) for every entry point, optional
+See the [examples guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md) for every example, optional
 dependencies, and service requirements. For a first run without API keys, use
-`uv run python -m examples.skills_demo`, `uv run python -m examples.prompt_caching`, or
-`uv run python -m examples.flight_recorder --output incident.hx`.
+`uv run python examples/03-skills/skills_lazy_loading.py`,
+`uv run python examples/05-control/loop_guard.py`, or
+`uv run python examples/07-quality/flight_recorder.py --output incident.hx`.
 
-`Agent()` and `examples.simple_chat` use Anthropic by default. To choose Anthropic,
-OpenAI, Gemini, OpenRouter, or Azure OpenAI, use [provider chat](https://github.com/datagol/agent-harness-x/blob/main/examples/provider_chat.py):
-`python -m examples.provider_chat --provider openai --model YOUR_MODEL_ID`.
+`Agent()` and `streaming_chat.py` use Anthropic by default. To choose Anthropic,
+OpenAI, Gemini, OpenRouter, or Azure OpenAI, use [switching providers](https://github.com/datagol/agent-harness-x/blob/main/examples/01-basics/switching_providers.py):
+`python examples/01-basics/switching_providers.py --provider openai --model YOUR_MODEL_ID`.
 See the [provider setup guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
 optional dependencies, and streaming options.
 
 The standalone [decision SDK](https://harnessx-site.vercel.app/docs/decisions/) provides typed Jev assessments
-alongside agents. Try its offline examples with `python -m examples.jev_routing
---min-confidence 0.8`, `python -m examples.jev_classification`, or
-`python -m examples.jev_answer_review`. Live calls require the `jev` extra,
+alongside agents. Try its offline examples with `python
+examples/07-quality/decisions_routing.py --min-confidence 0.8` or `python
+examples/07-quality/decisions_answer_review.py`. Live calls require the `jev` extra,
 `TYPESAFE_API_KEY`, and an explicit `--live` flag.
 
 Upgrading from 0.3? [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md) lists every
@@ -558,6 +568,73 @@ from harnessx import ToolRegistry
 registry = ToolRegistry()
 registry.load_builtin("read_file", base_path=str(Path.cwd()))
 ```
+
+### Running tools in an OpenShell sandbox
+
+`OpenShellSandbox` runs the agent's tools in an [NVIDIA
+OpenShell](https://github.com/NVIDIA/OpenShell) sandbox while the agent itself
+(the loop, model calls, memory, hooks) stays in your process. `run_bash` and the
+file tools run in the sandbox, with the same output as on the host.
+
+```bash
+pip install "harnessx[openshell]"   # and a running gateway: `openshell status`
+```
+
+```python
+from harnessx import Agent, AgentConfig
+from harnessx.openshell import OpenShellSandbox
+
+sandbox = OpenShellSandbox(
+    project="./repo",
+    allow=["github.com", "pypi.org"],   # hosts commands may reach; nothing else is
+    secrets=["GITHUB_TOKEN"],           # usable inside, never readable there
+)
+async with Agent(AgentConfig(), tools=["filesystem", "bash"], sandbox=sandbox) as agent:
+    await agent.run("Run the tests and fix the failure")
+# ./repo now has the agent's changes
+```
+
+You never start, copy into, or clean up the sandbox. The agent:
+
+1. Creates it on the first tool call that needs it, so a run that only talks
+   creates none.
+2. Copies `project` in, leaving out `.venv`, `node_modules`, `__pycache__` and
+   `.DS_Store` (`exclude=`). The model uses project-relative paths. A local path
+   into the project is translated. `inputs=["~/data"]` adds read-only folders.
+3. Copies changed and deleted files back after every run and when it closes.
+   A file you edited locally in the meantime is kept. The sandbox's version is
+   written beside it as `<file>.sandbox`.
+4. Deletes the sandbox when it closes. `keep=True` leaves it running. The
+   sandbox is named after the session, so a resumed session finds it again.
+
+Network access is closed unless you open it:
+
+- `allow` lists the hosts commands may reach, port 443 unless you write
+  `"host:port"`. A few well-known hosts bring their companions: `pypi.org`
+  brings `files.pythonhosted.org`.
+- `secrets` names environment variables a command can use but never read.
+  Inside the sandbox the variable holds a placeholder. OpenShell swaps in the
+  real value only on requests to that secret's hosts. Well-known names
+  (`GITHUB_TOKEN`, `GH_TOKEN`, `HF_TOKEN`, `NPM_TOKEN`) know their hosts. Map any
+  other to its own: `secrets={"MY_TOKEN": "api.example.com"}`.
+
+When the policy refuses a connection, `run_bash` tells the model which host was
+refused and that it is a policy decision, not a network fault.
+`SandboxResult.denials` and the `SANDBOX_EXEC` hook carry the same list.
+
+OpenShell's own `policy=` (a YAML path, YAML text, or a mapping) and
+`providers=` (existing provider names) are accepted too. `allow` and
+`secrets` add to them. To review the rules OpenShell drafts from blocked
+connections, use `await sandbox.pending_rules()`, then `approve_rule(rule)` or
+`reject_rule(rule, reason)`.
+
+On macOS, run the OpenShell gateway with its MicroVM driver
+(`compute_driver = "vm"` in `~/.config/openshell/gateway.toml`). Docker
+Desktop's Linux kernel has no Landlock, which OpenShell requires.
+
+Try it with `python examples/08-sandboxes/openshell_backend.py`. With no
+`--project` it builds a small project with one failing test, lets the agent fix
+it inside the sandbox, and copies the fix back.
 
 ### Replacement, timeouts, and replay
 
@@ -1453,7 +1530,7 @@ For incident debugging, opt in with `AgentRuntime(..., recording=True)`. The
 exports portable incident bundles, and verifies/plays them back offline. Export
 payloads and artifacts are opt-in. SQLite is locally tested; PostgreSQL requires
 service qualification, and Temporal recording is not implemented. Try
-`python -m examples.flight_recorder --output /tmp/invoice-incident.hx` without an API key.
+`python examples/07-quality/flight_recorder.py --output /tmp/invoice-incident.hx` without an API key.
 
 ---
 
@@ -1525,13 +1602,12 @@ The harness includes first-class evaluation capabilities powered by the
 tool selection, skill routing, multi-agent delegation, and guardrails either
 locally without uploading results or in the LangSmith Web UI. Local evaluation
 still invokes the supplied agent and may incur model/tool costs. The scripted
-`python -m examples.run_evals --offline` example needs no model API key.
+`python examples/07-quality/evaluating_with_datasets.py --offline` example needs no model API key.
 
 ### Running an evaluation
 
 ```python
 from harnessx import Agent, AgentConfig, PermissionLevel
-from examples._calculator import calculate  # Shared helper when running from a checkout.
 from harnessx.evals import (
     build_example,
     default_evaluators,
@@ -1541,6 +1617,10 @@ from harnessx.evals import (
 )
 
 # 1. Define your agent factory or instance
+def calculate(a: float, b: float, op: str) -> str:
+    """Apply op (+, -, *, /) to two numbers."""
+    return str({"+": a + b, "-": a - b, "*": a * b, "/": a / b}[op])
+
 def make_agent(inputs):
     agent = Agent(config=AgentConfig(model="claude-sonnet-4-6"))
     agent.tools.register_tool(calculate, permission=PermissionLevel.ALLOW, replay_policy="safe")
@@ -1578,7 +1658,7 @@ an agent bound to your loop. Experiments are named `harnessx-eval-...` by defaul
 
 ```bash
 # Scripted integration demonstration (langsmith extra, no API keys required)
-python -m examples.run_evals --offline
+python examples/07-quality/evaluating_with_datasets.py --offline
 
 # Run live model benchmarks without upload (model API key required)
 python -m harnessx.evals.cli --suite tool_calling --offline
@@ -1624,6 +1704,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `KnowledgeManager` / `OKFBundle` / `GitSource` | `harnessx` | OKF knowledge bundles from folders or git: `search_concepts`, `read_concept`, `get_neighbors` |
 | `MCPManager` | `harnessx` | MCP server connections |
 | `Sandbox` | `harnessx` | Sandboxed code execution |
+| `OpenShellSandbox` | `harnessx.openshell` | Tools in an NVIDIA OpenShell sandbox: `project`, `allow`, `secrets`; the agent starts, syncs and closes it |
 | `AgentRuntime` | `harnessx` | Durable sessions: `run`, `run_stream`, `stream_text`, `approve(..., resume=True)`, `decline`, `status` |
 | `SQLiteBackend` / `PostgresBackend` / `TemporalBackend` | `harnessx` | Runtime storage; `await Backend.connect(...)`, `async with backend` |
 | `harnessx.durable` | module | Runtime, backends, recorder, and their errors in one namespace |
@@ -1636,31 +1717,39 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 
 ## Runnable examples
 
-Every example is a module in the repository's `examples/` directory, run from a
-checkout with `uv run python -m examples.<name>`. Prerequisites and test coverage
-are listed in [examples/README.md](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md).
+Every example is a standalone script in the repository's `examples/` folder,
+grouped by topic, run by its path: `uv run python examples/<topic>/<file>.py`.
+None imports another file, so any of them can be copied into your own project.
+Prerequisites and test coverage are listed in
+[examples/README.md](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md).
 Examples marked "no services" use scripted model responses and run without keys.
 
 | Example | Shows | Needs |
 |---|---|---|
-| `examples.simple_chat` | Streaming interactive chat, a calculator tool, workspace reads | Anthropic key |
-| `examples.provider_chat --provider P --model M` | The same agent across Anthropic, OpenAI, Gemini, OpenRouter, and Azure; streaming or ordinary runs; usage with cache counters | The provider's extra and key |
-| `examples.prompt_caching` | A stable prompt prefix, the cache hint a provider receives, and cache write/read counters across a two-step loop | No services; `--live` uses Anthropic |
-| `examples.coding_agent` | File and shell tools, an audit middleware, terminal approvals | Anthropic key |
-| `examples.memory_agent` | Markdown notes and structured long-term facts as tools | Anthropic key |
-| `examples.multi_agent` | Constructor-declared specialists with isolated tools and permissions | Anthropic key; URL research asks for approval |
-| `examples.skills_agent` | Lazy skill loading in a live conversation, with a hook showing invocations | Anthropic key by default |
-| `examples.skills_demo` | Skill discovery, invocation, and hook ordering | No services |
-| `examples.knowledge_agent` | Answers from an OKF knowledge bundle, with a hook showing each search and read | Anthropic key by default |
-| `examples.runtime_approvals` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
-| `examples.flight_recorder --output incident.hx` | A retried model call, middleware boundaries, and offline playback of the exported incident | No services; unused output path |
-| `examples.sandboxed_coder` | Process resource limits with a durable runtime | Anthropic key; POSIX host |
-| `examples.postgres_runtime` | Live streaming on the PostgreSQL runtime | `postgres` extra, `DATABASE_URL` or `--config`, Anthropic key |
-| `examples.postgres_runtime check` / `crash` / `status` / `resume` | Storage check, a report, a hard process exit, and recovery of the same run without repeating the tool | `postgres` extra and a database; no model key |
-| `examples.jev_routing --min-confidence 0.8` | A Choice decision selects one agent factory, with a general fallback | No services by default; `--live` needs the `jev` extra |
-| `examples.jev_classification` | A Choice decision classifies a document into five categories | No services by default |
-| `examples.jev_answer_review` | Score reviews coverage and Noul checks evidence after a completed run | No services by default |
-| `examples.langsmith_tracing` | LangSmith lifecycle tracing with a nested specialist span | `langsmith` extra, Anthropic and LangSmith keys |
-| `examples.run_evals --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
-| `examples.mcp_agent --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
+| `01-basics/prompt_caching.py` | A stable prompt prefix, the cache hint a provider receives, and cache write/read counters | No services; `--live` uses Anthropic |
+| `01-basics/progress_and_waiting.py` | A run's event stream, including `waiting` events while a slow model call is quiet | No services |
+| `01-basics/streaming_chat.py` | Streaming interactive chat, a calculator tool, workspace reads | Anthropic key |
+| `01-basics/switching_providers.py --provider P --model M` | The same agent across Anthropic, OpenAI, Gemini, OpenRouter, and Azure; streaming or ordinary runs | The provider's extra and key |
+| `03-skills/skills_lazy_loading.py` | Skill discovery, invocation, and hook ordering | No services |
+| `02-tools/filesystem_tools_and_permissions.py` | File and shell tools, an audit middleware, terminal approvals | Anthropic key |
+| `02-tools/mcp_servers.py --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
+| `03-skills/skills_interactive.py` | Lazy skill loading in a live conversation | Anthropic key by default |
+| `04-context/planning_todos.py` | `write_todos` / `read_todos` on a multi-step task, and `TODOS_UPDATED` | No services |
+| `04-context/condensing_a_long_history.py` | Old tool output cleared, then a summary, when the history outgrows the window | No services |
+| `04-context/knowledge_bundles_okf.py` | Answers from an OKF knowledge bundle: search, concept reads, links | Anthropic key by default |
+| `04-context/custom_memory_tools.py` | The built-in memory tools plus your own tools over the same stores | Anthropic key |
+| `05-control/loop_guard.py` | `LoopGuard` catching a repeated call; the `REPETITION` hook | No services |
+| `05-control/retries_and_fallback.py` | `RetryPolicy` retrying a 503, then `FallbackProvider` switching to a backup | No services |
+| `05-control/delegating_to_subagents.py` | Constructor-declared specialists with isolated tools and permissions | Anthropic key |
+| `05-control/autonomous_task_runner.py "TASK" -o FILE` | One task from the command line: it writes the deliverable and runs it | Anthropic key |
+| `06-durability/tool_approvals_and_resume.py` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
+| `06-durability/session_snapshots.py` | `save_session` and `Agent.load_session` into a fresh agent | No services |
+| `06-durability/durable_crash_recovery.py` | Live streaming on PostgreSQL; `check` / `crash` / `status` / `resume` recover a run without repeating its tool | `postgres` extra and a database; `chat` also an Anthropic key |
+| `07-quality/decisions_routing.py --min-confidence 0.8` | A Choice decision classifies a document and routes a query to one of three agents | No services by default; `--live` needs the `jev` extra |
+| `07-quality/decisions_answer_review.py` | Score reviews coverage and Noul checks evidence after a completed run | No services by default |
+| `07-quality/flight_recorder.py --output incident.hx` | A retried model call, middleware boundaries, and offline playback | No services; unused output path |
+| `07-quality/evaluating_with_datasets.py --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
+| `07-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
+| `08-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
+| `08-sandboxes/openshell_backend.py` | Tools in an NVIDIA OpenShell sandbox while the agent stays here; changes synced back | `openshell` extra, an OpenShell gateway, Anthropic key |
 | `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

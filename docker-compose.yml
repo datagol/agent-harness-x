@@ -1,0 +1,103 @@
+# Everything the examples can need, in one command.
+#
+#   docker compose up            the web app on http://localhost:8765
+#   docker compose run --rm tests   the suite, with nothing skipped for want of a service
+#
+# Model API keys come from your own .env, which is read but never baked into an
+# image. Without them the offline examples still run; the live ones say what is
+# missing.
+
+name: harnessx
+
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # What the durable examples connect to.
+      DATABASE_URL: postgresql://harnessx:harnessx@postgres:5432/harnessx
+      TEMPORAL_TARGET: temporal:7233
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8765/api/examples"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # The suite, with the three service-gated groups enabled. These are the
+  # variable names the tests actually look for, which are deliberately
+  # different from the application's own so a test run cannot touch a real
+  # database by accident.
+  tests:
+    build: .
+    profiles: ["tests"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HARNESS_TEST_POSTGRES_DSN: postgresql://harnessx:harnessx@postgres:5432/harnessx
+      HARNESS_TEST_TEMPORAL: temporal:7233
+      HARNESS_TEST_REDIS: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "pytest", "-q", "-rs"]
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: harnessx
+      POSTGRES_PASSWORD: harnessx
+      POSTGRES_DB: harnessx
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harnessx -d harnessx"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Temporal's own dev server: one process, in-memory, no separate database to
+  # provision. Enough for the integration tests and the Temporal backend.
+  temporal:
+    image: temporalio/admin-tools:1.25.2-tctl-1.18.1-cli-1.1.1
+    # This image's entrypoint is `tini -- sleep infinity`, so a bare `command`
+    # becomes arguments to sleep and the server never starts. Override it.
+    entrypoint: ["temporal"]
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn"]
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"   # the Temporal web UI
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+volumes:
+  postgres-data:

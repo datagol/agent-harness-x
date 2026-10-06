@@ -5,7 +5,7 @@ apps/
 .env
 *.env
 !.env.example
-/examples/postgres.config.json
+/examples/06-durability/postgres.config.json
 
 # Python
 __pycache__/

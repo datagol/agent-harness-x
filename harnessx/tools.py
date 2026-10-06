@@ -649,6 +649,15 @@ def retry_wanted(definition: ToolDefinition, retry: ToolRetry, result: ToolResul
     return bool(retry.retry_error_results and result.is_error and is_transient_text(str(result.content)))
 
 
+def _move_builtins_into(registry: ToolRegistry, sandbox: Any) -> None:
+    """Built-ins registered before the registry met a backend that owns its
+    filesystem would still run on the host; register them again inside it."""
+    for definition in registry.get_tools():
+        rebind = getattr(definition.handler, "_harnessx_rebind", None)
+        if rebind is not None and getattr(definition.handler, "_harnessx_backend", None) is not sandbox:
+            rebind(registry, sandbox=sandbox)
+
+
 def normalize_tool_registry(
     tools: ToolRegistry | list[Any] | None,
     *,
@@ -670,6 +679,8 @@ def normalize_tool_registry(
                 tools.sandbox = sandbox
             elif tools.sandbox is not sandbox:
                 raise ValueError("ToolRegistry is already bound to a different sandbox")
+            if getattr(sandbox, "owns_filesystem", False):
+                _move_builtins_into(tools, sandbox)
         return tools
     registry = ToolRegistry(sandbox=sandbox)
     if policy is not None:
