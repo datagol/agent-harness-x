@@ -111,6 +111,7 @@ python examples/07-quality/evaluating_with_datasets.py --offline   # needs the l
 | File | What it shows | Needs |
 |---|---|---|
 | `sandbox_isolation_tiers.py` | A coding agent running its Python in a `Sandbox`; `--tier process` (default, not an isolation boundary), `docker` or `seatbelt` | `ANTHROPIC_API_KEY`; Docker for `--tier docker` |
+| `openshell_backend.py` | `OpenShellSandbox`: the agent stays here, its shell and file tools run in NVIDIA OpenShell; the project is copied in and changes come back after each run; `--allow` and `--secret` open hosts and pass secrets | `harnessx[openshell]`, a running OpenShell gateway, `ANTHROPIC_API_KEY` |
 
 `skills/` holds sample skills and `knowledge/` a sample Open Knowledge Format
 bundle; set `AGENT_KNOWLEDGE` to a folder or git URL to load another.

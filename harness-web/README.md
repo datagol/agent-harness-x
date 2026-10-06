@@ -104,6 +104,7 @@ folders. Each entry runs the file unchanged, as `python examples/<topic>/<file>.
 | Quality | Tracing with LangSmith | `07-quality/tracing_with_langsmith.py` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
 | Quality | Flight recorder | `07-quality/flight_recorder.py` | Offline; download `incident.hx` after completion |
 | Sandboxes | Sandbox isolation tiers | `08-sandboxes/sandbox_isolation_tiers.py` | Anthropic; process tier by default |
+| Sandboxes | Tools in an OpenShell sandbox | `08-sandboxes/openshell_backend.py` | `openshell` extra, a running OpenShell gateway, Anthropic key |
 
 Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool

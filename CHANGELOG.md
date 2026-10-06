@@ -16,7 +16,7 @@ subagents.
 ### Changed
 
 - **Examples are standalone scripts, grouped by topic, run by path.** The 20
-  modules under `examples/` became 25 files in `01-basics/` through
+  modules under `examples/` became 26 files in `01-basics/` through
   `08-sandboxes/`, renamed for what they teach (`simple_chat` is
   `01-basics/streaming_chat.py`, `postgres_runtime` is
   `06-durability/durable_crash_recovery.py`). Run them as
@@ -140,7 +140,8 @@ subagents.
   file edited during a run is never overwritten; the sandbox's version is
   written beside it as `<file>.sandbox`. Local paths into the project are
   translated; `inputs=` adds read-only folders. The sandbox is named after the
-  session, so a resumed session finds it again.
+  session, so a resumed session finds it again. Try it with
+  `examples/08-sandboxes/openshell_backend.py`.
 - `SandboxResult.denials` and `SandboxExecData.denials`: what a sandbox's
   network policy refused. `run_bash` tells the model when a command was
   blocked by policy rather than by the network.

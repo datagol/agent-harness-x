@@ -83,7 +83,7 @@ def typed(monkeypatch, *lines):
 
 def test_examples_live_in_topic_folders_and_nowhere_else():
     assert [path.name for path in EXAMPLES.glob("*.py")] == []
-    assert len(example_scripts()) == 25
+    assert len(example_scripts()) == 26
 
 
 @pytest.mark.parametrize("path", example_scripts(), ids=lambda p: p.relative_to(EXAMPLES).as_posix())
@@ -461,3 +461,24 @@ def test_examples_folder_has_only_topic_folders_and_data():
         "skills", "knowledge", "README.md",
     }, entries
     assert Path(EXAMPLES / "06-durability" / "postgres.config.example.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_openshell_example_fixes_the_demo_project_through_the_sandbox(example_environment, monkeypatch, tmp_path, capsys):
+    pytest.importorskip("openshell")
+    from test_openshell import FakeGateway
+
+    example = load_example("08-sandboxes/openshell_backend.py")
+    gateway = FakeGateway(tmp_path / "gateway")
+    real = example.OpenShellSandbox
+    monkeypatch.setattr(example, "OpenShellSandbox", lambda project, **options: real(project, client=gateway, **options))
+    monkeypatch.setattr("harnessx.core.make_provider", lambda *args, **kwargs: ScriptedProvider([
+        ProviderResponse(tool_calls=[ToolCall("e", "edit_file", {
+            "path": "calc.py", "old_string": "return a - b", "new_string": "return a + b"})], stop_reason="tool_use"),
+        ProviderResponse(text="Fixed add()."),
+    ]))
+    await example.main([])  # no --project: the demo project, in this test's working directory
+    assert "return a + b" in (tmp_path / "openshell-demo" / "calc.py").read_text()
+    out = capsys.readouterr().out
+    assert "Synced back: updated ['calc.py']" in out and "Error:" not in out
+    assert gateway.deleted and not gateway.sandboxes  # the agent closed it

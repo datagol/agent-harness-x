@@ -294,6 +294,16 @@ EXAMPLES = [
         prompt="Use Python to calculate the first 10 Fibonacci numbers.",
         detail="Uses the process tier: resource limits, with host filesystem and network access. Docker and Seatbelt are the isolating tiers.",
     ),
+    Example(
+        "openshell_backend",
+        "08-sandboxes/openshell_backend.py",
+        "Tools in an OpenShell sandbox",
+        "The agent stays here; its shell and file tools run in an NVIDIA OpenShell sandbox.",
+        "shield",
+        extra="openshell",
+        prompt="Run the tests with python3 -m unittest -q, find why one fails, fix the code, and run them again.",
+        detail="Needs a running OpenShell gateway. Works on a small demo project with one failing test; the fix is copied back to this run's folder.",
+    ),
 ]
 CATALOG = {example.id: example for example in EXAMPLES}
 PROVIDERS = {

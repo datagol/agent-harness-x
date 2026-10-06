@@ -632,6 +632,10 @@ On macOS, run the OpenShell gateway with its MicroVM driver
 (`compute_driver = "vm"` in `~/.config/openshell/gateway.toml`). Docker
 Desktop's Linux kernel has no Landlock, which OpenShell requires.
 
+Try it with `python examples/08-sandboxes/openshell_backend.py`. With no
+`--project` it builds a small project with one failing test, lets the agent fix
+it inside the sandbox, and copies the fix back.
+
 ### Replacement, timeouts, and replay
 
 Duplicate tool names fail by default. Use `replace=True` to deliberately replace a
@@ -1747,4 +1751,5 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `07-quality/evaluating_with_datasets.py --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
 | `07-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
 | `08-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
+| `08-sandboxes/openshell_backend.py` | Tools in an NVIDIA OpenShell sandbox while the agent stays here; changes synced back | `openshell` extra, an OpenShell gateway, Anthropic key |
 | `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |
