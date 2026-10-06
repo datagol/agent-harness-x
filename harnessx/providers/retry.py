@@ -34,6 +34,10 @@ DEFAULT_BACKOFF_SECONDS = 0.5
 
 _TRANSIENT_MARKERS = (
     "resource_exhausted",
+    "peer closed connection",
+    "incomplete chunked read",
+    "stream ended",
+    "stalled",
     "rate limit",
     "rate_limit",
     "overloaded",
@@ -109,7 +113,26 @@ def is_transient(exc: BaseException) -> bool:
                 return False           # deterministic; do not retry
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, ConnectionError)):
         return True
+    if _transport_failure(exc):
+        return True
     return is_transient_text(str(exc))
+
+
+# Transport errors raised by httpx (and httpx2) when a connection drops part way:
+# "peer closed connection without sending complete message body", an incomplete
+# chunked read. They carry no status and are not OSErrors, so nothing above
+# recognizes them, but the next attempt on a fresh connection usually succeeds.
+_TRANSPORT_FAILURES = (
+    "RemoteProtocolError", "ReadError", "ReadTimeout", "WriteError", "ConnectError",
+    "ConnectTimeout", "PoolTimeout", "IncompleteStreamError",
+)
+
+
+def _transport_failure(exc: BaseException) -> bool:
+    # The exception itself only: an SDK wrapper around one (APIConnectionError)
+    # is the provider's to classify, through sdk_connection_failure, which also
+    # knows a proxy refusing the tunnel is not worth another attempt.
+    return type(exc).__name__ in _TRANSPORT_FAILURES
 
 
 def is_transient_text(text: str) -> bool:

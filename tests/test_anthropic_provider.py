@@ -241,7 +241,10 @@ async def test_anthropic_tool_round_trip_and_session_snapshot(tmp_path, streamin
             assert result.output == "Created fibonacci.py."
             assert (tmp_path / "fibonacci.py").read_text() == PROGRAM
             assert len(requests) == 2
-            assert bool(requests[0].get("stream")) == streaming
+            # The default reply budget (32K) is past the SDK's ceiling for a
+            # non-streaming call, so an ordinary run is sent as a stream too and
+            # assembled into one message.
+            assert requests[0]["max_tokens"] == 32_000 and requests[0].get("stream")
             history = requests[1]["messages"]
             assert history[1]["content"][-1]["caller"] == {"type": "direct"}
             assert history[2]["content"][0]["tool_use_id"] == "tool_write"

@@ -27,7 +27,9 @@ class StopReason(str, Enum):
     TOOL_USE = "tool_use"
     MAX_TOKENS = "max_tokens"
     STOP_SEQUENCE = "stop_sequence"
-    SAFETY = "safety"
+    SAFETY = "safety"  # a content filter stopped or blanked the reply
+    REFUSAL = "refusal"  # the model declined (Anthropic's refusal, OpenAI's message.refusal)
+    PAUSE_TURN = "pause_turn"  # the server paused a long turn; send it back to continue
     OTHER = "other"
 
 
@@ -132,10 +134,9 @@ class TokenUsage:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     # Reasoning/thinking tokens, where the provider reports them separately
-    # (Gemini's thoughts_token_count, OpenAI's reasoning_tokens). They are
-    # billed at the OUTPUT rate, so anything estimating cost from
-    # input+output alone under-reports by the most expensive component.
-    # 0 when the provider does not report them.
+    # (Gemini's thoughts_token_count, OpenAI's reasoning_tokens): a breakdown
+    # of output_tokens, which already includes them for every built-in
+    # provider. 0 when the provider does not report them.
     thinking_tokens: int = 0
 
 
@@ -151,6 +152,7 @@ class ProviderResponse:
     raw: Any = None
     _content_metadata: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _content_dicts: bool = field(default=False, repr=False)
+    _content_blocks: list[dict[str, Any]] | None = field(default=None, repr=False)
 
     def __init__(
         self, text: str = "", tool_calls: list[ToolCall] | None = None,
@@ -163,6 +165,7 @@ class ProviderResponse:
         self.stop_reason, self.usage, self.raw = stop_reason, usage or TokenUsage(), raw
         self._content_metadata = dict(_content_metadata or {})
         self._content_dicts = _content_dicts
+        self._content_blocks = None
         if content:
             parsed_text, parsed_calls, parsed_thinking, metadata = self._parse_content(content)
             joined = "".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in content)
@@ -176,11 +179,21 @@ class ProviderResponse:
             self.thinking = parsed_thinking if parsed_thinking is not None else thinking
             self._content_metadata = metadata
             self._content_dicts = all(isinstance(block, dict) for block in content)
+            self._content_blocks = [self._block_dict(block) for block in content]
+
+    @staticmethod
+    def _block_dict(block):
+        from copy import deepcopy
+        if isinstance(block, dict):
+            return deepcopy(block)
+        if callable(dump := getattr(block, "model_dump", None)):
+            return dump(mode="json", exclude=getattr(block, "__api_exclude__", None))
+        return deepcopy(vars(block))
 
     @staticmethod
     def _parse_content(content):
         from copy import deepcopy
-        text_parts, calls, thinking, metadata = [], [], None, {}
+        text_parts, calls, thoughts, metadata = [], [], [], {}
         for block in content:
             if isinstance(block, dict):
                 data = block
@@ -197,20 +210,24 @@ class ProviderResponse:
             if kind == "text":
                 text_parts.append(data["text"])
             elif kind == "thinking":
-                thinking = data["thinking"]
+                thoughts.append(data["thinking"])
             elif kind == "tool_use":
                 calls.append(ToolCall(data["id"], data["name"], deepcopy(data["input"])))
+            elif kind == "provider":
+                continue
             else:
                 raise ValueError(f"Unsupported provider content block: {kind!r}")
             key = data["id"] if kind == "tool_use" else kind
             extras = {k: deepcopy(v) for k, v in data.items() if k not in ("type", "text", "thinking", "id", "name", "input")}
             if extras:
                 metadata[key] = extras
-        return "\n".join(text_parts), calls, thinking, metadata
+        return "\n".join(text_parts), calls, "\n".join(thoughts) if thoughts else None, metadata
 
     @property
     def content(self) -> list[Any]:
         from copy import deepcopy
+        if self._content_blocks is not None:
+            return self._ordered_content()
         blocks = []
         def add(key, **fields):
             extras = self._content_metadata.get(key)
@@ -227,13 +244,61 @@ class ProviderResponse:
     def content(self, blocks: list[Any]) -> None:
         self.text, self.tool_calls, self.thinking, self._content_metadata = self._parse_content(blocks)
         self._content_dicts = all(isinstance(block, dict) for block in blocks)
+        self._content_blocks = [self._block_dict(block) for block in blocks]
+
+    def _ordered_content(self) -> list[Any]:
+        """Project editable canonical fields onto an immutable native block layout."""
+        from copy import deepcopy
+        original = self._content_blocks or []
+        text, _, thinking, _ = self._parse_content(original)
+        unchanged_text = self.text in (text, "".join(b.get("text", "") for b in original))
+        changed_thinking = self.thinking != thinking
+        if changed_thinking and any(b.get("signature") or b.get("type") == "provider" for b in original):
+            raise ValueError("Middleware cannot modify protected provider thinking")
+        calls = {call.id: call for call in self.tool_calls}
+        blocks = []
+        wrote_text = wrote_thinking = False
+        for source in original:
+            block = deepcopy(source)
+            kind = block["type"]
+            if kind == "text":
+                if not unchanged_text:
+                    if wrote_text or not self.text:
+                        continue
+                    block["text"] = self.text
+                wrote_text = True
+            elif kind == "thinking":
+                if changed_thinking:
+                    if wrote_thinking or self.thinking is None:
+                        continue
+                    block["thinking"] = self.thinking
+                wrote_thinking = True
+            elif kind == "tool_use":
+                call = calls.pop(block["id"], None)
+                if call is None:
+                    continue
+                block.update(name=call.name, input=deepcopy(call.input))
+            blocks.append(block)
+        if self.thinking is not None and not wrote_thinking:
+            blocks.insert(0, {"type": "thinking", "thinking": self.thinking})
+        if self.text and not wrote_text:
+            blocks.append({"type": "text", "text": self.text})
+        blocks.extend({"type": "tool_use", "id": c.id, "name": c.name, "input": deepcopy(c.input)} for c in calls.values())
+        if self._content_dicts:
+            return blocks
+        plain = {"type", "text", "thinking", "id", "name", "input"}
+        return [SimpleNamespace(**b) if set(b) <= plain else b for b in blocks]
 
 
 @dataclass
 class StreamChunk:
     """A streaming chunk emitted by an LLMProvider."""
 
-    kind: str  # "text_delta", "thinking_delta", "response"
+    # "text_delta", "thinking_delta", "response", or "progress": the provider
+    # received something that is not visible text -- a streamed tool argument, a
+    # signature, a block boundary. It carries no data; it tells the engine the
+    # stream is alive, so a long tool call is not mistaken for a stall.
+    kind: str
     data: Any = None
 
 
@@ -290,12 +355,23 @@ class Limits:
     """Budgets the harness enforces: iterations, context size, memory thresholds, and cost."""
 
     max_iterations: int = 50  # 0 means unlimited
-    max_context_tokens: int = 150_000  # conversation trim threshold
+    # The context window condensing works against. None uses the model's own
+    # window (see harnessx.models); set it to condense earlier than that.
+    max_context_tokens: int | None = None
     max_result_chars: int = 12_000  # tool results above this are spilled to disk (~3K tokens)
     max_cost_dollars: float | None = None
     input_cost_per_m: float | None = None
     output_cost_per_m: float | None = None
     loop_guard: LoopGuard = field(default_factory=lambda: LoopGuard())
+    # How many times one run may recover from a reply cut off at its token
+    # budget -- re-asking for a truncated tool call, or continuing truncated
+    # text -- each time with double the budget. 0 ends the run at the first cut.
+    max_truncation_recoveries: int = 3
+    # On reaching max_iterations, ask the model once more -- told to use no
+    # tools and say what it did, what is left, and its best answer -- rather
+    # than failing with nothing to show. The run then completes with
+    # stop_reason "max_iterations" (not ok). False fails it as before.
+    final_answer_on_limit: bool = True
 
     def __post_init__(self) -> None:
         if isinstance(self.loop_guard, dict):  # restored from a snapshot
@@ -304,7 +380,12 @@ class Limits:
             raise TypeError("loop_guard must be a LoopGuard")
         if type(self.max_iterations) is not int or self.max_iterations < 0:
             raise ConfigurationError("max_iterations must be nonnegative (0 means unlimited)")
-        _positive(self.max_context_tokens, "max_context_tokens", integer=True)
+        if self.max_context_tokens is not None:
+            _positive(self.max_context_tokens, "max_context_tokens", integer=True)
+        if type(self.final_answer_on_limit) is not bool:
+            raise TypeError("final_answer_on_limit must be a bool")
+        if type(self.max_truncation_recoveries) is not int or self.max_truncation_recoveries < 0:
+            raise ConfigurationError("max_truncation_recoveries must be a nonnegative integer")
         _positive(self.max_result_chars, "max_result_chars", integer=True)
         for name in ("max_cost_dollars", "input_cost_per_m", "output_cost_per_m"):
             _nonnegative_or_none(getattr(self, name), name)
@@ -319,13 +400,20 @@ class RetryPolicy:
     already have shown; the run stream signals that with ``ATTEMPT_RESET``.
     """
 
-    attempts: int = 2
+    # Four calls in all: three retries ride out a typical overload or rate-limit
+    # spell (OpenCode makes five, Pi and Hermes four) without hiding a real outage.
+    attempts: int = 4
     backoff_seconds: float = 0.5  # base delay, doubled per attempt
     # Wall clock around one attempt. None derives it from the reply budget, so a
     # long reply is not cut off by a timeout sized for short ones.
     call_timeout_seconds: float | None = None
     # Cap on one wait, whether from backoff or the server's Retry-After.
-    max_backoff_seconds: float = 30.0
+    max_backoff_seconds: float = 60.0
+    # Longest silence tolerated between two chunks of a streamed reply. A
+    # stream that stalls past it is abandoned and the call retried; the whole-
+    # call timeout alone let a stalled stream hold a run for many minutes.
+    # None turns the check off.
+    stream_idle_timeout_seconds: float | None = 180.0
     # Failover, when AgentConfig.fallbacks names other providers. Transient
     # failures one provider may collect before the chain moves to the next, and
     # how long a provider stays out of rotation after being passed over.
@@ -342,6 +430,8 @@ class RetryPolicy:
         if self.call_timeout_seconds is not None:
             _positive(self.call_timeout_seconds, "call_timeout_seconds")
         _positive(self.max_backoff_seconds, "max_backoff_seconds")
+        if self.stream_idle_timeout_seconds is not None:
+            _positive(self.stream_idle_timeout_seconds, "stream_idle_timeout_seconds")
         if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
             raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
@@ -594,7 +684,7 @@ class AgentConfig:
     # Providers to try, in order, when the primary fails transiently. Empty means
     # no failover. RetryPolicy.switch_after and .cooldown_seconds govern the chain.
     fallbacks: tuple[Fallback, ...] = ()
-    max_tokens: int | None = None  # reply token budget; None lets the provider choose for the model
+    max_tokens: int | None = None  # reply token budget; None resolves it from the model's limits
     system_prompt: str = "You are a helpful assistant."
     temperature: float | None = None
     limits: Limits = field(default_factory=Limits)
@@ -706,6 +796,8 @@ class SessionState:
     config: dict[str, Any] = field(default_factory=dict)
     extensions: dict[str, Any] = field(default_factory=dict)
     lifetime_iterations: int = 0
+    estimated_cost: float | None = None
+    provider_state: dict[str, Any] = field(default_factory=dict)
     version: int = 2
 
 

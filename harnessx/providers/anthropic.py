@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 import inspect
 from copy import deepcopy
 from typing import Any, AsyncIterator
@@ -12,7 +10,9 @@ from anthropic import AsyncAnthropic
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
-from .base import LLMProvider, DEFAULT_MAX_TOKENS
+from ..errors import IncompleteStreamError
+from ..models import ModelLimits
+from .base import LLMProvider
 
 
 def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -28,23 +28,43 @@ def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _messages_for_request(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove SDK-only text metadata, including from previously saved history."""
+    """Make a stored history one the Messages API accepts, whoever wrote it.
+
+    Removes SDK-only text metadata, and what other vendors leave behind when a
+    FallbackProvider moves a conversation here: thinking blocks without an
+    Anthropic signature (OpenAI and Gemini reasoning, which Anthropic rejects as
+    unsigned) and private bookkeeping keys such as Gemini's thought signature.
+    """
     prepared = deepcopy(messages)
 
-    def clean_content(content: Any) -> None:
+    def clean_content(content: Any) -> Any:
         if not isinstance(content, list):
-            return
+            return content
+        kept = []
         for block in content:
             if not isinstance(block, dict):
+                kept.append(block)
                 continue
-            if block.get("type") == "text":
+            kind = block.get("type")
+            if kind == "provider":
+                if block.get("provider") == "anthropic":
+                    kept.append(deepcopy(block["data"]))
+                continue
+            if kind == "thinking" and not block.get("signature"):
+                continue
+            for key in [k for k in block if k.startswith("_")]:
+                block.pop(key)
+            if kind == "text":
                 block.pop("parsed_output", None)
-            elif block.get("type") == "tool_result":
-                clean_content(block.get("content"))
+            elif kind == "tool_result":
+                block["content"] = clean_content(block.get("content"))
+            kept.append(block)
+        return kept
 
     for message in prepared:
-        clean_content(message.get("content"))
-    return prepared
+        message["content"] = clean_content(message.get("content"))
+    # A turn that held only foreign reasoning is now empty, which the API rejects.
+    return [m for m in prepared if m.get("content") != []]
 
 
 def _cache_control(cache: PromptCacheHint) -> dict[str, Any]:
@@ -103,9 +123,6 @@ def _rejected_cache_control(exc: BaseException) -> bool:
     return "cache_control" in str(exc)
 
 
-_CLAUDE_4 = re.compile(r"claude-(?:opus|sonnet|haiku)-4")
-
-
 class AnthropicProvider(LLMProvider):
     """Talks to Anthropic's Messages API and normalizes responses to ProviderResponse."""
 
@@ -114,18 +131,40 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, client: AsyncAnthropic | None = None) -> None:
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncAnthropic(max_retries=0)
+        self._limits: dict[str, ModelLimits | None] = {}
 
-    def default_max_tokens(self, model: str) -> int:
-        """Claude 4 models get a budget large enough for a file-sized reply but under the
-        SDK's threshold for non-streaming calls; older families keep the conservative default."""
-        return 20_000 if _CLAUDE_4.search(model or "") else DEFAULT_MAX_TOKENS
+    async def model_limits(self, model: str) -> ModelLimits | None:
+        """Ask the Models API: it reports ``max_input_tokens`` and ``max_tokens``
+        for every model it serves, including ones released after this package.
+
+        Asked once per model. Any failure -- an older API, a proxy that does not
+        serve ``/v1/models``, a client double in tests -- is remembered as "no
+        answer", and the built-in table is used instead.
+        """
+        if model in self._limits:
+            return self._limits[model]
+        found: ModelLimits | None = None
+        try:
+            import asyncio
+
+            info = await asyncio.wait_for(self.client.models.retrieve(model), timeout=10)
+            window, output = getattr(info, "max_input_tokens", None), getattr(info, "max_tokens", None)
+            if type(window) is int and type(output) is int and window > 0 and output > 0:
+                found = ModelLimits(window, output)
+        except Exception:
+            found = None
+        self._limits[model] = found
+        return found
 
     async def _create_via_stream(self, kwargs: dict[str, Any]) -> Any:
         """The SDK refuses a non-streaming call that could run past ten minutes;
         stream it and return the assembled message instead."""
         stream_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
         async with self.client.messages.stream(**stream_kwargs) as stream:
-            return await stream.get_final_message()
+            response = await stream.get_final_message()
+        if not getattr(response, "stop_reason", None):
+            raise IncompleteStreamError("Anthropic stream ended before the message was complete")
+        return response
 
     async def _create(self, kwargs: dict[str, Any]) -> Any:
         try:
@@ -210,20 +249,27 @@ class AnthropicProvider(LLMProvider):
             else:
                 raise
 
+        delivered = False
         try:
             async with stream_ctx as stream:
-                async for text in stream.text_stream:
-                    yield StreamChunk(kind="text_delta", data=text)
+                async for chunk in _chunks(stream):
+                    delivered = delivered or chunk.kind == "text_delta"
+                    yield chunk
                 final_resp = await stream.get_final_message()
         except Exception as exc:
-            # Only before any output: a rejected marker fails at stream open.
-            if filtered_kwargs != uncached and _rejected_cache_control(exc):
+            # Only before any output: a rejected marker fails at stream open, and
+            # restarting a stream that has delivered text would repeat it.
+            if not delivered and filtered_kwargs != uncached and _rejected_cache_control(exc):
                 async with self.client.messages.stream(**uncached) as stream:
-                    async for text in stream.text_stream:
-                        yield StreamChunk(kind="text_delta", data=text)
+                    async for chunk in _chunks(stream):
+                        yield chunk
                     final_resp = await stream.get_final_message()
             else:
                 raise
+        if not getattr(final_resp, "stop_reason", None):
+            # The stream closed before message_delta carried a stop reason: what
+            # was assembled is a fragment, and may hold a half-written tool call.
+            raise IncompleteStreamError("Anthropic stream ended before the message was complete")
         yield StreamChunk(kind="response", data=_from_anthropic_response(final_resp))
 
     async def count_tokens(
@@ -246,11 +292,31 @@ class AnthropicProvider(LLMProvider):
             return len(str(messages)) // 3
 
 
+async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:
+    """Every event the stream delivers, as text, thinking, or a sign of progress.
+
+    Reading only ``text_stream`` hid everything else: a model writing a long
+    tool argument -- a whole report into a file -- streams for minutes without
+    a single text event, which looked exactly like a stalled connection.
+    """
+    if not hasattr(stream, "__aiter__"):  # a client without event iteration
+        async for text in stream.text_stream:
+            yield StreamChunk(kind="text_delta", data=text)
+        return
+    async for event in stream:
+        kind = getattr(event, "type", None)
+        if kind == "text" and getattr(event, "text", ""):
+            yield StreamChunk(kind="text_delta", data=event.text)
+        elif kind == "thinking" and getattr(event, "thinking", ""):
+            yield StreamChunk(kind="thinking_delta", data=event.thinking)
+        else:
+            yield StreamChunk(kind="progress")
+
+
 def _from_anthropic_response(resp: Any) -> ProviderResponse:
     """Normalize raw Anthropic Messages API response into canonical ProviderResponse."""
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
-    thinking: str | None = None
 
     raw_content = getattr(resp, "content", []) or []
     for block in raw_content:
@@ -265,15 +331,18 @@ def _from_anthropic_response(resp: Any) -> ProviderResponse:
                     input=getattr(block, "input", {}) or {},
                 )
             )
-        elif b_type == "thinking":
-            thinking = getattr(block, "thinking", "")
 
     raw_stop = getattr(resp, "stop_reason", None)
     stop_map = {
         "end_turn": StopReason.END_TURN,
         "tool_use": StopReason.TOOL_USE,
         "max_tokens": StopReason.MAX_TOKENS,
+        # The reply filled what was left of the context window: cut off, like
+        # max_tokens, and recovered the same way.
+        "model_context_window_exceeded": StopReason.MAX_TOKENS,
         "stop_sequence": StopReason.STOP_SEQUENCE,
+        "refusal": StopReason.REFUSAL,
+        "pause_turn": StopReason.PAUSE_TURN,
     }
     stop_reason = stop_map.get(raw_stop, StopReason.OTHER if raw_stop else StopReason.END_TURN)
 
@@ -293,9 +362,17 @@ def _from_anthropic_response(resp: Any) -> ProviderResponse:
     return ProviderResponse(
         text="\n".join(text_parts),
         tool_calls=tool_calls,
-        thinking=thinking,
+        thinking=None,  # derived from all ordered thinking blocks below
         stop_reason=stop_reason,
         usage=usage,
         raw=resp,
-        content=list(raw_content),
+        # Preserve opaque native blocks in order; only tool_use dispatches locally.
+        content=[
+            b if getattr(b, "type", None) in _CANONICAL_BLOCKS else
+            {"type": "provider", "provider": "anthropic", "data": ProviderResponse._block_dict(b)}
+            for b in raw_content
+        ],
     )
+
+
+_CANONICAL_BLOCKS = ("text", "thinking", "tool_use")

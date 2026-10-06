@@ -356,3 +356,57 @@ indexing a `PendingTool` `TypeError`.
 flat shape as well as the 0.4 nested one, silently, and `PendingTool.to_dict()`
 / `.from_dict()` still speak the 0.3 wire shape. A snapshot is not a caller:
 sessions, run states, and incident bundles written by 0.3 load in 0.5 unchanged.
+
+---
+
+## Unreleased: reply budgets and recovery
+
+Nothing needs changing, but these defaults moved:
+
+| Before | Now | To keep the old behaviour |
+|---|---|---|
+| Reply budget 8192 (20K for Claude 4) when `max_tokens` is unset | The model's output limit, capped at 32K and fitted to the context left | `AgentConfig(max_tokens=8192)` |
+| A reply cut off at the budget ends the run (`result.truncated`) | Recovered up to 3 times with a doubled budget | `Limits(max_truncation_recoveries=0)` |
+| `Limits.max_context_tokens=150_000` | `None`: the model's own window | `Limits(max_context_tokens=150_000)` |
+| Reaching `max_iterations` fails the run (`MaxIterationsError`) | One last call for an answer; completes with `stop_reason="max_iterations"`, not `ok` | `Limits(final_answer_on_limit=False)` |
+| A refusal or content-filtered reply is `ok` | Not `ok`; `result.refused`, `raise_for_status()` raises `RunRefused` | check `result.status` instead of `ok` |
+| `RetryPolicy(attempts=2, max_backoff_seconds=30)` | `attempts=4, max_backoff_seconds=60` | `RetryPolicy(attempts=2, max_backoff_seconds=30)` |
+| A timed-out tool in `Agent.run()` stops the run awaiting input | The model gets a "timed out" error result and the run goes on | -- (durable runtimes are unchanged) |
+| Gemini `output_tokens` excludes thinking | Includes it; `thinking_tokens` is the breakdown | subtract `thinking_tokens` |
+
+An explicit `max_tokens` is now the *starting* budget: a truncated reply doubles
+it for the rest of the run. Pair it with `max_truncation_recoveries=0` to make
+it a hard ceiling.
+
+
+## Reliability behavior changes (unreleased)
+
+Tool-name repair now accepts only unique formatting aliases. A spelling typo
+returns an error and suggestions; the model must issue a new call with the
+correct name. Exact registered names remain valid even when aliases collide.
+
+Streams require explicit provider completion. For an OpenAI-compatible server
+that omits finish reasons for text, configure the provider explicitly:
+
+```python
+provider = OpenAIProvider(allow_missing_finish_reason_for_text=True)
+```
+
+`OpenRouterProvider` and `AzureOpenAIProvider` accept the same option. Tool-call
+streams always require a finish reason. Anthropic's automatic internal stream
+and Gemini streams receive the same completion checks as public streaming runs.
+
+Exhausted empty-response and `pause_turn` recovery now returns `status="failed"`
+with error type `RecoveryExhaustedError`; `result.ok` is false. Partial output and
+known token usage remain available. Parent run usage and lifetime totals include
+child responses, with child pricing applied to the parent cost limit. Persisted
+snapshots now carry estimated cost and provider-scoped learned limits.
+
+Native Anthropic blocks appear as ordered canonical blocks or opaque
+`{"type": "provider", "provider": "anthropic", "data": {...}}` blocks.
+Middleware must preserve signed thinking and pending provider continuations.
+Other adapters omit opaque blocks belonging to another provider family.
+
+Temporal workflow scheduling uses the `harness-reliability-v2` patch marker to
+retain the previous command sequence when replaying older histories. Keep this
+marker until all workflows predating the change have completed.

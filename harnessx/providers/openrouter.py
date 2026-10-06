@@ -47,8 +47,10 @@ class OpenRouterProvider(OpenAIProvider):
         site_url: str | None = None,
         app_name: str | None = None,
         default_headers: dict[str, str] | None = None,
+        allow_missing_finish_reason_for_text: bool = False,
         **client_kwargs: Any,
     ) -> None:
+        self.allow_missing_finish_reason_for_text = allow_missing_finish_reason_for_text
         if client is not None:
             self.client = client
         else:

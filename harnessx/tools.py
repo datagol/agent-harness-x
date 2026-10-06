@@ -497,23 +497,39 @@ class ToolRegistry:
         return list(self._tools.keys())
 
     def resolve_tool(self, name: str) -> tuple[ToolDefinition, str]:
-        """Find a tool, correcting a name the model nearly got right.
+        """Resolve exact names, then unique formatting aliases.
 
-        Models misspell a tool name by case far more often than by anything
-        else. Failing the call teaches nothing the model can act on, and the
-        repair is unambiguous as long as exactly one tool matches. Returns the
-        definition and the corrected name.
+        Spelling similarity only supplies error suggestions; it never selects
+        a callable. Ambiguous aliases fail even if one spelling looks closer.
         """
         if name in self._tools:
             return self._tools[name], name
+        suggestions = []
         if isinstance(name, str):
-            folded = name.strip().casefold()
-            matches = [known for known in self._tools if known.casefold() == folded]
-            if len(matches) == 1:
+            import difflib
+
+            key = self._normalized_name(name, strip_namespace=True)
+            keys = {key, self._normalized_name(name)}
+            matches = [known for known in self._tools if self._normalized_name(known) in keys]
+            if key and len(matches) == 1:
                 return self._tools[matches[0]], matches[0]
+            ranked = sorted(
+                ((difflib.SequenceMatcher(None, key, self._normalized_name(known)).ratio(), known)
+                 for known in self._tools), key=lambda item: (-item[0], item[1]),
+            )
+            suggestions = [known for score, known in ranked if score >= 0.85][:3] if key else []
+        hint = f" Did you mean {', '.join(repr(s) for s in suggestions)}?" if suggestions else ""
         raise ToolNotFoundError(
-            f"No tool named {name!r}. Available tools: {', '.join(sorted(self._tools)) or 'none'}"
+            f"No tool named {name!r}.{hint} Available tools: {', '.join(sorted(self._tools)) or 'none'}"
         )
+
+    @staticmethod
+    def _normalized_name(name: str, *, strip_namespace: bool = False) -> str:
+        """Declared formatting aliases only; edit distance never selects a tool."""
+        name = name.strip().casefold()
+        if strip_namespace:
+            name = re.sub(r"^(?:functions\.|tools\.|default_api:)", "", name)
+        return re.sub(r"[-_. ]", "", name)
 
     async def execute(
         self, tool_call: ToolCall, *, permissions: PermissionManager | None = None,

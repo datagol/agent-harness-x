@@ -17,7 +17,8 @@ except ImportError as e:
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
-from .base import LLMProvider
+from ..errors import IncompleteStreamError
+from .base import closing_stream, LLMProvider, parse_tool_arguments
 
 
 class OpenAIProvider(LLMProvider):
@@ -29,9 +30,10 @@ class OpenAIProvider(LLMProvider):
     # unknown parameters set this to False.
     supports_prompt_cache_key = True
 
-    def __init__(self, client: AsyncOpenAI | None = None) -> None:
+    def __init__(self, client: AsyncOpenAI | None = None, *, allow_missing_finish_reason_for_text: bool = False) -> None:
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncOpenAI(max_retries=0)
+        self.allow_missing_finish_reason_for_text = allow_missing_finish_reason_for_text
 
     def _apply_prompt_cache(self, kwargs: dict[str, Any], cache: PromptCacheHint | None) -> None:
         if cache is None or not cache.enabled or not self.supports_prompt_cache_key:
@@ -103,6 +105,7 @@ class OpenAIProvider(LLMProvider):
         self._apply_prompt_cache(kwargs, cache)
 
         collected_text = ""
+        collected_refusal = ""
         collected_reasoning = ""
         collected_usage = TokenUsage()
         finish_reason = None
@@ -123,71 +126,72 @@ class OpenAIProvider(LLMProvider):
                 stream_resp = await self.client.chat.completions.create(**kwargs)
             else:
                 raise
-        async for chunk in stream_resp:
-            if getattr(chunk, "usage", None):
-                collected_usage = _extract_token_usage(chunk.usage)
+        async with closing_stream(stream_resp):
+            async for chunk in stream_resp:
+                if getattr(chunk, "usage", None):
+                    collected_usage = _extract_token_usage(chunk.usage)
 
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
+                if not chunk.choices:
+                    continue
+                # A tool call's arguments arrive as deltas with no text; say the
+                # stream is alive so a long argument is not taken for a stall.
+                yield StreamChunk(kind="progress")
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
 
-            reasoning = _extract_reasoning(delta)
-            if reasoning:
-                collected_reasoning += reasoning
-                yield StreamChunk(kind="thinking_delta", data=reasoning)
+                reasoning = _extract_reasoning(delta)
+                if reasoning:
+                    collected_reasoning += reasoning
+                    yield StreamChunk(kind="thinking_delta", data=reasoning)
 
-            if getattr(delta, "content", None):
-                text = delta.content
-                collected_text += text
-                yield StreamChunk(kind="text_delta", data=text)
+                if getattr(delta, "content", None):
+                    text = delta.content
+                    collected_text += text
+                    yield StreamChunk(kind="text_delta", data=text)
+                if isinstance(getattr(delta, "refusal", None), str) and delta.refusal:
+                    collected_refusal += delta.refusal
 
-            if getattr(delta, "tool_calls", None):
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_call_chunks:
-                        tool_call_chunks[idx] = {
-                            "id": tc.id or "",
-                            "name": tc.function.name if tc.function and tc.function.name else "",
-                            "arguments": tc.function.arguments if tc.function and tc.function.arguments else "",
-                        }
-                    else:
-                        if tc.id:
-                            tool_call_chunks[idx]["id"] += tc.id
-                        if tc.function and tc.function.name:
-                            tool_call_chunks[idx]["name"] += tc.function.name
-                        if tc.function and tc.function.arguments:
-                            tool_call_chunks[idx]["arguments"] += tc.function.arguments
+                if getattr(delta, "tool_calls", None):
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_call_chunks:
+                            tool_call_chunks[idx] = {
+                                "id": tc.id or "",
+                                "name": tc.function.name if tc.function and tc.function.name else "",
+                                "arguments": tc.function.arguments if tc.function and tc.function.arguments else "",
+                            }
+                        else:
+                            if tc.id:
+                                tool_call_chunks[idx]["id"] += tc.id
+                            if tc.function and tc.function.name:
+                                tool_call_chunks[idx]["name"] += tc.function.name
+                            if tc.function and tc.function.arguments:
+                                tool_call_chunks[idx]["arguments"] += tc.function.arguments
 
         tool_calls: list[ToolCall] = []
         for idx in sorted(tool_call_chunks.keys()):
             tc_data = tool_call_chunks[idx]
-            try:
-                args = json.loads(tc_data["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {"_raw": tc_data["arguments"]}
             tool_calls.append(
                 ToolCall(
-                    id=tc_data["id"],
+                    id=tc_data["id"] or _synthetic_call_id(),
                     name=tc_data["name"],
-                    input=args,
+                    input=parse_tool_arguments(tc_data["arguments"]),
                 )
             )
 
-        finish_map = {
-            "stop": StopReason.END_TURN,
-            "tool_calls": StopReason.TOOL_USE,
-            "length": StopReason.MAX_TOKENS,
-            "content_filter": StopReason.SAFETY,
-        }
-        stop_reason = finish_map.get(
-            finish_reason, StopReason.OTHER if finish_reason else StopReason.END_TURN
-        )
+        if not finish_reason and (
+            tool_call_chunks or not (collected_text or collected_refusal).strip()
+            or not self.allow_missing_finish_reason_for_text
+        ):
+            # Missing termination is an interrupted response. Compatibility
+            # mode permits nonempty text only; it never permits tool calls.
+            raise IncompleteStreamError("Stream ended without a finish reason")
+        stop_reason = _stop_reason(finish_reason, collected_refusal)
 
         final_response = ProviderResponse(
-            text=collected_text,
+            text=collected_text or collected_refusal,
             tool_calls=tool_calls,
             thinking=collected_reasoning or None,
             stop_reason=stop_reason,
@@ -274,7 +278,8 @@ def _to_openai_messages(
                 msg["content"] = None
             if tool_calls:
                 msg["tool_calls"] = tool_calls
-            out.append(msg)
+            if text_parts or tool_calls:
+                out.append(msg)
             continue
 
         text_parts = []
@@ -356,36 +361,50 @@ def _extract_token_usage(raw_usage: Any) -> TokenUsage:
     )
 
 
+_FINISH_REASONS = {
+    "stop": StopReason.END_TURN,
+    "tool_calls": StopReason.TOOL_USE,
+    "function_call": StopReason.TOOL_USE,
+    "length": StopReason.MAX_TOKENS,
+    "content_filter": StopReason.SAFETY,
+}
+
+
+def _stop_reason(finish_reason: Any, refusal: str = "") -> StopReason:
+    """A declined request is a refusal, whatever finish reason accompanies it."""
+    if refusal:
+        return StopReason.REFUSAL
+    return _FINISH_REASONS.get(finish_reason, StopReason.OTHER if finish_reason else StopReason.END_TURN)
+
+
+def _synthetic_call_id() -> str:
+    """An id for a tool call that arrived without one. Some OpenAI-compatible
+    servers omit it; an empty id would fail the whole turn instead of one call."""
+    import uuid
+
+    return f"call_{uuid.uuid4().hex[:24]}"
+
+
 def _from_openai_response(resp: Any) -> ProviderResponse:
     """Wrap an OpenAI ChatCompletion in canonical ProviderResponse."""
     choice = resp.choices[0]
     msg = choice.message
 
-    text = msg.content or ""
+    refusal = getattr(msg, "refusal", None)
+    refusal = refusal if isinstance(refusal, str) else ""
+    text = msg.content or refusal
     reasoning = _extract_reasoning(msg)
     tool_calls: list[ToolCall] = []
     for tc in (msg.tool_calls or []):
-        try:
-            args = json.loads(tc.function.arguments or "{}")
-        except json.JSONDecodeError:
-            args = {"_raw": tc.function.arguments}
         tool_calls.append(
             ToolCall(
-                id=tc.id,
+                id=tc.id or _synthetic_call_id(),
                 name=tc.function.name,
-                input=args,
+                input=parse_tool_arguments(tc.function.arguments),
             )
         )
 
-    finish_map = {
-        "stop": StopReason.END_TURN,
-        "tool_calls": StopReason.TOOL_USE,
-        "length": StopReason.MAX_TOKENS,
-        "content_filter": StopReason.SAFETY,
-    }
-    stop_reason = finish_map.get(
-        choice.finish_reason, StopReason.OTHER if choice.finish_reason else StopReason.END_TURN
-    )
+    stop_reason = _stop_reason(choice.finish_reason, refusal)
 
     usage = _extract_token_usage(getattr(resp, "usage", None))
 

@@ -63,7 +63,8 @@ except ImportError as e:
 
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
-from .base import LLMProvider
+from ..errors import IncompleteStreamError
+from .base import closing_stream, LLMProvider
 
 THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
 
@@ -295,23 +296,34 @@ class GeminiProvider(LLMProvider):
         all_parts: list[Any] = []
         finish_reason = None
         usage_metadata = None
-        async for chunk in stream:
-            if getattr(chunk, "usage_metadata", None) is not None:
-                usage_metadata = chunk.usage_metadata
-            candidates = getattr(chunk, "candidates", None) or []
-            if not candidates:
-                continue
-            if getattr(candidates[0], "finish_reason", None):
-                finish_reason = candidates[0].finish_reason
-            content = getattr(candidates[0], "content", None)
-            for part in list(getattr(content, "parts", None) or []):
-                all_parts.append(part)
-                text = getattr(part, "text", None)
-                if text and getattr(part, "thought", False):
-                    # Thinking summaries are not user-visible text.
-                    yield StreamChunk(kind="thinking_delta", data=text)
-                elif text:
-                    yield StreamChunk(kind="text_delta", data=text)
+        blocked = False
+        async with closing_stream(stream):
+            async for chunk in stream:
+                yield StreamChunk(kind="progress")  # alive, whether or not it carries text
+                if getattr(chunk, "usage_metadata", None) is not None:
+                    usage_metadata = chunk.usage_metadata
+                feedback = getattr(chunk, "prompt_feedback", None)
+                block_reason = str(getattr(feedback, "block_reason", "") or "").split(".")[-1]
+                blocked = blocked or block_reason not in ("", "0", "BLOCK_REASON_UNSPECIFIED")
+                candidates = getattr(chunk, "candidates", None) or []
+                if not candidates:
+                    continue
+                if getattr(candidates[0], "finish_reason", None):
+                    finish_reason = candidates[0].finish_reason
+                content = getattr(candidates[0], "content", None)
+                for part in list(getattr(content, "parts", None) or []):
+                    all_parts.append(part)
+                    text = getattr(part, "text", None)
+                    if text and getattr(part, "thought", False):
+                        # Thinking summaries are not user-visible text.
+                        yield StreamChunk(kind="thinking_delta", data=text)
+                    elif text:
+                        yield StreamChunk(kind="text_delta", data=text)
+
+        if blocked:
+            finish_reason = "SAFETY"
+        elif str(finish_reason or "").split(".")[-1] in ("", "0", "FINISH_REASON_UNSPECIFIED"):
+            raise IncompleteStreamError("Gemini stream ended without a finish reason")
 
         yield StreamChunk(
             kind="response",
@@ -500,20 +512,28 @@ def _from_gemini_parts(
                 block[THOUGHT_SIGNATURE_KEY] = base64.b64encode(sig).decode()
             blocks.append(block)
 
-    if tool_calls:
-        stop_reason: StopReason = StopReason.TOOL_USE
+    fr = str(finish_reason or "").split(".")[-1].upper()
+    if fr == "MAX_TOKENS":
+        # Even with tool calls: their arguments may be the part that was cut.
+        stop_reason: StopReason = StopReason.MAX_TOKENS
+    elif fr in ("SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITATION", "IMAGE_SAFETY"):
+        stop_reason = StopReason.SAFETY
+    elif tool_calls:
+        stop_reason = StopReason.TOOL_USE
+    elif fr in ("STOP", "FINISH_REASON_UNSPECIFIED", ""):
+        stop_reason = StopReason.END_TURN
     else:
-        fr = str(finish_reason or "").split(".")[-1].upper()
-        if fr == "MAX_TOKENS":
-            stop_reason = StopReason.MAX_TOKENS
-        elif fr in ("SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"):
-            stop_reason = StopReason.SAFETY
-        else:
-            stop_reason = StopReason.END_TURN
+        # MALFORMED_FUNCTION_CALL, UNEXPECTED_TOOL_CALL, OTHER, ...: not a
+        # finished answer. The loop treats an empty one as a reply to nudge.
+        stop_reason = StopReason.OTHER
 
     usage = TokenUsage(
         input_tokens=int(getattr(usage_metadata, "prompt_token_count", 0) or 0),
-        output_tokens=int(getattr(usage_metadata, "candidates_token_count", 0) or 0),
+        # Every billed output token, thoughts included, as Anthropic and OpenAI
+        # report it: Gemini counts thoughts apart from candidates, and cost
+        # estimated from output_tokens left out the most expensive part.
+        output_tokens=int(getattr(usage_metadata, "candidates_token_count", 0) or 0)
+        + int(getattr(usage_metadata, "thoughts_token_count", 0) or 0),
         cache_creation_input_tokens=0,
         cache_read_input_tokens=int(
             getattr(usage_metadata, "cached_content_token_count", 0) or 0

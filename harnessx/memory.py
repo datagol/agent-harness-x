@@ -38,6 +38,19 @@ DEFAULT_MAX_RESULT_CHARS = 12_000  # ~3k tokens at ~4 chars/token
 DEFAULT_PREVIEW_LINES = 20         # head and tail lines in preview
 
 
+CLEARED_TOOL_RESULT = "[Old tool result cleared to make room. Run the tool again if you need it.]"
+
+
+def _has_substance(blocks: list[dict[str, Any]]) -> bool:
+    """True when an assistant turn says something: non-blank text or a tool call."""
+    for block in blocks:
+        kind = block.get("type")
+        if (kind in ("tool_use", "provider") or (kind == "thinking" and block.get("signature"))
+                or (kind == "text" and str(block.get("text", "")).strip())):
+            return True
+    return False
+
+
 class ConversationMemory:
     """Short-term memory: the messages list for the current session.
 
@@ -55,6 +68,7 @@ class ConversationMemory:
         eviction_dir: str | None = None,
     ) -> None:
         self._messages: list[Message] = []
+        self.last_prompt_tokens: int | None = None
         self._artifact_paths: set[str] = set()
         self._owned_artifact_paths: set[str] = set()
         self._max_result_chars = max_result_chars
@@ -69,6 +83,8 @@ class ConversationMemory:
 
     def add_assistant_message(self, content: list[Any]) -> None:
         """Convert SDK ContentBlock objects to MessageParam format."""
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
         content_params: list[dict[str, Any]] = []
         for block in content:
             if hasattr(block, "type"):
@@ -85,10 +101,16 @@ class ConversationMemory:
                     content_params.append({
                         "type": "thinking",
                         "thinking": getattr(block, "thinking", ""),
+                        **({"signature": block.signature} if getattr(block, "signature", None) else {}),
                     })
             elif isinstance(block, dict):
                 content_params.append(block)
 
+        if not _has_substance(content_params):
+            # An assistant turn with nothing in it -- no text, no tool call --
+            # is rejected by Anthropic and OpenAI alike when sent back, so
+            # storing one breaks every later request in the session.
+            return
         self._messages.append(Message("assistant", content_params))
 
     def add_tool_results(self, results: list[Any]) -> None:
@@ -108,7 +130,9 @@ class ConversationMemory:
             if isinstance(r, ToolResult):
                 result_content = r.content
                 call_id = getattr(r, "tool_call_id", "") or getattr(r, "tool_use_id", "")
-                if not r.is_error and len(result_content) > self._max_result_chars:
+                # Errors too: a failing build can print megabytes of stderr, and
+                # an error result is no smaller in the context window.
+                if len(result_content) > self._max_result_chars:
                     result_content = self._evict_large_result(
                         call_id, result_content
                     )
@@ -125,6 +149,53 @@ class ConversationMemory:
 
         if content:
             self._messages.append(Message("user", content))
+
+    def prune_tool_results(
+        self, *, keep_chars: int = 160_000, min_chars: int = 80_000, protect_messages: int = 4,
+    ) -> int:
+        """Clear the content of old tool results, newest kept, before resorting to a summary.
+
+        Walks back from the end, leaving the last ``protect_messages`` messages
+        alone, and keeps the newest ``keep_chars`` of tool output (about 40K
+        tokens). Older results are replaced with a one-line note. Nothing is
+        done unless at least ``min_chars`` would be freed: a small saving is not
+        worth editing the history for. Returns the characters freed.
+
+        Old tool output is usually the bulk of an agent's context and the part
+        it needs least -- the conclusions drawn from it are in the turns that
+        followed -- so clearing it often makes summarizing unnecessary, and the
+        conversation itself survives intact (OpenCode's prune, Hermes's too).
+        """
+        seen = 0
+        targets: list[tuple[int, int, int]] = []
+        for index in range(len(self._messages) - 1 - protect_messages, -1, -1):
+            message = self._messages[index]
+            if message.role != "user" or not isinstance(message.content, list):
+                continue
+            for position, block in enumerate(message.content):
+                if block.get("type") != "tool_result":
+                    continue
+                body = block.get("content")
+                if body == CLEARED_TOOL_RESULT:
+                    continue
+                size = len(body) if isinstance(body, str) else len(json.dumps(body, default=str))
+                seen += size
+                if seen > keep_chars and size > 2 * len(CLEARED_TOOL_RESULT):
+                    targets.append((index, position, size))
+        freed = sum(size - len(CLEARED_TOOL_RESULT) for _, _, size in targets)
+        if freed < min_chars:
+            return 0
+        by_message: dict[int, set[int]] = {}
+        for index, position, _ in targets:
+            by_message.setdefault(index, set()).add(position)
+        for index, positions in by_message.items():
+            message = self._messages[index]
+            content = [
+                {**block, "content": CLEARED_TOOL_RESULT} if i in positions else block
+                for i, block in enumerate(message.content)
+            ]
+            self._messages[index] = Message("user", content)
+        return freed
 
     def _evict_large_result(self, tool_use_id: str, content: str) -> str:
         """Save full result to disk, return a preview with file path reference."""
@@ -257,9 +328,13 @@ class ConversationMemory:
         the engine wants that as its own loop phase: journaled, retried and
         observable like any other call.
         """
+        # What the count said, for the engine to fit the reply into what is
+        # left of the window. None when it was not counted or could not be.
+        self.last_prompt_tokens = None
         if len(self._messages) < 6:
             return False
         token_count = await self._count(provider, model, system, tools)
+        self.last_prompt_tokens = token_count
         budget = max(1, max_context_tokens - max(0, reply_tokens))
         if token_count is not None and token_count < budget * 0.8:
             return False
@@ -319,6 +394,7 @@ class ConversationMemory:
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
         reply_tokens: int = 0,
+        *, force: bool = False,
     ) -> bool:
         """If the next request would not fit, condense older messages.
 
@@ -332,7 +408,7 @@ class ConversationMemory:
 
         token_count = await self._count(provider, model, system, tools)
         budget = max(1, max_context_tokens - max(0, reply_tokens))
-        if token_count is not None and token_count < budget * 0.8:
+        if not force and token_count is not None and token_count < budget * 0.8:
             return False
 
         # Find a clean boundary that preserves alternating roles and tool call pairs
@@ -477,6 +553,7 @@ class PersistentMemory:
                 output_tokens=usage_data.get("output_tokens", 0),
                 cache_creation_input_tokens=usage_data.get("cache_creation_input_tokens", 0),
                 cache_read_input_tokens=usage_data.get("cache_read_input_tokens", 0),
+                thinking_tokens=usage_data.get("thinking_tokens", 0),
             ),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
@@ -485,6 +562,8 @@ class PersistentMemory:
             extensions=data.get("extensions", data.get("metadata", {}).get("extensions", {})),
             lifetime_iterations=data.get("lifetime_iterations", 0),
             version=data.get("version", 1),
+            estimated_cost=data.get("estimated_cost"),
+            provider_state=data.get("provider_state", {}),
         )
 
     def list_sessions(self) -> list[dict[str, Any]]:

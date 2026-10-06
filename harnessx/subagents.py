@@ -104,10 +104,27 @@ def install_subagent(parent: Agent, spec: SubAgent) -> None:
             config=deepcopy(config), tools=_copy_tools(registry), skills=skills,
             permissions=parent.permissions,
         ) as child:
-            result = await child.run(task)
+            child.guardrails.usage_observer = parent.guardrails.track_usage
+            child.guardrails.parent_cost_check = parent.guardrails.check_cost_limit
+            try:
+                result = await child.run(task)
+            except BaseException:
+                parent.guardrails.usage_incomplete = True
+                raise
+            parent.guardrails.usage_incomplete |= result.usage_incomplete
             if result.status != RunStatus.COMPLETED or result.error is not None:
                 detail = result.error["message"] if result.error else result.stop_reason
                 raise RuntimeError(f"Subagent {spec.name!r} {result.status.value}: {detail}")
+            # A child that completed without a whole answer says so, so the
+            # parent does not build on a fragment as if it were the result.
+            if result.truncated:
+                return f"{result.output}\n\n[The specialist's reply was cut off at its output limit and is incomplete.]"
+            if result.refused:
+                raise RuntimeError(f"Subagent {spec.name!r} declined the task: {result.output or result.stop_reason}")
+            if result.limited:
+                return f"{result.output}\n\n[The specialist reached its step limit; this is its account of where it got to.]"
+            if not result.output.strip():
+                return "[The specialist finished without a reply.]"
             return result.output
 
     parent.tools.register_tool(

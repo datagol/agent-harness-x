@@ -16,8 +16,9 @@ with workflow.unsafe.imports_passed_through():
         result_from_state,
         wire,
         cancel_state,
+        apply_accounting,
     )
-    from ..types import DEFAULT_TIMEOUT_SECONDS
+    from ..types import DEFAULT_TIMEOUT_SECONDS, RetryPolicy as ModelRetryPolicy
     from ..runtime import resolve_entry
 
 
@@ -86,21 +87,54 @@ class AgentSessionWorkflow:
             )
         return timedelta(seconds=seconds)
 
+    def merge_failure_accounting(self, state, entry, exc):
+        cause = exc
+        while cause is not None:
+            for detail in (*getattr(cause, "details", ()), *getattr(cause, "last_heartbeat_details", ())):
+                if isinstance(detail, dict) and "accounting" in detail:
+                    apply_accounting(state, entry, detail["accounting"])
+                    if "provider_state" in detail:
+                        state["provider_state"] = detail["provider_state"]
+            cause = getattr(cause, "cause", None)
+
     async def step(self, state, name, **extra):
         timeout = (
             model_timeout_from_wire((state or {}).get("config"))
             if name == "model"
             else DEFAULT_TIMEOUT_SECONDS
         )
+        modern = workflow.patched("harness-reliability-v2")
+        policy = RetryPolicy(maximum_attempts=3)
+        options = {}
+        if modern:
+            config = (state or {}).get("config", {})
+            retry = ModelRetryPolicy(**config.get("retry", {}))
+            if name in ("model", "compact"):
+                budget = (state or {}).get("model_call_budget") or (state or {}).get("request", {}).get("max_tokens", config.get("max_tokens"))
+                if name == "compact":
+                    budget = min(8000, budget or 8000)
+                # A model command can immediately heal one refused budget.
+                timeout = retry.effective_call_timeout(budget) * (2 if name == "model" else 1)
+                policy = RetryPolicy(maximum_attempts=retry.attempts,
+                    initial_interval=timedelta(seconds=max(0.001, retry.backoff_seconds)),
+                    maximum_interval=timedelta(seconds=max(0.001, retry.max_backoff_seconds)))
+            extra["reliability_v2"] = True
+            options = {"heartbeat_timeout": timedelta(seconds=20),
+                       "cancellation_type": workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED}
         handle = workflow.start_activity(
             "harness_step_v1",
             self.args(state, command=name, **extra),
             start_to_close_timeout=self.activity_timeout(timeout + 10),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            retry_policy=policy,
+            **options,
         )
         self.activities.append(handle)
         try:
             return await handle
+        except (ActivityError, asyncio.CancelledError) as exc:
+            if modern and state is not None:
+                self.merge_failure_accounting(state, {}, exc)
+            raise
         finally:
             self.activities.remove(handle)
 
@@ -154,13 +188,17 @@ class AgentSessionWorkflow:
                                 return
                             entry["status"] = "started"
                             entry["attempt"] += 1
+                            modern = workflow.patched("harness-reliability-v2")
+                            if modern:
+                                entry["accounting"] = {}
                             handle = workflow.start_activity(
                                 "harness_tool_v1",
-                                self.args(state, entry=entry),
+                                self.args(state, entry=entry, **({"reliability_v2": True} if modern else {})),
                                 start_to_close_timeout=self.activity_timeout(
                                     entry["timeout"] + 10
                                 ),
                                 heartbeat_timeout=timedelta(seconds=20),
+                                **({"cancellation_type": workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED} if modern else {}),
                                 retry_policy=RetryPolicy(
                                     maximum_attempts=1
                                     if entry["policy"] == "manual"
@@ -169,9 +207,17 @@ class AgentSessionWorkflow:
                             )
                             self.activities.append(handle)
                             try:
-                                entry["raw_result"] = await handle
+                                returned = await handle
+                                if modern:
+                                    apply_accounting(state, entry, returned["accounting"])
+                                    entry["raw_result"] = returned["result"]
+                                else:
+                                    entry["raw_result"] = returned
                                 entry["status"] = "raw_completed"
                             except (ActivityError, asyncio.CancelledError) as exc:
+                                if modern:
+                                    self.merge_failure_accounting(state, entry, exc)
+                                    state["usage_incomplete"] = True
                                 entry["status"] = (
                                     "uncertain"
                                     if entry["policy"] == "manual"
@@ -232,7 +278,7 @@ class AgentSessionWorkflow:
                         state["attempt"] += 1
                     outcome = await self.step(state, name)
                     state = transition(state, name, outcome["outcome"])
-                    if name == "model" and outcome["attempt"] > 1:
+                    if name in ("model", "compact") and outcome["attempt"] > 1:
                         state["usage_incomplete"] = True
                     self.data["runs"][state["run_id"]] = state
                     # Activity completion is now recorded; committed events may be published.

@@ -121,7 +121,7 @@ def test_a_persistent_failure_still_surfaces():
         async with _agent(provider, retry=RetryPolicy(backoff_seconds=0)) as agent:
             kinds, _ = await _stream_kinds_and_text(agent)
         assert "error" in kinds, "a persistent failure must still surface"
-        assert provider.opens == 2, "bounded by RetryPolicy.attempts"
+        assert provider.opens == RetryPolicy().attempts == 4, "bounded by RetryPolicy.attempts"
 
     asyncio.run(_run())
 

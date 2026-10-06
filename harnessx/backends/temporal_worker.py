@@ -3,6 +3,8 @@
 from __future__ import annotations
 import asyncio
 import copy
+from dataclasses import asdict
+from datetime import timedelta
 from temporalio import activity
 from temporalio.converter import PayloadCodec
 from temporalio.exceptions import ApplicationError
@@ -17,6 +19,10 @@ from ..engine import (
     restore,
     snapshot,
     retryable,
+    retry_after,
+    sync_accounting,
+    provider_state,
+    restore_provider_state,
 )
 from ..execution import RunEvent, RunEventType, wire, ToolApprovalRequired
 from ..registry import AgentRef
@@ -57,6 +63,36 @@ class ArtifactCodec(PayloadCodec):
         return result
 
 
+def activity_accounting(agent, state):
+    state = state or {}
+    usage = asdict(agent.guardrails.total_usage)
+    baseline = state.get("total_usage", {})
+    return {"usage": {k: max(0, v - baseline.get(k, 0)) for k, v in usage.items()},
+            "cost": max(0, agent.guardrails.estimated_cost - state.get("estimated_cost", agent.guardrails.cost_of(type(agent.guardrails.total_usage)(**baseline)))),
+            "incomplete": agent.guardrails.usage_incomplete}
+
+
+def activity_checkpoint(agent, state):
+    return {"accounting": activity_accounting(agent, state), "provider_state": provider_state(agent)}
+
+
+def restore_heartbeat(agent):
+    for detail in activity.info().heartbeat_details:
+        if isinstance(detail, dict) and "accounting" in detail:
+            restore_provider_state(agent, detail.get("provider_state"))
+            saved = detail["accounting"]
+            from ..types import TokenUsage
+            agent.guardrails.track_usage(TokenUsage(**saved.get("usage", {})), cost=saved.get("cost", 0))
+            agent.guardrails.usage_incomplete = True
+            break
+
+
+async def heartbeat_loop(agent, state):
+    while True:
+        activity.heartbeat(activity_checkpoint(agent, state))
+        await asyncio.sleep(5)
+
+
 class AgentActivities:
     def __init__(self, registry, artifacts, events):
         self.registry, self.artifacts, self.events = registry, artifacts, events
@@ -83,6 +119,11 @@ class AgentActivities:
         agent = await self._agent(args)
         state = args.get("state")
         buffered = []
+        modern = args.get("reliability_v2", False)
+        if modern:
+            restore_heartbeat(agent)
+            agent.guardrails.usage_observer = lambda *_args, **_kwargs: activity.heartbeat(activity_checkpoint(agent, state))
+        heart = asyncio.create_task(heartbeat_loop(agent, state)) if modern else None
 
         async def emit(event):
             if event.type in (RunEventType.TEXT_DELTA, RunEventType.THINKING_DELTA):
@@ -123,19 +164,46 @@ class AgentActivities:
                         )
                     except Exception:
                         pass
-                outcome = await command(agent, state, args["command"], emit)
+                try:
+                    outcome = await command(agent, state, args["command"], emit)
+                except Exception as exc:
+                    spent = not retryable(agent, exc) or activity.info().attempt >= agent.config.retry.attempts
+                    if modern and args["command"] == "compact" and spent:
+                        agent.guardrails.usage_incomplete = True
+                        agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
+                        fallback = {**state, "condense_without_model": True}
+                        outcome = await command(agent, fallback, "compact", emit)
+                    else:
+                        raise
+            if modern:
+                accounting_state = {**(state or {}), **outcome}
+                sync_accounting(agent, accounting_state)
+                outcome.update({k: accounting_state[k] for k in ("usage", "total_usage", "estimated_cost", "usage_incomplete", "provider_state") if k in accounting_state})
             return {
                 "outcome": await capture(agent, outcome),
                 "events": [e for e in buffered if e is not None],
                 "attempt": activity.info().attempt,
             }
-        except Exception as exc:
-            if not retryable(exc):
+        except BaseException as exc:
+            if modern:
+                accounting = activity_accounting(agent, state)
+                accounting["incomplete"] |= args["command"] in ("model", "compact")
+                checkpoint = {"accounting": accounting, "provider_state": provider_state(agent)}
+                activity.heartbeat(checkpoint)
+                retry = agent.config.retry
+                delay = retry.wait_for(activity.info().attempt, retry_after(agent, exc))
                 raise ApplicationError(
-                    str(exc), type=type(exc).__name__, non_retryable=True
+                    str(exc), checkpoint, type=type(exc).__name__,
+                    non_retryable=isinstance(exc, asyncio.CancelledError) or not retryable(agent, exc),
+                    next_retry_delay=timedelta(seconds=max(0.001, delay)),
                 ) from None
+            if not retryable(agent, exc):
+                raise ApplicationError(str(exc), type=type(exc).__name__, non_retryable=True) from None
             raise
         finally:
+            if heart is not None:
+                heart.cancel()
+                await asyncio.gather(heart, return_exceptions=True)
             await agent.aclose()
 
     @activity.defn(name="harness_tool_v1")
@@ -147,19 +215,28 @@ class AgentActivities:
         async def ignore(event):
             pass
 
-        async def heartbeat():
-            while True:
-                activity.heartbeat(entry["execution_key"])
-                await asyncio.sleep(5)
-
-        heart = asyncio.create_task(heartbeat())
+        modern = args.get("reliability_v2", False)
+        if modern:
+            restore_heartbeat(agent)
+            agent.guardrails.usage_observer = lambda *_args, **_kwargs: activity.heartbeat(activity_checkpoint(agent, args["state"]))
+        heart = asyncio.create_task(heartbeat_loop(agent, args["state"]))
         try:
-            # No middleware after execution: return the outcome to Temporal first.
-            return await execute_tool(agent, args["state"], entry, ignore)
-        except ToolApprovalRequired as exc:
-            raise ApplicationError(
-                str(exc), type="ToolApprovalRequired", non_retryable=True
-            ) from None
+            # Commit both the tool result and child charges before middleware.
+            result = await execute_tool(agent, args["state"], entry, ignore)
+            return {"result": result, "accounting": activity_accounting(agent, args["state"])} if modern else result
+        except BaseException as exc:
+            if modern:
+                accounting = activity_accounting(agent, args["state"])
+                accounting["incomplete"] = True
+                checkpoint = {"accounting": accounting, "provider_state": provider_state(agent)}
+                activity.heartbeat(checkpoint)
+                raise ApplicationError(
+                    str(exc), checkpoint, type=type(exc).__name__,
+                    non_retryable=isinstance(exc, (ToolApprovalRequired, asyncio.CancelledError)),
+                ) from None
+            if isinstance(exc, ToolApprovalRequired):
+                raise ApplicationError(str(exc), type="ToolApprovalRequired", non_retryable=True) from None
+            raise
         finally:
             heart.cancel()
             await asyncio.gather(heart, return_exceptions=True)

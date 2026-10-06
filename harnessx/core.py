@@ -309,6 +309,7 @@ class Agent:
                 total_usage=self.guardrails.total_usage, metadata=data["metadata"],
                 config=asdict(self.config), extensions=data["extensions"],
                 lifetime_iterations=data["lifetime_iterations"],
+                estimated_cost=data["estimated_cost"], provider_state=data["provider_state"],
             )
             await asyncio.to_thread(storage.save_session, state)
         finally:
@@ -340,6 +341,8 @@ class Agent:
                 "metadata": state.metadata, "extensions": state.extensions,
                 "total_usage": asdict(state.total_usage),
                 "lifetime_iterations": state.lifetime_iterations,
+                **({"estimated_cost": state.estimated_cost} if state.estimated_cost is not None else {}),
+                "provider_state": state.provider_state,
             })
             return agent
         except BaseException:
