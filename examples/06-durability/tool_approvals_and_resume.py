@@ -6,7 +6,7 @@ a temporary directory). ``runtime.approve(pending, allow=..., resume=True)`` rec
 decision and runs the turn to its end, so approving later, even from another process,
 continues the run instead of starting over.
 
-Run:   python examples/05-durability/tool_approvals_and_resume.py
+Run:   python examples/06-durability/tool_approvals_and_resume.py
 Needs: Nothing: a scripted model, no network. It asks one question before writing a note.
 """
 

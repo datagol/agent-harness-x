@@ -7,7 +7,7 @@ the hard stop. Here a scripted model polls a build that never leaves the queue, 
 cleanly.
 
 Run:
-    python examples/04-control/loop_guard.py
+    python examples/05-control/loop_guard.py
 Needs: Nothing: a scripted model, no network.
 """
 

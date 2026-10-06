@@ -4,7 +4,7 @@ Adding ``LangSmithExtension`` to an Agent is the whole integration. Each turn be
 ``run_name``; every model call nests under it with its token usage, and every tool call with its arguments
 and result. Tags and metadata are attached to the run so you can filter for them in the LangSmith UI.
 
-Run:   python examples/06-quality/tracing_with_langsmith.py
+Run:   python examples/07-quality/tracing_with_langsmith.py
 Needs: pip install "harnessx[langsmith]", ANTHROPIC_API_KEY and LANGSMITH_API_KEY
 (optionally LANGSMITH_PROJECT, default "harnessx-demo").
 """

@@ -6,9 +6,9 @@ between concepts. Only the bundle index goes into the system prompt; the model f
 which this example prints as a live indicator. The sample bundle is examples/knowledge/.
 
 Run:
-    python examples/03-context/knowledge_bundles_okf.py
+    python examples/04-context/knowledge_bundles_okf.py
     AGENT_KNOWLEDGE=https://github.com/GoogleCloudPlatform/open-knowledge-format/tree/main/bundles/ga4 \\
-        python examples/03-context/knowledge_bundles_okf.py
+        python examples/04-context/knowledge_bundles_okf.py
 
 AGENT_KNOWLEDGE takes a folder or git URL (several, comma-separated). AGENT_PROVIDER and AGENT_MODEL pick
 another provider.

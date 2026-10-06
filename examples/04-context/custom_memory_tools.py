@@ -6,7 +6,7 @@ later session recalls what an earlier one saved. Your own tools can share those 
 narrow shortcut the model picks reliably for facts, and `forget_fact` adds the delete the built-ins leave out.
 
 Run:
-    python examples/03-context/custom_memory_tools.py
+    python examples/04-context/custom_memory_tools.py
 
 Memories are written under .agent_memory/ in the current directory. Type `memories` to list them.
 

@@ -12,7 +12,7 @@ fifth a summary. Its `count_tokens` is a plain characters/4 estimate, and it ans
 engine sends with its own system prompt and no tools.
 
 Run:
-    python examples/03-context/condensing_a_long_history.py
+    python examples/04-context/condensing_a_long_history.py
 Needs: Nothing: a scripted model, no network.
 """
 

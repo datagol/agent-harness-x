@@ -7,7 +7,7 @@ on the run stream, `RunEventType.TODOS_UPDATED` with the whole list, the complet
 Afterwards the list is on `agent.todos`. A scripted model works through a three-step database migration.
 
 Run:
-    python examples/03-context/planning_todos.py
+    python examples/04-context/planning_todos.py
 Needs: Nothing: a scripted model, no network.
 """
 

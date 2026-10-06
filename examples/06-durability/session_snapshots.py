@@ -9,7 +9,7 @@ This is the step before AgentRuntime: a snapshot is taken between turns and neve
 a run that was interrupted halfway. When a run must survive a crash, a pending approval, or a
 restart in the middle of a tool call, use AgentRuntime (see the other examples in this folder).
 
-Run:   python examples/05-durability/session_snapshots.py
+Run:   python examples/06-durability/session_snapshots.py
 Needs: Nothing: a scripted model, no network. Snapshots go to a temporary directory.
 """
 

@@ -7,8 +7,8 @@ The review is a separate assessment: it never changes the run's status, output o
 that did not complete are not reviewed.
 
 Run:
-    python examples/06-quality/decisions_answer_review.py
-    python examples/06-quality/decisions_answer_review.py --live   # Jev reviews the fixed answer
+    python examples/07-quality/decisions_answer_review.py
+    python examples/07-quality/decisions_answer_review.py --live   # Jev reviews the fixed answer
 Needs: Nothing by default: fixed decisions and a scripted agent, no network.
 --live needs pip install "harnessx[jev]" and TYPESAFE_API_KEY; the agent stays scripted.
 """

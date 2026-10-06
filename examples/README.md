@@ -4,7 +4,7 @@ Every example is one Python file you run by its path:
 
 ```bash
 uv sync --all-extras
-python examples/04-control/loop_guard.py
+python examples/05-control/loop_guard.py
 ```
 
 They are plain scripts, not a package. Each file imports only `harnessx`, the
@@ -23,7 +23,7 @@ running and no Python or Node to install:
 
 ```bash
 docker compose up                                          # the browser at localhost:8765
-docker compose run --rm web python examples/02-tools/skills_lazy_loading.py
+docker compose run --rm web python examples/03-skills/skills_lazy_loading.py
 ```
 
 ## No API key needed
@@ -34,17 +34,17 @@ recording or evaluations. They verify integration behaviour, not model quality.
 ```bash
 python examples/01-basics/prompt_caching.py
 python examples/01-basics/progress_and_waiting.py
-python examples/02-tools/skills_lazy_loading.py
-python examples/03-context/planning_todos.py
-python examples/03-context/condensing_a_long_history.py
-python examples/04-control/loop_guard.py
-python examples/04-control/retries_and_fallback.py
-python examples/05-durability/tool_approvals_and_resume.py   # asks one question
-python examples/05-durability/session_snapshots.py
-python examples/06-quality/decisions_routing.py --min-confidence 0.8
-python examples/06-quality/decisions_answer_review.py
-python examples/06-quality/flight_recorder.py --output /tmp/invoice-incident.hx
-python examples/06-quality/evaluating_with_datasets.py --offline   # needs the langsmith extra
+python examples/03-skills/skills_lazy_loading.py
+python examples/04-context/planning_todos.py
+python examples/04-context/condensing_a_long_history.py
+python examples/05-control/loop_guard.py
+python examples/05-control/retries_and_fallback.py
+python examples/06-durability/tool_approvals_and_resume.py   # asks one question
+python examples/06-durability/session_snapshots.py
+python examples/07-quality/decisions_routing.py --min-confidence 0.8
+python examples/07-quality/decisions_answer_review.py
+python examples/07-quality/flight_recorder.py --output /tmp/invoice-incident.hx
+python examples/07-quality/evaluating_with_datasets.py --offline   # needs the langsmith extra
 ```
 
 ## 01-basics
@@ -60,12 +60,17 @@ python examples/06-quality/evaluating_with_datasets.py --offline   # needs the l
 
 | File | What it shows | Needs |
 |---|---|---|
-| `skills_lazy_loading.py` | The model sees a skill catalog and loads one body with the `Skill` tool; hook order | Nothing |
 | `filesystem_tools_and_permissions.py` | The file and shell built-ins under `CliPermissionManager`: reads allowed, writes and commands asked first | `ANTHROPIC_API_KEY` |
 | `mcp_servers.py` | An MCP server's tools next to native ones; approvals for MCP tools | `ANTHROPIC_API_KEY`, `harnessx[mcp]`, an MCP server |
+
+## 03-skills
+
+| File | What it shows | Needs |
+|---|---|---|
+| `skills_lazy_loading.py` | The model sees a skill catalog and loads one body with the `Skill` tool; hook order | Nothing |
 | `skills_interactive.py` | A live model picking skills from `examples/skills/` when the task calls for them | `ANTHROPIC_API_KEY` (or `AGENT_PROVIDER` + `AGENT_MODEL`) |
 
-## 03-context
+## 04-context
 
 | File | What it shows | Needs |
 |---|---|---|
@@ -74,7 +79,7 @@ python examples/06-quality/evaluating_with_datasets.py --offline   # needs the l
 | `knowledge_bundles_okf.py` | Search, concept reads and link traversal over the OKF bundle in `examples/knowledge/` | `ANTHROPIC_API_KEY` (or `AGENT_PROVIDER` + `AGENT_MODEL`) |
 | `custom_memory_tools.py` | The built-in `save_memory` and `recall_memories`, plus two tools of your own over the same stores | `ANTHROPIC_API_KEY` |
 
-## 04-control
+## 05-control
 
 | File | What it shows | Needs |
 |---|---|---|
@@ -83,7 +88,7 @@ python examples/06-quality/evaluating_with_datasets.py --offline   # needs the l
 | `delegating_to_subagents.py` | An orchestrator handing one task to declared specialists (`Agent(subagents=[...])`) | `ANTHROPIC_API_KEY` |
 | `autonomous_task_runner.py` | One task from the command line: it writes the deliverable and runs it | `ANTHROPIC_API_KEY`; `TAVILY_API_KEY` adds web search, `LANGSMITH_API_KEY` tracing |
 
-## 05-durability
+## 06-durability
 
 | File | What it shows | Needs |
 |---|---|---|
@@ -91,7 +96,7 @@ python examples/06-quality/evaluating_with_datasets.py --offline   # needs the l
 | `session_snapshots.py` | `save_session` and `Agent.load_session` into a fresh agent: the step before a durable runtime | Nothing |
 | `durable_crash_recovery.py` | A run that survives its process crashing, on PostgreSQL, without repeating its tool | `harnessx[postgres]` and a database; `chat` also `ANTHROPIC_API_KEY` |
 
-## 06-quality
+## 07-quality
 
 | File | What it shows | Needs |
 |---|---|---|
@@ -101,7 +106,7 @@ python examples/06-quality/evaluating_with_datasets.py --offline   # needs the l
 | `evaluating_with_datasets.py` | A small dataset of tool-selection and arithmetic cases, scored | `harnessx[langsmith]`; live mode `ANTHROPIC_API_KEY` |
 | `tracing_with_langsmith.py` | One run tree per turn in LangSmith, with spans for model and tool calls | `harnessx[langsmith]`, `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY` |
 
-## 07-sandboxes
+## 08-sandboxes
 
 | File | What it shows | Needs |
 |---|---|---|
@@ -149,16 +154,16 @@ changes that.
 ## PostgreSQL recovery
 
 Follow the [PostgreSQL durability walkthrough](../doc/postgres_durability.md).
-Copy `05-durability/postgres.config.example.json` to `postgres.config.json` in
+Copy `06-durability/postgres.config.example.json` to `postgres.config.json` in
 the same folder (it is Git-ignored), fill in the connection details and password,
 and leave `{password}` in the URL:
 
 ```bash
-python examples/05-durability/durable_crash_recovery.py check  --config examples/05-durability/postgres.config.json
-python examples/05-durability/durable_crash_recovery.py crash  --config examples/05-durability/postgres.config.json  # exits 42
-python examples/05-durability/durable_crash_recovery.py status --config examples/05-durability/postgres.config.json
+python examples/06-durability/durable_crash_recovery.py check  --config examples/06-durability/postgres.config.json
+python examples/06-durability/durable_crash_recovery.py crash  --config examples/06-durability/postgres.config.json  # exits 42
+python examples/06-durability/durable_crash_recovery.py status --config examples/06-durability/postgres.config.json
 # Wait at least 30 seconds after the crash for the worker lease to expire.
-python examples/05-durability/durable_crash_recovery.py resume --config examples/05-durability/postgres.config.json
+python examples/06-durability/durable_crash_recovery.py resume --config examples/06-durability/postgres.config.json
 ```
 
 `check` prepares the schema without running an agent. With no command it runs

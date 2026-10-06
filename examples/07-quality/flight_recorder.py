@@ -6,7 +6,7 @@ and ``IncidentRecorder().playback(bundle)`` verifies and replays it later, after
 and database are gone, without calling the model or any tool again. The scripted model fails once
 (an injected connection error) so the recording shows a retry, then calls a synthetic invoice tool.
 
-Run:   python examples/06-quality/flight_recorder.py --output /tmp/invoice-incident.hx
+Run:   python examples/07-quality/flight_recorder.py --output /tmp/invoice-incident.hx
 Needs: Nothing: a scripted model, no network. The --output file must not already exist.
 """
 

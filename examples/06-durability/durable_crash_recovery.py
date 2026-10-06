@@ -8,11 +8,11 @@ changing it, ``check`` creates or validates the schema, and the default ``chat``
 answer through the PostgreSQL runtime.
 
 Run:
-    python examples/05-durability/durable_crash_recovery.py check  --config examples/05-durability/postgres.config.json
-    python examples/05-durability/durable_crash_recovery.py crash  --config examples/05-durability/postgres.config.json
-    python examples/05-durability/durable_crash_recovery.py status --config examples/05-durability/postgres.config.json
-    python examples/05-durability/durable_crash_recovery.py resume --config examples/05-durability/postgres.config.json
-    python examples/05-durability/durable_crash_recovery.py chat   --config examples/05-durability/postgres.config.json
+    python examples/06-durability/durable_crash_recovery.py check  --config examples/06-durability/postgres.config.json
+    python examples/06-durability/durable_crash_recovery.py crash  --config examples/06-durability/postgres.config.json
+    python examples/06-durability/durable_crash_recovery.py status --config examples/06-durability/postgres.config.json
+    python examples/06-durability/durable_crash_recovery.py resume --config examples/06-durability/postgres.config.json
+    python examples/06-durability/durable_crash_recovery.py chat   --config examples/06-durability/postgres.config.json
 Copy postgres.config.example.json beside this file to postgres.config.json and fill it in, or set DATABASE_URL.
 
 Needs: pip install "harnessx[postgres]" and a PostgreSQL database. Only ``chat`` (the default) calls a model,

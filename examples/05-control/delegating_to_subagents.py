@@ -6,8 +6,8 @@ task it is given. The orchestrator here has three specialists (code review, web 
 own filesystem tools, and runs one task: a default that uses two of them, or your own.
 
 Run:
-    python examples/04-control/delegating_to_subagents.py
-    python examples/04-control/delegating_to_subagents.py "Research https://example.com and summarize it"
+    python examples/05-control/delegating_to_subagents.py
+    python examples/05-control/delegating_to_subagents.py "Research https://example.com and summarize it"
 Needs: ANTHROPIC_API_KEY
 """
 

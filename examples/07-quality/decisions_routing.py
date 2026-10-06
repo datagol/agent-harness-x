@@ -8,8 +8,8 @@ and falls back to general unless the answer is a known route with at least ``--m
 illustrative; calibrate your own.
 
 Run:
-    python examples/06-quality/decisions_routing.py --min-confidence 0.8
-    python examples/06-quality/decisions_routing.py --min-confidence 0.8 --live --provider anthropic --model MODEL_ID
+    python examples/07-quality/decisions_routing.py --min-confidence 0.8
+    python examples/07-quality/decisions_routing.py --min-confidence 0.8 --live --provider anthropic --model MODEL_ID
 Needs: Nothing by default: fixed decisions and scripted agents, no network.
 --live needs pip install "harnessx[jev]", TYPESAFE_API_KEY, and the chosen provider's API key.
 """

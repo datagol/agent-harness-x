@@ -5,8 +5,8 @@ must contain). ``evaluate_agent_async`` runs a fresh agent per case and scores i
 then prints a summary. With LangSmith keys set, a live run also uploads the experiment so you can compare runs.
 
 Run:
-    python examples/06-quality/evaluating_with_datasets.py --offline   # scripted model, no network
-    python examples/06-quality/evaluating_with_datasets.py             # live model; uploads when LangSmith is set
+    python examples/07-quality/evaluating_with_datasets.py --offline   # scripted model, no network
+    python examples/07-quality/evaluating_with_datasets.py             # live model; uploads when LangSmith is set
 Needs: pip install "harnessx[langsmith]". --offline needs nothing else. Live: ANTHROPIC_API_KEY, and optionally
 LANGSMITH_API_KEY (and LANGSMITH_PROJECT) to upload.
 """

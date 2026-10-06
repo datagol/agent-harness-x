@@ -17,7 +17,7 @@ from harnessx import PostgresBackend, SQLiteBackend
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = example_path("05-durability/durable_crash_recovery.py")
+EXAMPLE = example_path("06-durability/durable_crash_recovery.py")
 DSN = os.environ.get("HARNESS_TEST_POSTGRES_DSN")
 
 
@@ -126,7 +126,7 @@ def test_report_survives_process_crash_without_repeating_tool(tmp_path, database
 
 
 def test_recovery_example_missing_session_is_actionable(tmp_path, monkeypatch):
-    main = load_example("05-durability/durable_crash_recovery.py").main
+    main = load_example("06-durability/durable_crash_recovery.py").main
 
     monkeypatch.setenv("DATABASE_URL", "unused")
     with pytest.raises(SystemExit, match="Run crash first"):
@@ -134,7 +134,7 @@ def test_recovery_example_missing_session_is_actionable(tmp_path, monkeypatch):
 
 
 def test_postgres_config_encodes_password_and_overrides_environment(tmp_path, monkeypatch):
-    load_connection_string = load_example("05-durability/durable_crash_recovery.py").load_connection_string
+    load_connection_string = load_example("06-durability/durable_crash_recovery.py").load_connection_string
 
     password = 'p@ss:/?#% +\\"\'$ä'
     config = tmp_path / "postgres.json"
@@ -160,7 +160,7 @@ def test_postgres_config_encodes_password_and_overrides_environment(tmp_path, mo
 def test_bad_postgres_config_fails_before_connecting_without_echoing_secrets(
     tmp_path, monkeypatch, content,
 ):
-    postgres_runtime = load_example("05-durability/durable_crash_recovery.py")
+    postgres_runtime = load_example("06-durability/durable_crash_recovery.py")
 
     config = tmp_path / "postgres.json"
     config.write_text(content)

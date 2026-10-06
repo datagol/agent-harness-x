@@ -72,6 +72,7 @@ const CATEGORIES = [
   "All examples",
   "Basics",
   "Tools",
+  "Skills",
   "Context",
   "Control",
   "Durability",

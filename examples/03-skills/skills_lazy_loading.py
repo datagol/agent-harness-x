@@ -6,7 +6,7 @@ SKILL_INVOKED hook fires. A scripted model plays the part a real one would: it a
 on its first turn and answers on the second. The hook log at the end shows the order things happen in.
 
 Run:
-    python examples/02-tools/skills_lazy_loading.py
+    python examples/03-skills/skills_lazy_loading.py
 
 Needs: Nothing: a scripted model, no network
 """

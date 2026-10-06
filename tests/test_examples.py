@@ -110,15 +110,15 @@ def test_every_example_is_a_standalone_script(path):
 OFFLINE = [
     ("01-basics/prompt_caching.py", [], "prefix stable across iterations: yes"),
     ("01-basics/progress_and_waiting.py", [], "waiting"),
-    ("02-tools/skills_lazy_loading.py", [], "SKILL_INVOKED"),
-    ("03-context/planning_todos.py", [], "TODOS_UPDATED [3/3]"),
-    ("03-context/condensing_a_long_history.py", [], "summarized=True"),
-    ("04-control/loop_guard.py", [], "REPETITION:"),
-    ("04-control/retries_and_fallback.py", [], "served by backup"),
-    ("05-durability/session_snapshots.py", [], "History after continuing"),
-    ("06-quality/decisions_routing.py", ["--min-confidence", "0.8"], '"route": "sql"'),
-    ("06-quality/decisions_answer_review.py", [], '"probability": 0.96'),
-    ("06-quality/flight_recorder.py", ["--output", "incident.hx"], "Playback made zero model/tool calls"),
+    ("03-skills/skills_lazy_loading.py", [], "SKILL_INVOKED"),
+    ("04-context/planning_todos.py", [], "TODOS_UPDATED [3/3]"),
+    ("04-context/condensing_a_long_history.py", [], "summarized=True"),
+    ("05-control/loop_guard.py", [], "REPETITION:"),
+    ("05-control/retries_and_fallback.py", [], "served by backup"),
+    ("06-durability/session_snapshots.py", [], "History after continuing"),
+    ("07-quality/decisions_routing.py", ["--min-confidence", "0.8"], '"route": "sql"'),
+    ("07-quality/decisions_answer_review.py", [], '"probability": 0.96'),
+    ("07-quality/flight_recorder.py", ["--output", "incident.hx"], "Playback made zero model/tool calls"),
 ]
 
 
@@ -140,13 +140,13 @@ def test_offline_examples_run_by_path_from_anywhere(relative, args, expected, tm
 INTERACTIVE = {
     "01-basics/streaming_chat.py": [ToolCall("math", "calculate", {"expression": "6 * 7"})],
     "02-tools/filesystem_tools_and_permissions.py": [ToolCall("read", "read_file", {"path": "fixture.txt"})],
-    "03-context/custom_memory_tools.py": [
+    "04-context/custom_memory_tools.py": [
         ToolCall("note", "save_memory", {"title": "Fixture", "content": "Example note"}),
         ToolCall("fact", "save_fact", {"content": "Example fact"}),
     ],
-    "02-tools/skills_interactive.py": [ToolCall("skill", "Skill", {"skill": "code-review"})],
-    "03-context/knowledge_bundles_okf.py": [ToolCall("kb", "search_concepts", {"query": "active users"})],
-    "07-sandboxes/sandbox_isolation_tiers.py": [ToolCall("code", "run_python", {"code": "print('fixture execution')"})],
+    "03-skills/skills_interactive.py": [ToolCall("skill", "Skill", {"skill": "code-review"})],
+    "04-context/knowledge_bundles_okf.py": [ToolCall("kb", "search_concepts", {"query": "active users"})],
+    "08-sandboxes/sandbox_isolation_tiers.py": [ToolCall("code", "run_python", {"code": "print('fixture execution')"})],
 }
 
 
@@ -185,7 +185,7 @@ async def test_interactive_examples_complete_and_close(relative, example_environ
 
 @pytest.mark.asyncio
 async def test_declared_specialists_close_their_agents(example_environment, tmp_path):
-    specialist_definitions = load_example("04-control/delegating_to_subagents.py").specialist_definitions
+    specialist_definitions = load_example("05-control/delegating_to_subagents.py").specialist_definitions
 
     async with Agent(subagents=specialist_definitions(str(tmp_path))) as parent:
         parent.permissions.set_permission("delegate_research", PermissionLevel.ALLOW)
@@ -202,7 +202,7 @@ async def test_declared_specialists_close_their_agents(example_environment, tmp_
 
 @pytest.mark.asyncio
 async def test_delegation_example_runs_one_task(example_environment, capsys):
-    example = load_example("04-control/delegating_to_subagents.py")
+    example = load_example("05-control/delegating_to_subagents.py")
     await example.main("Review print(1)")
     assert "Error:" not in capsys.readouterr().out
 
@@ -294,7 +294,7 @@ async def test_switching_providers_one_shot_reports_failed_run(example_environme
 
 @pytest.mark.asyncio
 async def test_skills_lazy_loading_uses_the_real_skill_tool(example_environment, capsys):
-    await load_example("02-tools/skills_lazy_loading.py").main()
+    await load_example("03-skills/skills_lazy_loading.py").main()
     assert "SKILL_INVOKED  skill=code-review" in capsys.readouterr().out
 
 
@@ -316,7 +316,7 @@ async def test_flight_recorder_example_exports_after_runtime_closes(example_envi
     from harnessx import IncidentRecorder
 
     path = tmp_path / "incident.hx"
-    await load_example("06-quality/flight_recorder.py").main(path)
+    await load_example("07-quality/flight_recorder.py").main(path)
     assert (await IncidentRecorder().verify(path)).complete
 
 
@@ -324,7 +324,7 @@ async def test_flight_recorder_example_exports_after_runtime_closes(example_envi
 @pytest.mark.parametrize("answer, exists", [("y", True), ("n", False)])
 async def test_approval_example_both_decisions(example_environment, monkeypatch, capsys, answer, exists):
     monkeypatch.setattr(builtins, "input", lambda prompt="": answer)
-    await load_example("05-durability/tool_approvals_and_resume.py").main()
+    await load_example("06-durability/tool_approvals_and_resume.py").main()
     output = capsys.readouterr().out
     assert "Before approval: awaiting_input | Note exists: False" in output
     assert f"After approval: completed | Note exists: {exists}" in output
@@ -333,11 +333,11 @@ async def test_approval_example_both_decisions(example_environment, monkeypatch,
 @pytest.mark.asyncio
 async def test_new_recipes_show_their_feature_firing(example_environment, capsys):
     for relative, expected in [
-        ("04-control/loop_guard.py", "REPETITION: cycle of 1 call(s), 3 laps"),
-        ("04-control/retries_and_fallback.py", "LLM_RESPONSE: served by backup"),
-        ("03-context/planning_todos.py", "TODOS_UPDATED [3/3]"),
-        ("03-context/condensing_a_long_history.py", "summarized=True"),
-        ("05-durability/session_snapshots.py", "History after continuing"),
+        ("05-control/loop_guard.py", "REPETITION: cycle of 1 call(s), 3 laps"),
+        ("05-control/retries_and_fallback.py", "LLM_RESPONSE: served by backup"),
+        ("04-context/planning_todos.py", "TODOS_UPDATED [3/3]"),
+        ("04-context/condensing_a_long_history.py", "summarized=True"),
+        ("06-durability/session_snapshots.py", "History after continuing"),
     ]:
         await load_example(relative).main()
         assert expected in capsys.readouterr().out, relative
@@ -403,7 +403,7 @@ async def test_mcp_example_setup_chat_and_teardown(example_environment, monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("connection_fails", [False, True])
 async def test_postgres_example_runtime_flow_with_local_store(example_environment, monkeypatch, tmp_path, connection_fails):
-    example = load_example("05-durability/durable_crash_recovery.py")
+    example = load_example("06-durability/durable_crash_recovery.py")
     # The example's runtime ownership/stream API is tested here; real PostgreSQL
     # remains covered by the separately configured service integration suite.
     backend = SQLiteBackend(str(tmp_path / "runtime.db"))
@@ -423,7 +423,7 @@ async def test_postgres_example_runtime_flow_with_local_store(example_environmen
 
 @pytest.mark.asyncio
 async def test_tracing_example_closes_its_agent(example_environment, monkeypatch, capsys):
-    example = load_example("06-quality/tracing_with_langsmith.py")
+    example = load_example("07-quality/tracing_with_langsmith.py")
 
     class LocalTrace(Extension):
         name = "local-trace"
@@ -442,7 +442,7 @@ async def test_tracing_example_closes_its_agent(example_environment, monkeypatch
 @pytest.mark.asyncio
 async def test_offline_evaluation_example_runs_without_model_or_upload(example_environment, monkeypatch, capsys):
     pytest.importorskip("langsmith")
-    example = load_example("06-quality/evaluating_with_datasets.py")
+    example = load_example("07-quality/evaluating_with_datasets.py")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Offline example constructed a live model")
@@ -457,7 +457,7 @@ async def test_offline_evaluation_example_runs_without_model_or_upload(example_e
 def test_examples_folder_has_only_topic_folders_and_data():
     entries = {path.name for path in EXAMPLES.iterdir() if path.name != "__pycache__"}
     assert entries == {
-        "01-basics", "02-tools", "03-context", "04-control", "05-durability", "06-quality", "07-sandboxes",
+        "01-basics", "02-tools", "03-skills", "04-context", "05-control", "06-durability", "07-quality", "08-sandboxes",
         "skills", "knowledge", "README.md",
     }, entries
-    assert Path(EXAMPLES / "05-durability" / "postgres.config.example.json").is_file()
+    assert Path(EXAMPLES / "06-durability" / "postgres.config.example.json").is_file()

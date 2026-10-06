@@ -96,9 +96,9 @@ uv run python examples/01-basics/streaming_chat.py
 
 See the [examples guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md) for every example, optional
 dependencies, and service requirements. For a first run without API keys, use
-`uv run python examples/02-tools/skills_lazy_loading.py`,
-`uv run python examples/04-control/loop_guard.py`, or
-`uv run python examples/06-quality/flight_recorder.py --output incident.hx`.
+`uv run python examples/03-skills/skills_lazy_loading.py`,
+`uv run python examples/05-control/loop_guard.py`, or
+`uv run python examples/07-quality/flight_recorder.py --output incident.hx`.
 
 `Agent()` and `streaming_chat.py` use Anthropic by default. To choose Anthropic,
 OpenAI, Gemini, OpenRouter, or Azure OpenAI, use [switching providers](https://github.com/datagol/agent-harness-x/blob/main/examples/01-basics/switching_providers.py):
@@ -108,8 +108,8 @@ optional dependencies, and streaming options.
 
 The standalone [decision SDK](https://harnessx-site.vercel.app/docs/decisions/) provides typed Jev assessments
 alongside agents. Try its offline examples with `python
-examples/06-quality/decisions_routing.py --min-confidence 0.8` or `python
-examples/06-quality/decisions_answer_review.py`. Live calls require the `jev` extra,
+examples/07-quality/decisions_routing.py --min-confidence 0.8` or `python
+examples/07-quality/decisions_answer_review.py`. Live calls require the `jev` extra,
 `TYPESAFE_API_KEY`, and an explicit `--live` flag.
 
 Upgrading from 0.3? [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md) lists every
@@ -1463,7 +1463,7 @@ For incident debugging, opt in with `AgentRuntime(..., recording=True)`. The
 exports portable incident bundles, and verifies/plays them back offline. Export
 payloads and artifacts are opt-in. SQLite is locally tested; PostgreSQL requires
 service qualification, and Temporal recording is not implemented. Try
-`python examples/06-quality/flight_recorder.py --output /tmp/invoice-incident.hx` without an API key.
+`python examples/07-quality/flight_recorder.py --output /tmp/invoice-incident.hx` without an API key.
 
 ---
 
@@ -1535,7 +1535,7 @@ The harness includes first-class evaluation capabilities powered by the
 tool selection, skill routing, multi-agent delegation, and guardrails either
 locally without uploading results or in the LangSmith Web UI. Local evaluation
 still invokes the supplied agent and may incur model/tool costs. The scripted
-`python examples/06-quality/evaluating_with_datasets.py --offline` example needs no model API key.
+`python examples/07-quality/evaluating_with_datasets.py --offline` example needs no model API key.
 
 ### Running an evaluation
 
@@ -1591,7 +1591,7 @@ an agent bound to your loop. Experiments are named `harnessx-eval-...` by defaul
 
 ```bash
 # Scripted integration demonstration (langsmith extra, no API keys required)
-python examples/06-quality/evaluating_with_datasets.py --offline
+python examples/07-quality/evaluating_with_datasets.py --offline
 
 # Run live model benchmarks without upload (model API key required)
 python -m harnessx.evals.cli --suite tool_calling --offline
@@ -1662,25 +1662,25 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `01-basics/progress_and_waiting.py` | A run's event stream, including `waiting` events while a slow model call is quiet | No services |
 | `01-basics/streaming_chat.py` | Streaming interactive chat, a calculator tool, workspace reads | Anthropic key |
 | `01-basics/switching_providers.py --provider P --model M` | The same agent across Anthropic, OpenAI, Gemini, OpenRouter, and Azure; streaming or ordinary runs | The provider's extra and key |
-| `02-tools/skills_lazy_loading.py` | Skill discovery, invocation, and hook ordering | No services |
+| `03-skills/skills_lazy_loading.py` | Skill discovery, invocation, and hook ordering | No services |
 | `02-tools/filesystem_tools_and_permissions.py` | File and shell tools, an audit middleware, terminal approvals | Anthropic key |
 | `02-tools/mcp_servers.py --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
-| `02-tools/skills_interactive.py` | Lazy skill loading in a live conversation | Anthropic key by default |
-| `03-context/planning_todos.py` | `write_todos` / `read_todos` on a multi-step task, and `TODOS_UPDATED` | No services |
-| `03-context/condensing_a_long_history.py` | Old tool output cleared, then a summary, when the history outgrows the window | No services |
-| `03-context/knowledge_bundles_okf.py` | Answers from an OKF knowledge bundle: search, concept reads, links | Anthropic key by default |
-| `03-context/custom_memory_tools.py` | The built-in memory tools plus your own tools over the same stores | Anthropic key |
-| `04-control/loop_guard.py` | `LoopGuard` catching a repeated call; the `REPETITION` hook | No services |
-| `04-control/retries_and_fallback.py` | `RetryPolicy` retrying a 503, then `FallbackProvider` switching to a backup | No services |
-| `04-control/delegating_to_subagents.py` | Constructor-declared specialists with isolated tools and permissions | Anthropic key |
-| `04-control/autonomous_task_runner.py "TASK" -o FILE` | One task from the command line: it writes the deliverable and runs it | Anthropic key |
-| `05-durability/tool_approvals_and_resume.py` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
-| `05-durability/session_snapshots.py` | `save_session` and `Agent.load_session` into a fresh agent | No services |
-| `05-durability/durable_crash_recovery.py` | Live streaming on PostgreSQL; `check` / `crash` / `status` / `resume` recover a run without repeating its tool | `postgres` extra and a database; `chat` also an Anthropic key |
-| `06-quality/decisions_routing.py --min-confidence 0.8` | A Choice decision classifies a document and routes a query to one of three agents | No services by default; `--live` needs the `jev` extra |
-| `06-quality/decisions_answer_review.py` | Score reviews coverage and Noul checks evidence after a completed run | No services by default |
-| `06-quality/flight_recorder.py --output incident.hx` | A retried model call, middleware boundaries, and offline playback | No services; unused output path |
-| `06-quality/evaluating_with_datasets.py --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
-| `06-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
-| `07-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
+| `03-skills/skills_interactive.py` | Lazy skill loading in a live conversation | Anthropic key by default |
+| `04-context/planning_todos.py` | `write_todos` / `read_todos` on a multi-step task, and `TODOS_UPDATED` | No services |
+| `04-context/condensing_a_long_history.py` | Old tool output cleared, then a summary, when the history outgrows the window | No services |
+| `04-context/knowledge_bundles_okf.py` | Answers from an OKF knowledge bundle: search, concept reads, links | Anthropic key by default |
+| `04-context/custom_memory_tools.py` | The built-in memory tools plus your own tools over the same stores | Anthropic key |
+| `05-control/loop_guard.py` | `LoopGuard` catching a repeated call; the `REPETITION` hook | No services |
+| `05-control/retries_and_fallback.py` | `RetryPolicy` retrying a 503, then `FallbackProvider` switching to a backup | No services |
+| `05-control/delegating_to_subagents.py` | Constructor-declared specialists with isolated tools and permissions | Anthropic key |
+| `05-control/autonomous_task_runner.py "TASK" -o FILE` | One task from the command line: it writes the deliverable and runs it | Anthropic key |
+| `06-durability/tool_approvals_and_resume.py` | A persisted ASK approval and an explicit resume on SQLite | No services; terminal input |
+| `06-durability/session_snapshots.py` | `save_session` and `Agent.load_session` into a fresh agent | No services |
+| `06-durability/durable_crash_recovery.py` | Live streaming on PostgreSQL; `check` / `crash` / `status` / `resume` recover a run without repeating its tool | `postgres` extra and a database; `chat` also an Anthropic key |
+| `07-quality/decisions_routing.py --min-confidence 0.8` | A Choice decision classifies a document and routes a query to one of three agents | No services by default; `--live` needs the `jev` extra |
+| `07-quality/decisions_answer_review.py` | Score reviews coverage and Noul checks evidence after a completed run | No services by default |
+| `07-quality/flight_recorder.py --output incident.hx` | A retried model call, middleware boundaries, and offline playback | No services; unused output path |
+| `07-quality/evaluating_with_datasets.py --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
+| `07-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
+| `08-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
 | `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

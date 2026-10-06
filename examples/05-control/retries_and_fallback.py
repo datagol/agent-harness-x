@@ -11,7 +11,7 @@ connection loss are; other 4xx errors stop at once). The first failure is retrie
 the chain to the backup, which answers. Waits are a few milliseconds so the example runs in about a second.
 
 Run:
-    python examples/04-control/retries_and_fallback.py
+    python examples/05-control/retries_and_fallback.py
 Needs: Nothing: a scripted model, no network.
 """
 

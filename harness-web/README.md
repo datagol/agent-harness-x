@@ -80,25 +80,25 @@ folders. Each entry runs the file unchanged, as `python examples/<topic>/<file>.
 | Basics | Switching providers | `01-basics/switching_providers.py` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
 | Tools | Filesystem tools and permissions | `02-tools/filesystem_tools_and_permissions.py` | Anthropic; writes and shell commands ask for approval |
 | Tools | MCP servers | `02-tools/mcp_servers.py` | `mcp` extra, Anthropic key, stdio command or SSE URL |
-| Tools | Skills, loaded on demand | `02-tools/skills_lazy_loading.py` | Offline; displays real skill and hook events |
-| Tools | Skills with a live model | `02-tools/skills_interactive.py` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
-| Context | Knowledge bundles (OKF) | `03-context/knowledge_bundles_okf.py` | Retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL |
-| Context | Memory tools | `03-context/custom_memory_tools.py` | Anthropic; notes belong to the run's working directory |
-| Context | Planning with to-dos | `03-context/planning_todos.py` | Offline |
-| Context | Condensing a long history | `03-context/condensing_a_long_history.py` | Offline |
-| Control | Loop guard | `04-control/loop_guard.py` | Offline |
-| Control | Retries and fallback | `04-control/retries_and_fallback.py` | Offline |
-| Control | Delegating to subagents | `04-control/delegating_to_subagents.py` | Anthropic; constructor-defined specialists |
-| Control | Autonomous task runner | `04-control/autonomous_task_runner.py` | Anthropic; one task, writes and runs the deliverable |
-| Durability | Approvals and resume | `05-durability/tool_approvals_and_resume.py` | Offline; choose Allow once or Deny in the browser |
-| Durability | Durable runs on PostgreSQL | `05-durability/durable_crash_recovery.py` | `postgres` extra, `DATABASE_URL`, Anthropic key |
-| Durability | Session snapshots | `05-durability/session_snapshots.py` | Offline |
-| Quality | Evaluating with datasets | `06-quality/evaluating_with_datasets.py` | `langsmith` extra; offline by default, optional live model mode |
-| Quality | Decisions: routing and classification | `06-quality/decisions_routing.py` | Offline fixed decisions |
-| Quality | Decisions: answer review | `06-quality/decisions_answer_review.py` | Offline fixed decisions |
-| Quality | Tracing with LangSmith | `06-quality/tracing_with_langsmith.py` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
-| Quality | Flight recorder | `06-quality/flight_recorder.py` | Offline; download `incident.hx` after completion |
-| Sandboxes | Sandbox isolation tiers | `07-sandboxes/sandbox_isolation_tiers.py` | Anthropic; process tier by default |
+| Skills | Skills, loaded on demand | `03-skills/skills_lazy_loading.py` | Offline; displays real skill and hook events |
+| Skills | Skills with a live model | `03-skills/skills_interactive.py` | Configured `AGENT_PROVIDER` / `AGENT_MODEL`, Anthropic by default |
+| Context | Knowledge bundles (OKF) | `04-context/knowledge_bundles_okf.py` | Retrieval over the sample OKF bundle; `AGENT_KNOWLEDGE` selects a folder or Git URL |
+| Context | Memory tools | `04-context/custom_memory_tools.py` | Anthropic; notes belong to the run's working directory |
+| Context | Planning with to-dos | `04-context/planning_todos.py` | Offline |
+| Context | Condensing a long history | `04-context/condensing_a_long_history.py` | Offline |
+| Control | Loop guard | `05-control/loop_guard.py` | Offline |
+| Control | Retries and fallback | `05-control/retries_and_fallback.py` | Offline |
+| Control | Delegating to subagents | `05-control/delegating_to_subagents.py` | Anthropic; constructor-defined specialists |
+| Control | Autonomous task runner | `05-control/autonomous_task_runner.py` | Anthropic; one task, writes and runs the deliverable |
+| Durability | Approvals and resume | `06-durability/tool_approvals_and_resume.py` | Offline; choose Allow once or Deny in the browser |
+| Durability | Durable runs on PostgreSQL | `06-durability/durable_crash_recovery.py` | `postgres` extra, `DATABASE_URL`, Anthropic key |
+| Durability | Session snapshots | `06-durability/session_snapshots.py` | Offline |
+| Quality | Evaluating with datasets | `07-quality/evaluating_with_datasets.py` | `langsmith` extra; offline by default, optional live model mode |
+| Quality | Decisions: routing and classification | `07-quality/decisions_routing.py` | Offline fixed decisions |
+| Quality | Decisions: answer review | `07-quality/decisions_answer_review.py` | Offline fixed decisions |
+| Quality | Tracing with LangSmith | `07-quality/tracing_with_langsmith.py` | `langsmith` extra and Anthropic / LangSmith keys; uploads traces |
+| Quality | Flight recorder | `07-quality/flight_recorder.py` | Offline; download `incident.hx` after completion |
+| Sandboxes | Sandbox isolation tiers | `08-sandboxes/sandbox_isolation_tiers.py` | Anthropic; process tier by default |
 
 Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool

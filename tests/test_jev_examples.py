@@ -12,8 +12,8 @@ from harnessx.decisions import (
 from example_loader import load_example
 from scripted_provider import ScriptedProvider
 
-_routing = load_example("06-quality/decisions_routing.py")
-_review = load_example("06-quality/decisions_answer_review.py")
+_routing = load_example("07-quality/decisions_routing.py")
+_review = load_example("07-quality/decisions_answer_review.py")
 FixedDecisionProvider = _routing.FixedDecisionProvider
 ROUTES, choose_route, run_routed_query = _routing.ROUTES, _routing.choose_route, _routing.run_routed_query
 DOCUMENT_TYPES, classify_document = _routing.DOCUMENT_TYPES, _routing.classify_document
@@ -29,8 +29,8 @@ def no_network(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("module,args", [
-    ("06-quality/decisions_routing.py", ["--min-confidence", "0.8"]),
-    ("06-quality/decisions_answer_review.py", []),
+    ("07-quality/decisions_routing.py", ["--min-confidence", "0.8"]),
+    ("07-quality/decisions_answer_review.py", []),
 ])
 async def test_examples_default_offline_without_constructing_jev(module, args, monkeypatch, capsys):
     example = load_example(module)
@@ -145,7 +145,7 @@ async def test_review_skips_unsuccessful_runs(status):
 
 @pytest.mark.asyncio
 async def test_live_routing_requires_explicit_model():
-    main = load_example("06-quality/decisions_routing.py").main
+    main = load_example("07-quality/decisions_routing.py").main
     with pytest.raises(SystemExit) as exc:
         await main(["--live", "--min-confidence", ".8"])
     assert exc.value.code == 2
@@ -153,8 +153,8 @@ async def test_live_routing_requires_explicit_model():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("module,args", [
-    ("06-quality/decisions_routing.py", ["--min-confidence", ".8", "--model", "test-model"]),
-    ("06-quality/decisions_answer_review.py", []),
+    ("07-quality/decisions_routing.py", ["--min-confidence", ".8", "--model", "test-model"]),
+    ("07-quality/decisions_answer_review.py", []),
 ])
 async def test_live_flag_explicitly_selects_jev_without_live_calls(module, args, monkeypatch):
     example = load_example(module)

@@ -5,8 +5,8 @@ name and description; when a request matches, it calls the `Skill` tool, the bod
 and the SKILL_INVOKED hook fires, which this example prints as a live indicator.
 
 Run:
-    python examples/02-tools/skills_interactive.py
-    AGENT_PROVIDER=openai AGENT_MODEL=gpt-4.1 python examples/02-tools/skills_interactive.py
+    python examples/03-skills/skills_interactive.py
+    AGENT_PROVIDER=openai AGENT_MODEL=gpt-4.1 python examples/03-skills/skills_interactive.py
 
 Needs: ANTHROPIC_API_KEY (or another provider's key, its SDK extra, and AGENT_PROVIDER + AGENT_MODEL)
 

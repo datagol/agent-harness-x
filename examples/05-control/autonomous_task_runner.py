@@ -7,8 +7,8 @@ key (over MCP), tracing only with a LangSmith key. The file and shell tools are 
 produce a deliverable in any format.
 
 Run:
-    python examples/04-control/autonomous_task_runner.py "Chart this month's downloads as an HTML page" -o chart.html
-    python examples/04-control/autonomous_task_runner.py "Write a CSV of the first 20 primes" --max-iterations 10
+    python examples/05-control/autonomous_task_runner.py "Chart this month's downloads as an HTML page" -o chart.html
+    python examples/05-control/autonomous_task_runner.py "Write a CSV of the first 20 primes" --max-iterations 10
 Needs: ANTHROPIC_API_KEY. Optional: TAVILY_API_KEY for web search, LANGSMITH_API_KEY for tracing
 (`pip install "harnessx[langsmith]"`).
 """

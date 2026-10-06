@@ -9,8 +9,8 @@ Pick docker or seatbelt whenever the code is untrusted. The agent runs inside an
 each run to SQLite under `.sandbox_sessions/`. Type `status` for the runtime state, `quit` to exit.
 
 Run:
-    python examples/07-sandboxes/sandbox_isolation_tiers.py
-    python examples/07-sandboxes/sandbox_isolation_tiers.py --tier docker    # or --tier seatbelt on macOS
+    python examples/08-sandboxes/sandbox_isolation_tiers.py
+    python examples/08-sandboxes/sandbox_isolation_tiers.py --tier docker    # or --tier seatbelt on macOS
 Needs: ANTHROPIC_API_KEY (and Docker running for --tier docker).
 """
 

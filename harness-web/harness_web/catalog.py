@@ -15,11 +15,12 @@ EXAMPLES_DIR = ROOT / "examples"
 TOPICS = {
     "01-basics": "Basics",
     "02-tools": "Tools",
-    "03-context": "Context",
-    "04-control": "Control",
-    "05-durability": "Durability",
-    "06-quality": "Quality",
-    "07-sandboxes": "Sandboxes",
+    "03-skills": "Skills",
+    "04-context": "Context",
+    "05-control": "Control",
+    "06-durability": "Durability",
+    "07-quality": "Quality",
+    "08-sandboxes": "Sandboxes",
 }
 
 
@@ -111,9 +112,10 @@ EXAMPLES = [
         prompt="List the tools available to you.",
         detail="Configure a stdio command or an SSE URL below. Tool calls keep terminal approvals, presented in the browser.",
     ),
+    # ── Skills ──
     Example(
         "skills_lazy_loading",
-        "02-tools/skills_lazy_loading.py",
+        "03-skills/skills_lazy_loading.py",
         "Skills, loaded on demand",
         "Watch an agent find and load a code-review skill, with every hook visible.",
         "sparkles",
@@ -122,7 +124,7 @@ EXAMPLES = [
     ),
     Example(
         "skills_interactive",
-        "02-tools/skills_interactive.py",
+        "03-skills/skills_interactive.py",
         "Skills with a live model",
         "Let a live model select engineering skills when the task calls for them.",
         "sparkles",
@@ -133,7 +135,7 @@ EXAMPLES = [
     # ── Context ──
     Example(
         "knowledge_bundles_okf",
-        "03-context/knowledge_bundles_okf.py",
+        "04-context/knowledge_bundles_okf.py",
         "Knowledge bundles (OKF)",
         "Answer questions from an Open Knowledge Format bundle with search, concept reads, and link traversal.",
         "memory",
@@ -143,7 +145,7 @@ EXAMPLES = [
     ),
     Example(
         "custom_memory_tools",
-        "03-context/custom_memory_tools.py",
+        "04-context/custom_memory_tools.py",
         "Memory tools",
         "Save notes with the built-in memory tools, and add a tool of your own beside them.",
         "memory",
@@ -153,7 +155,7 @@ EXAMPLES = [
     ),
     Example(
         "planning_todos",
-        "03-context/planning_todos.py",
+        "04-context/planning_todos.py",
         "Planning with to-dos",
         "Watch an agent write a task list, work through it, and mark items done.",
         "list",
@@ -162,7 +164,7 @@ EXAMPLES = [
     ),
     Example(
         "condensing_a_long_history",
-        "03-context/condensing_a_long_history.py",
+        "04-context/condensing_a_long_history.py",
         "Condensing a long history",
         "See what survives when a conversation outgrows its context window.",
         "layers",
@@ -172,7 +174,7 @@ EXAMPLES = [
     # ── Control ──
     Example(
         "loop_guard",
-        "04-control/loop_guard.py",
+        "05-control/loop_guard.py",
         "Loop guard",
         "Catch an agent repeating the same tool call and tell it so, without failing the run.",
         "repeat",
@@ -181,7 +183,7 @@ EXAMPLES = [
     ),
     Example(
         "retries_and_fallback",
-        "04-control/retries_and_fallback.py",
+        "05-control/retries_and_fallback.py",
         "Retries and fallback",
         "Retry a failing model, then hand the conversation to a fallback provider.",
         "refresh",
@@ -190,7 +192,7 @@ EXAMPLES = [
     ),
     Example(
         "delegating_to_subagents",
-        "04-control/delegating_to_subagents.py",
+        "05-control/delegating_to_subagents.py",
         "Delegating to subagents",
         "Delegate research, code review, and file analysis to focused specialists.",
         "network",
@@ -199,7 +201,7 @@ EXAMPLES = [
     ),
     Example(
         "autonomous_task_runner",
-        "04-control/autonomous_task_runner.py",
+        "05-control/autonomous_task_runner.py",
         "Autonomous task runner",
         "Hand it one task on the command line; it writes the deliverable and runs it.",
         "terminal",
@@ -209,7 +211,7 @@ EXAMPLES = [
     # ── Durability ──
     Example(
         "tool_approvals_and_resume",
-        "05-durability/tool_approvals_and_resume.py",
+        "06-durability/tool_approvals_and_resume.py",
         "Approvals and resume",
         "Pause a run on a tool approval, then resume its persisted execution.",
         "shield",
@@ -218,7 +220,7 @@ EXAMPLES = [
     ),
     Example(
         "durable_crash_recovery",
-        "05-durability/durable_crash_recovery.py",
+        "06-durability/durable_crash_recovery.py",
         "Durable runs on PostgreSQL",
         "Stream a model response with execution state stored in PostgreSQL.",
         "database",
@@ -227,7 +229,7 @@ EXAMPLES = [
     ),
     Example(
         "session_snapshots",
-        "05-durability/session_snapshots.py",
+        "06-durability/session_snapshots.py",
         "Session snapshots",
         "Save a conversation, load it into a fresh agent, and carry on.",
         "save",
@@ -237,7 +239,7 @@ EXAMPLES = [
     # ── Quality ──
     Example(
         "evaluating_with_datasets",
-        "06-quality/evaluating_with_datasets.py",
+        "07-quality/evaluating_with_datasets.py",
         "Evaluating with datasets",
         "Run arithmetic and tool-selection cases and inspect their scores.",
         "flask",
@@ -247,7 +249,7 @@ EXAMPLES = [
     ),
     Example(
         "decisions_routing",
-        "06-quality/decisions_routing.py",
+        "07-quality/decisions_routing.py",
         "Decisions: routing and classification",
         "Use a Choice decision to pick an agent, and to classify a document.",
         "network",
@@ -256,7 +258,7 @@ EXAMPLES = [
     ),
     Example(
         "decisions_answer_review",
-        "06-quality/decisions_answer_review.py",
+        "07-quality/decisions_answer_review.py",
         "Decisions: answer review",
         "Review answer coverage with Score and evidence support with Noul.",
         "flask",
@@ -265,7 +267,7 @@ EXAMPLES = [
     ),
     Example(
         "tracing_with_langsmith",
-        "06-quality/tracing_with_langsmith.py",
+        "07-quality/tracing_with_langsmith.py",
         "Tracing with LangSmith",
         "Trace an agent's model calls and tool call as a connected run tree.",
         "activity",
@@ -274,7 +276,7 @@ EXAMPLES = [
     ),
     Example(
         "flight_recorder",
-        "06-quality/flight_recorder.py",
+        "07-quality/flight_recorder.py",
         "Flight recorder",
         "Follow an invoice analysis through a failure, recovery, and offline playback.",
         "record",
@@ -284,7 +286,7 @@ EXAMPLES = [
     # ── Sandboxes ──
     Example(
         "sandbox_isolation_tiers",
-        "07-sandboxes/sandbox_isolation_tiers.py",
+        "08-sandboxes/sandbox_isolation_tiers.py",
         "Sandbox isolation tiers",
         "Execute Python under process resource limits with a durable runtime.",
         "terminal",
