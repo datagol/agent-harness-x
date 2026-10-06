@@ -436,6 +436,16 @@ def _to_gemini_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     # verbatim or the request 400s.
                     part["thought_signature"] = base64.b64decode(sig)
                 parts.append(part)
+            elif btype in ("image", "document", "audio"):
+                # Gemini takes any of the three the same way, as inline bytes
+                # with their media type. The SDK accepts raw bytes here, and
+                # decoding once is cheaper than shipping base64 over the wire.
+                source = _block_attr(block, "source") or {}
+                media_type = source.get("media_type") or ""
+                data = source.get("data") or ""
+                parts.append(
+                    {"inline_data": {"mime_type": media_type, "data": base64.b64decode(data)}}
+                )
             elif btype == "tool_result":
                 tc_id = (
                     _block_attr(block, "tool_use_id")

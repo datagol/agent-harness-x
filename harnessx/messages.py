@@ -40,7 +40,41 @@ class ProviderBlock(TypedDict):
     data: dict[str, Any]
 
 
-ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ProviderBlock
+class MediaSource(TypedDict):
+    """Where a media block's bytes come from. Base64 is the portable form."""
+    type: Literal["base64"]
+    media_type: str
+    data: str
+
+
+class MediaBlock(TypedDict):
+    """An image, document or audio clip sent to the model.
+
+    Shaped after Anthropic's image/document blocks, which this canonical format
+    already follows, with `audio` added for the providers that accept it.
+    Models differ on what they will take, so a provider that cannot carry a
+    kind says so rather than dropping it: silently sending a prompt without
+    the photo it refers to is worse than an error.
+    """
+    type: Literal["image", "document", "audio"]
+    source: MediaSource
+
+
+ContentBlock = (
+    TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ProviderBlock | MediaBlock
+)
+
+#: Media kinds and the media types each one accepts, by what the providers
+#: that support them actually take. Checked at construction so a typo fails
+#: here rather than as a provider 400 several seconds later.
+MEDIA_KINDS: dict[str, tuple[str, ...]] = {
+    "image": ("image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif"),
+    "document": ("application/pdf",),
+    "audio": (
+        "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff", "audio/aac",
+        "audio/ogg", "audio/flac", "audio/mp4", "audio/x-m4a", "audio/webm",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -81,6 +115,22 @@ class Message(Mapping[str, Any]):
                             or not block["provider"] or not isinstance(block.get("data"), dict)
                             or not isinstance(block["data"].get("type"), str)):
                         raise ValueError("Invalid provider content block")
+                elif kind in MEDIA_KINDS:
+                    if self.role != "user":
+                        raise ValueError(f"A {kind} block belongs to a user message")
+                    source: Any = block.get("source")
+                    if not isinstance(source, dict) or source.get("type") != "base64":
+                        raise ValueError(f"Invalid {kind} source: expected a base64 source")
+                    media_type = source.get("media_type")
+                    if not isinstance(media_type, str) or not media_type:
+                        raise ValueError(f"Invalid {kind} source: media_type is required")
+                    if media_type not in MEDIA_KINDS[kind]:
+                        raise ValueError(
+                            f"Unsupported {kind} media type {media_type!r}; "
+                            f"expected one of {', '.join(MEDIA_KINDS[kind])}"
+                        )
+                    if not isinstance(source.get("data"), str) or not source["data"]:
+                        raise ValueError(f"Invalid {kind} source: data must be base64 text")
                 else:
                     raise ValueError(f"Unsupported content block: {kind!r}")
         json.dumps(self.content, allow_nan=False)

@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Images, documents and audio can be sent to the model.** `Message` content
+  gained `image`, `document` and `audio` blocks, shaped after Anthropic's own
+  media blocks, which this canonical format already follows:
+
+  ```python
+  Message(role="user", content=[
+      {"type": "text", "text": "what is on this list?"},
+      {"type": "image", "source": {"type": "base64",
+                                   "media_type": "image/jpeg", "data": b64}},
+  ])
+  ```
+
+  Until now the canonical message carried text, tool calls and tool results and
+  nothing else, so an application with a photo or a voice note had to leave the
+  harness and call a provider SDK directly. That is a second client, a second
+  model setting and no retry policy — one application ran its conversation on
+  one model and its transcription on another for weeks without noticing.
+
+  Gemini takes all three as `inline_data`. OpenAI takes images as a data URI,
+  audio as `input_audio`, and PDFs as a `file` part; Azure and OpenRouter
+  inherit it. Anthropic takes images and PDFs, and **raises on audio** rather
+  than dropping the block — a prompt that arrives without the clip it refers to
+  gets answered confidently about nothing, which is worse than a failed call.
+  The media type is checked when the message is built, so a typo fails there
+  instead of as a provider 400 several seconds later.
+
+  A text-only turn is still sent as a plain string on every provider, so
+  nothing changes for calls that carry no media.
+
 ## [0.6.0] - 2026-10-06
 
 Hitting a limit no longer ends a run, the examples are standalone scripts by

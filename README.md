@@ -286,6 +286,37 @@ async def chat(agent):
         print("Agent:", (await agent.run(text)).output)
 ```
 
+### Sending an image, a PDF, or audio
+
+A turn can carry media alongside its text. Pass content blocks instead of a
+string:
+
+```python
+import base64
+
+photo = base64.b64encode(open("list.jpg", "rb").read()).decode()
+
+result = await agent.run([
+    {"type": "text", "text": "What is on this shopping list?"},
+    {"type": "image", "source": {
+        "type": "base64", "media_type": "image/jpeg", "data": photo}},
+])
+```
+
+`image`, `document` (PDF) and `audio` are the three kinds. The media type is
+checked when the message is built, so a typo fails there rather than as a
+provider error several seconds later.
+
+Not every model takes every kind. Gemini takes all three. OpenAI, Azure and
+OpenRouter take images, audio and PDFs. Anthropic takes images and PDFs and
+**raises on audio** rather than sending the prompt without it — a question
+about a clip the model never received gets answered confidently about nothing,
+which is worse than a failed call. Transcribe it first, or send that turn to a
+provider that accepts audio.
+
+A turn with no media is still sent as a plain string, so nothing changes for
+calls that do not use this.
+
 ---
 
 ## 2. Registering tools

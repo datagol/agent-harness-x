@@ -73,6 +73,14 @@ EXAMPLES = [
         detail="Choose a provider and a model available to your account. The same tool and agent loop, with streaming or ordinary responses.",
     ),
     Example(
+        "media_input",
+        "01-basics/media_input.py",
+        "Image, PDF and audio input",
+        "Send a file alongside the text of a turn as content blocks.",
+        "message",
+        detail="Uses a 1x1 PNG held in the script, so it runs without a file on disk. Pass a path to send your own image, PDF or audio clip.",
+    ),
+    Example(
         "prompt_caching",
         "01-basics/prompt_caching.py",
         "Prompt caching",
