@@ -632,3 +632,58 @@ def test_download_pins_the_file_before_a_concurrent_path_swap(tmp_path):
         assert stream.read() == b"intended download"
     with pytest.raises(OSError):
         open_workspace_file(workspace, "report.txt")
+
+
+@pytest.mark.asyncio
+async def test_build_your_agent_adds_subagents_that_delegate_with_only_their_tools(tmp_path, monkeypatch):
+    async with web(tmp_path) as (app, client):
+        chat_id = (await client.post("/api/chats", json={"provider": "demo"})).json()["id"]
+        chat = app.state.chats[chat_id]
+        (chat.directory / "notes.txt").write_text("ship on friday")
+        reviewer = {
+            "name": "reviewer", "description": "Reviews a file when asked for a second opinion.",
+            "instructions": "You review files and answer in one sentence.", "tools": ["read_file", "list_directory"],
+        }
+        updated = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [reviewer]})
+        assert updated.status_code == 200, updated.text
+        body = updated.json()
+        assert body["subagents"] == [{**reviewer, "tools": ["list_directory", "read_file"]}]
+        tools = {tool["name"]: tool for tool in body["tools"]}
+        assert tools["delegate_reviewer"]["source"] == "subagent"
+
+        # Bad definitions are refused and leave the agent as it was.
+        for bad, why in [
+            ({**reviewer, "tools": ["no_such_tool"]}, "does not have"),
+            ({**reviewer, "name": "two words"}, "use 1-55"),
+        ]:
+            refused = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [bad]})
+            assert refused.status_code == 422 and why in refused.text
+        twice = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": [reviewer, reviewer]})
+        assert twice.status_code == 422 and "Two subagents" in twice.text
+        assert chat.agent.tools.has_tool("delegate_reviewer")
+
+        # A delegation runs a fresh child with the subagent's prompt and tools.
+        seen = []
+
+        def child_provider(*args, **kwargs):
+            class Child(ScriptedProvider):
+                async def create(self, **request):
+                    seen.append(request)
+                    return await super().create(**request)
+
+            return Child([
+                ProviderResponse(tool_calls=[ToolCall("r", "read_file", {"path": "notes.txt"})], stop_reason="tool_use"),
+                ProviderResponse(text="The note says to ship on Friday."),
+            ])
+
+        monkeypatch.setattr("harnessx.core.make_provider", child_provider)
+        result = await chat.agent.tools.execute(
+            ToolCall("d", "delegate_reviewer", {"task": "What does notes.txt say?"}), permissions=chat.agent.permissions,
+        )
+        assert not result.is_error and result.content == "The note says to ship on Friday."
+        assert seen[0]["system"].startswith("You review files")
+        # Its own tools, plus read_tool_result, which every agent has for spilled results.
+        assert sorted(tool["name"] for tool in seen[0]["tools"]) == ["list_directory", "read_file", "read_tool_result"]
+
+        cleared = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": []})
+        assert cleared.json()["subagents"] == [] and not chat.agent.tools.has_tool("delegate_reviewer")

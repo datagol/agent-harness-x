@@ -1127,7 +1127,7 @@ function ToolList({ tools = [], showAgent = false }) {
   ));
 }
 
-const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP" };
+const SOURCE_LABEL = { builtin: "Built-in", skill: "Skills", mcp: "MCP", subagent: "Subagents" };
 
 function groupTools(tools = []) {
   const groups = [];
@@ -1228,6 +1228,10 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
   const [args, setArgs] = useState("");
   const [url, setUrl] = useState("");
   const [permission, setPermission] = useState("ask");
+  const [subName, setSubName] = useState("");
+  const [subDescription, setSubDescription] = useState("");
+  const [subInstructions, setSubInstructions] = useState("");
+  const [subTools, setSubTools] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef(null);
@@ -1310,16 +1314,50 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
       }),
     );
   }
+  // Tools a subagent can be given: everything here except other delegations.
+  const delegable = (chat.tools || []).filter((tool) => tool.source !== "subagent");
+  async function saveSubagents(subagents) {
+    return apply(() =>
+      api(`/chats/${chat.id}/subagents`, { method: "PUT", body: { subagents } }),
+    );
+  }
+  async function addSubagent(event) {
+    event.preventDefault();
+    const updated = await saveSubagents([
+      ...(chat.subagents || []),
+      {
+        name: subName.trim(),
+        description: subDescription.trim(),
+        instructions: subInstructions.trim(),
+        tools: subTools,
+      },
+    ]);
+    if (updated) {
+      setSubName("");
+      setSubDescription("");
+      setSubInstructions("");
+      setSubTools([]);
+    }
+  }
+  async function removeSubagent(name) {
+    await saveSubagents((chat.subagents || []).filter((item) => item.name !== name));
+  }
+  function toggleSubTool(name) {
+    setSubTools((current) =>
+      current.includes(name) ? current.filter((item) => item !== name) : [...current, name],
+    );
+  }
   async function switchTool(name, enabled) {
     await apply(() =>
       api(`/chats/${chat.id}/tools`, { method: "PATCH", body: { name, enabled } }),
     );
   }
   return (
-    <Modal title="Conversation setup" onClose={onClose}>
+    <Modal title="Build your agent" onClose={onClose}>
       <p className="detail-note">
-        Changes apply to this conversation’s next turn. Its history stays in
-        place; active responses must finish or be stopped first.
+        Shape the agent for this conversation: its instructions, tools, skills,
+        MCP servers, and subagents. Changes apply to the next turn and keep the
+        history; an active response must finish or be stopped first.
       </p>
       <form onSubmit={savePrompt}>
         <label>
@@ -1518,6 +1556,98 @@ function ConversationSetup({ chat, onClose, onUpdated }) {
           </button>
         </form>
       </section>
+      <section className="setup-section">
+        <div className="setup-section-title">
+          <div>
+            <Network size={17} />
+            <strong>Subagents</strong>
+            <span className="count">{(chat.subagents || []).length}</span>
+          </div>
+        </div>
+        <p className="detail-copy">
+          A subagent is a specialist your agent can hand a task to. Each one
+          gets a fresh conversation with its own instructions and only the
+          tools you give it, then reports back. Your agent sees it as a{" "}
+          <code>delegate_name</code> tool and uses the description to decide
+          when to call it.
+        </p>
+        {chat.subagents?.length ? (
+          <div className="setup-list">
+            {chat.subagents.map((item) => (
+              <div key={item.name} className="setup-row">
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.description}</span>
+                  <small>
+                    {item.tools.length
+                      ? `Tools: ${item.tools.join(", ")}`
+                      : "No tools: it answers from its instructions alone"}
+                  </small>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={`Remove subagent ${item.name}`}
+                  disabled={busy}
+                  onClick={() => removeSubagent(item.name)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="setup-empty">No subagents yet.</p>
+        )}
+        <form className="mcp-form" onSubmit={addSubagent}>
+          <label>
+            Name
+            <input
+              required
+              value={subName}
+              pattern="[A-Za-z_][A-Za-z0-9_\-]{0,54}"
+              title="Letters, digits, _ or -, starting with a letter"
+              onChange={(event) => setSubName(event.target.value)}
+              placeholder="researcher"
+            />
+          </label>
+          <label>
+            When to delegate
+            <input
+              required
+              value={subDescription}
+              onChange={(event) => setSubDescription(event.target.value)}
+              placeholder="Looks things up and summarizes sources"
+            />
+          </label>
+          <label className="wide">
+            Instructions
+            <textarea
+              required
+              rows={3}
+              value={subInstructions}
+              onChange={(event) => setSubInstructions(event.target.value)}
+              placeholder="You research a question and answer with cited facts."
+            />
+          </label>
+          <fieldset className="wide subagent-tools">
+            <legend>Tools it may use</legend>
+            {delegable.map((tool) => (
+              <label key={tool.name} className="check-label">
+                <input
+                  type="checkbox"
+                  checked={subTools.includes(tool.name)}
+                  onChange={() => toggleSubTool(tool.name)}
+                />{" "}
+                {tool.name}
+              </label>
+            ))}
+          </fieldset>
+          <button className="button primary" disabled={busy}>
+            <Plus size={15} /> Add subagent
+          </button>
+        </form>
+      </section>
       <ErrorNotice message={error} onDismiss={() => setError("")} />
     </Modal>
   );
@@ -1708,7 +1838,7 @@ function ChatView({ id, providers, refresh, onNew }) {
       <div className="chat-toolbar">
         <div>
           <MessageSquare size={19} />
-          <strong>General chat</strong>
+          <strong>Your agent</strong>
           <span className="toolbar-divider" />{" "}
           <span>{chat?.model || model || "Choose a model"}</span>
           {(chat?.provider || selectedProvider) === "demo" && (
@@ -2058,7 +2188,7 @@ function RunsList({ runs }) {
                 <strong>{run.title}</strong>
                 <span>
                   {run.example_id === "chat"
-                    ? "General chat"
+                    ? "Your agent"
                     : `examples.${run.example_id}`}{" "}
                   · {date(run.created_at)}
                 </span>
@@ -2187,7 +2317,7 @@ export default function App() {
             className={page === "chat" ? "active" : ""}
             onClick={() => go("chat")}
           >
-            <MessageSquare size={18} /> General chat{" "}
+            <MessageSquare size={18} /> Build your agent{" "}
             <Plus size={14} className="nav-end" />
           </button>
           <button
@@ -2244,7 +2374,7 @@ export default function App() {
             <ChevronRight size={14} />
             <strong>
               {page === "chat"
-                ? "General chat"
+                ? "Build your agent"
                 : page === "runs"
                   ? "Recent runs"
                   : "Examples"}

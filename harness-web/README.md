@@ -1,9 +1,14 @@
 # harness-web
 
-A local workspace for **every HarnessX example entry point**, plus a separate
-general chat interface. It runs the repository's real examples, streams their
-output, presents terminal input and approvals in the browser, and makes generated
-files available to download.
+A local workspace with two halves:
+
+- **Examples.** Every script in `examples/`, grouped by topic. Each runs
+  unchanged; you see its output stream, every tool call its agents make (with
+  arguments, result and status), its prompts and approvals in the browser, and
+  the files it writes, ready to download.
+- **Build your agent.** One conversation-scoped agent you shape yourself: write
+  its system prompt, choose provider and model, switch tools on and off, upload
+  skills, connect MCP servers, and add subagents it can delegate to.
 
 `datagol-web` was inspected before building this app. It is a React/Vite marketing
 site with Datagol colors and animated landing-page components. This app reuses its
@@ -104,28 +109,41 @@ Examples run as child processes, in unique working directories beneath
 `.harness-web/runs/`. They retain their existing provider configuration and tool
 behavior. The launcher runs the script with `runpy.run_path` and bridges its `input()` calls
 through a separate control pipe, so ordinary tool output cannot be confused with a prompt.
+It also adds tool hooks to every `Agent` the script constructs, so each tool call
+and result reaches the browser as a card beside the output; the example file
+itself is not changed.
 An answer must match the exact pending prompt ID; duplicate and stale approvals
 are rejected. Closing an output tab does not stop a run. Use **Stop run** to
 terminate the managed process group. Deliberately detached child processes are
 outside that cleanup guarantee.
 
-The original web demo retains automatic permissions for its host tools; it opens
-in another tab. It is independent of the new General chat interface.
-
-## General chat
+## Build your agent
 
 Each conversation owns a separate `Agent`, message history, and working directory.
-The assistant can calculate, list/read workspace files, and request file changes.
-File changes wait for the SDK's permission callback and an explicit browser
-decision. There is no shell tool in general chat. Tool calls and their results are
-correlated by ID, and streamed failures are visible. A conversation permits one
-active turn at a time; separate conversations can run concurrently.
+Out of the box the agent can calculate, read and write workspace files, run shell
+commands in that directory, and ask you a question when a request is ambiguous.
+Writes and shell commands wait for an explicit browser decision. Tool calls and
+their results are correlated by ID, and streamed failures are visible. A
+conversation permits one active turn at a time; separate conversations can run
+concurrently.
 
-Use the **conversation setup** button beside the chat title to configure a chat
-before or after its first turn. It can change the system prompt, upload Markdown
-skills, and connect a local stdio or remote HTTP/SSE MCP server. Skills are made
-available through the lazy `Skill` tool. MCP tool calls default to `ASK`; the setup
-screen also permits an explicit `ALLOW` or `DENY` policy.
+The settings button beside the agent's name opens **Build your agent**, before or
+after the first turn:
+
+- **System prompt.** The agent's instructions.
+- **Tools.** Every tool the agent can call, grouped by where it comes from, with
+  its permission; switch any off for the next turn.
+- **Skills.** Upload Markdown skills; the agent loads one only when it calls the
+  lazy `Skill` tool.
+- **MCP servers.** Connect a local stdio or remote HTTP/SSE server. Its tools
+  default to `ASK`; `ALLOW` or `DENY` can be chosen instead.
+- **Subagents.** Add a specialist with a name, a description that tells your
+  agent when to delegate, its own instructions, and the tools it may use (taken
+  from this conversation, so file tools stay in its directory and approvals still
+  come to the browser). Each becomes a `delegate_<name>` tool; every delegation
+  runs a fresh child agent on the conversation's provider and model and returns
+  its answer. With the local demo provider, subagents still run on Anthropic
+  and need `ANTHROPIC_API_KEY`.
 
 Setup changes retain conversation history and rebuild only that conversation's
 agent. They cannot be made during a response. Uploaded skills live in that

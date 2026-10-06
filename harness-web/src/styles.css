@@ -2231,3 +2231,25 @@ kbd {
   background: var(--surface-2);
   color: var(--text-2);
 }
+
+.mcp-form .wide {
+  grid-column: 1 / -1;
+}
+.subagent-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.subagent-tools legend {
+  font-size: 13px;
+  color: var(--text-2);
+  padding: 0 4px;
+}
+.subagent-tools label {
+  flex-direction: row;
+  align-items: center;
+  font-weight: 400;
+}

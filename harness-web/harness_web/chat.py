@@ -27,6 +27,7 @@ from harnessx.builtin.filesystem import register_filesystem_tools
 from harnessx.execution import wire
 from harnessx.mcp import MCPManager
 from harnessx.providers import LLMProvider
+from harnessx.subagents import SubAgent, install_subagent, prepare_subagents
 from .calculator import calculate
 from .runs import Run
 
@@ -120,6 +121,8 @@ class Chat:
     active: Run | None = None
     disabled_tools: set = field(default_factory=set)
     tool_catalog: list = field(default_factory=list)  # every tool, enabled or not
+    # Specialists the agent can delegate to: {name, description, instructions, tools}.
+    subagents: list = field(default_factory=list)
 
     def public(self, *, include_messages=True):
         assert self.agent is not None
@@ -138,6 +141,7 @@ class Chat:
             "skills": skill_records(self),
             "mcp_servers": self.mcp.list_servers(),
             "tools": tool_records(self),
+            "subagents": self.subagents,
         }
         if include_messages:
             result["messages"] = self.messages
@@ -155,7 +159,7 @@ def _skill_paths(chat: Chat) -> list[Path]:
     ]
 
 
-_SOURCE_ORDER = {"builtin": 0, "skill": 1, "mcp": 2}
+_SOURCE_ORDER = {"builtin": 0, "skill": 1, "mcp": 2, "subagent": 3}
 
 
 def tool_records(chat: Chat) -> list[dict[str, Any]]:
@@ -181,6 +185,8 @@ def catalog_tools(chat: Chat, agent: Agent) -> list[dict[str, Any]]:
             source, tool = "mcp", name[len(server) + 1:] if server else name
         elif name == "Skill":
             source, server, tool = "skill", None, name
+        elif name.startswith("delegate_") and name[len("delegate_"):] in {s["name"] for s in chat.subagents}:
+            source, server, tool = "subagent", None, name
         else:
             source, server, tool = "builtin", None, name
         records.append({
@@ -273,6 +279,7 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
         agent.permissions.set_permission(name, PermissionLevel.ASK)
     for name in ("read_file", "list_directory"):
         agent.permissions.set_permission(name, PermissionLevel.ALLOW)
+    install_subagents(chat, agent)
     agent.middleware.add(_DownloadLinks(chat))
     # The model has no clock. Day granularity keeps the cached prompt prefix
     # stable within a day while stopping searches for last year's news.
@@ -284,6 +291,66 @@ def _build_agent(chat: Chat, *, provider_instance=None) -> Agent:
     for name in chat.disabled_tools:
         agent.tools.unregister(name)
     return agent
+
+
+SUBAGENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,54}")
+
+
+def validate_subagents(chat: Chat, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clean, checked subagent definitions, or ValueError saying what is wrong."""
+    available = {record["name"] for record in chat.tool_catalog if record["source"] != "subagent"}
+    cleaned, seen = [], set()
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        if not SUBAGENT_NAME.fullmatch(name):
+            raise ValueError(f"Subagent name {name!r}: use 1-55 letters, digits, _ or -, starting with a letter")
+        if name in seen:
+            raise ValueError(f"Two subagents are named {name!r}")
+        seen.add(name)
+        description = str(item.get("description", "")).strip()
+        instructions = str(item.get("instructions", "")).strip()
+        if not description:
+            raise ValueError(f"Subagent {name!r} needs a description: when should the agent delegate to it?")
+        if not instructions:
+            raise ValueError(f"Subagent {name!r} needs instructions")
+        tools = [str(tool) for tool in item.get("tools", [])]
+        unknown = sorted(set(tools) - available)
+        if unknown:
+            raise ValueError(f"Subagent {name!r} lists tools this conversation does not have: {', '.join(unknown)}")
+        cleaned.append({"name": name, "description": description, "instructions": instructions,
+                        "tools": sorted(set(tools))})
+    return cleaned
+
+
+def install_subagents(chat: Chat, agent: Agent) -> None:
+    """Give the agent a delegate_<name> tool per subagent.
+
+    Each delegation runs a fresh child agent on the conversation's provider and
+    model, with the subagent's instructions as its system prompt and only the
+    tools it was given, taken from this conversation (so file tools stay in its
+    directory and approvals still come to the browser).
+    """
+    if not chat.subagents:
+        return
+    definitions = [
+        SubAgent(
+            name=spec["name"],
+            description=spec["description"],
+            config=AgentConfig(
+                provider="anthropic" if chat.provider == "demo" else chat.provider,
+                model=chat.model,
+                system_prompt=spec["instructions"],
+                limits=Limits(max_iterations=15),
+                planning=False,
+            ),
+            tools=[agent.tools.get_tool(name) for name in spec["tools"] if agent.tools.has_tool(name)],
+        )
+        for spec in chat.subagents
+    ]
+    prepared = prepare_subagents(definitions, agent.tools)
+    for definition in prepared:
+        install_subagent(agent, definition)
+    agent.subagents = tuple(agent.subagents) + prepared
 
 
 def create_chat(provider, model, directory, *, provider_instance=None):
