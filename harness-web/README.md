@@ -45,9 +45,10 @@ PostgreSQL, Temporal and Redis alongside the app on
 **http://localhost:8765**. The durable and Temporal examples are runnable with
 nothing further to configure.
 
-Model API keys come from your own `.env`, read at run time and never baked into
-an image. Without them the offline examples still run and the live ones say
-what is missing.
+Model API keys come from your own `.env` (copy `.env.example` first), read at run
+time and never baked into an image, or from **Workspace setup → API keys** in
+the app, kept in the `harness-web-data` volume. Without them the offline
+examples still run and the live ones say what is missing.
 
 To run the suite with those services reachable, which is the only way nothing
 is skipped:
@@ -60,12 +61,22 @@ docker compose run --rm tests
 
 The app lives in this checkout and is not bundled in the SDK wheel.
 
-The existing repository `.env` is loaded without overriding environment variables.
-Set `ANTHROPIC_API_KEY` to use the default live agents. Keys are never returned by
-the configuration API or entered into a browser form. Other chat providers use
-`OPENAI_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY` and their corresponding
-SDK extras. Enter the model ID when selecting a provider without a default.
-Restart the server after changing environment variables.
+There are two ways to give the app your model keys:
+
+- **`.env`.** Copy `.env.example` to `.env` in the repository root and set
+  `ANTHROPIC_API_KEY` (and any others) before starting. It is loaded without
+  overriding variables already set; restart after changing it.
+- **In the app.** Open **Workspace setup** (the HX button, top right) and paste a
+  key under **API keys**. It is used at once by the next example run and the next
+  conversation, saved in the app's data folder (`.harness-web/api-keys.json`,
+  readable by you only; in Docker, the `harness-web-data` volume), and never sent
+  back to the browser, which only shows whether a key is set and where it came
+  from. A key saved in the app takes precedence over `.env`; removing it restores
+  the `.env` value.
+
+Other chat providers use `OPENAI_API_KEY`, `GEMINI_API_KEY`, or
+`OPENROUTER_API_KEY` and their SDK extras. Enter the model ID when selecting a
+provider without a default.
 
 Without a key, start with **Flight recorder**, **Approvals and resume**, **Loop
 guard**, or **Skills, loaded on demand**. General chat also offers an explicitly labelled **Local demo** that

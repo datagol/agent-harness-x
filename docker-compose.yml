@@ -22,6 +22,11 @@ services:
       DATABASE_URL: postgresql://harnessx:harnessx@postgres:5432/harnessx
       TEMPORAL_TARGET: temporal:7233
       REDIS_URL: redis://redis:6379
+    volumes:
+      # Run history files, uploaded skills, and API keys saved in the app.
+      # A named volume on your machine: it survives rebuilds, and keys never
+      # end up in the image or the repository.
+      - harness-web-data:/app/.harness-web
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,3 +106,4 @@ services:
 
 volumes:
   postgres-data:
+  harness-web-data:
