@@ -83,6 +83,7 @@ class Sandbox:
             data={
                 "kind": kind, "tier": self.config.tier, "exit_code": result.exit_code,
                 "timed_out": result.timed_out, "execution_time_ms": result.execution_time_ms,
+                "denials": list(result.denials),
             },
         ))
 

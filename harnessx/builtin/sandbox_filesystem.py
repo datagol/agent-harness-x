@@ -15,6 +15,7 @@ never read, replaced, listed into, or followed by a walk.
 from __future__ import annotations
 
 import base64
+import builtins
 import errno
 import fnmatch
 import os
@@ -104,7 +105,7 @@ class SandboxFilesystem:
         size, _, encoded = output.partition("\n")
         return int(size.strip()), base64.b64decode(encoded)
 
-    async def _walk(self, path: str) -> list[tuple[list[str], bool]]:
+    async def _walk(self, path: str) -> builtins.list[tuple[builtins.list[str], bool]]:
         """(relative parts, is_directory) below ``path``, in _Filesystem._walk order."""
         script = (
             f"p={shlex.quote(self._resolve(path))}\n" + _DIRECTORY_CHECK
@@ -302,7 +303,7 @@ class SandboxFilesystem:
                 return _Filesystem._listing(path, hits, f"pattern {pattern!r}", truncated=True)
         return _Filesystem._listing(path, hits, f"pattern {pattern!r}")
 
-    async def _contents(self, path: str, files: list[str]) -> list[tuple[str, str]]:
+    async def _contents(self, path: str, files: builtins.list[str]) -> builtins.list[tuple[str, str]]:
         """Regular files among ``files`` (relative to ``path``), in order, in one
         round trip, stopping once the read budget is spent. Oversized and
         unreadable files are skipped, as the host grep skips them."""
@@ -326,7 +327,9 @@ class SandboxFilesystem:
             "done\n"
         )
         output = await self._run(script, path, stdin=("\n".join(files) + "\n").encode("utf-8"))
-        found, current, chunks = [], None, []
+        found: builtins.list[tuple[str, str]] = []
+        current: str | None = None
+        chunks: builtins.list[str] = []
         for line in output.splitlines():
             if line.startswith("@@FILE\t"):
                 current, chunks = line[len("@@FILE\t"):], []

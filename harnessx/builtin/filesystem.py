@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import functools
 import re
 from contextlib import contextmanager
 import errno
@@ -526,6 +527,21 @@ def register_filesystem_tools(
     for name in names:
         handler, public, concurrent = handlers[name]
         handler.__doc__ = public.__doc__
+        _mark_builtin(handler, sandbox if getattr(sandbox, "owns_filesystem", False) else None, functools.partial(
+            register_filesystem_tools, include=[name], permission=permission, replace=True,
+            max_read_bytes=max_read_bytes, max_write_bytes=max_write_bytes,
+            max_directory_entries=max_directory_entries, output_dir=output_dir,
+        ))
         registry.register_tool(handler, name=name, permission=permission,
                                concurrent=concurrent, replace=replace)
     return names
+
+
+def _mark_builtin(handler: Any, backend: Any, rebind: Any) -> None:
+    """Remember where a built-in runs and how to register it again elsewhere.
+
+    ``normalize_tool_registry`` uses this to move built-ins registered before
+    the registry met a backend that owns its filesystem into that backend.
+    """
+    handler._harnessx_backend = backend
+    handler._harnessx_rebind = rebind

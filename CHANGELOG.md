@@ -130,6 +130,20 @@ subagents.
 - `Sandbox.execute_command(..., timeout=, stdin=)` and `execute(..., timeout=)`:
   a call's own limit, capped by `SandboxConfig.timeout_seconds`, and input fed
   to the command (process and seatbelt tiers). `Sandbox.resolve_path()`.
+- `harnessx.openshell.OpenShellSandbox` (`pip install harnessx[openshell]`):
+  NVIDIA OpenShell as the execution backend. `Agent(config,
+  sandbox=OpenShellSandbox(project="./repo"))` runs `run_bash` and the file
+  tools in an OpenShell sandbox while the loop, model calls and memory stay
+  here. The agent creates the sandbox on the first tool call that needs it,
+  copies the project in, copies changed and deleted files back after every
+  run, and deletes the sandbox when it closes (`keep=True` leaves it). A local
+  file edited during a run is never overwritten; the sandbox's version is
+  written beside it as `<file>.sandbox`. Local paths into the project are
+  translated; `inputs=` adds read-only folders. The sandbox is named after the
+  session, so a resumed session finds it again.
+- `SandboxResult.denials` and `SandboxExecData.denials`: what a sandbox's
+  network policy refused. `run_bash` tells the model when a command was
+  blocked by policy rather than by the network.
 
 ### Fixed
 

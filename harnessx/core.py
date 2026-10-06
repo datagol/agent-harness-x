@@ -98,6 +98,9 @@ class Agent:
         self.middleware = middleware or MiddlewarePipeline()
         if sandbox is not None and getattr(sandbox, "hooks", None) is None:
             sandbox.hooks = self.hooks  # SANDBOX_EXEC events reach this agent's observers
+        bind = getattr(sandbox, "bind_agent", None)
+        if callable(bind):
+            bind(self)  # an agent-owned backend (OpenShell) starts, syncs and closes with this agent
         limits = self.config.limits
         self.guardrails = GuardrailsEngine(
             max_iterations=limits.max_iterations, max_cost_dollars=limits.max_cost_dollars,
@@ -207,6 +210,11 @@ class Agent:
         if self._owns_memory:
             try:
                 await self.memory.aclose()
+            except Exception as exc:
+                errors.append(exc)
+        if getattr(self.sandbox, "agent_owned", False):
+            try:
+                await self.sandbox.aclose()
             except Exception as exc:
                 errors.append(exc)
         materialized = getattr(self, "_materialized_artifacts", None)

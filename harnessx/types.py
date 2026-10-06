@@ -835,6 +835,9 @@ class SandboxResult:
     memory_exceeded: bool = False
     execution_time_ms: float = 0.0
     files_created: list[str] = field(default_factory=list)
+    # What the sandbox's network policy refused during the command (remote
+    # backends that enforce one, such as OpenShell); empty otherwise.
+    denials: list[str] = field(default_factory=list)
 
 
 class RuntimeState(Enum):

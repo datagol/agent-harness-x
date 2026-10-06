@@ -164,10 +164,11 @@ class KnowledgeAccessedData(TypedDict, total=False):
 
 class SandboxExecData(TypedDict):
     kind: str  # "code" or "command"
-    tier: str
+    tier: str  # "process", "docker", "seatbelt", or a remote backend such as "openshell"
     exit_code: int
     timed_out: bool
     execution_time_ms: float
+    denials: list[str]  # what the sandbox's network policy refused; empty when none
 
 
 class CheckpointEventData(TypedDict):
