@@ -11,6 +11,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,7 +21,11 @@ import grpc  # noqa: E402
 
 from harnessx import Agent, AgentConfig, ProviderResponse, ToolCall, ToolRegistry  # noqa: E402
 from harnessx.builtin import register_bash_tools, register_filesystem_tools  # noqa: E402
-from harnessx.openshell import PROJECT_DIR, OpenShellSandbox, policy_denials  # noqa: E402
+from harnessx._openshell_policy import (  # noqa: E402
+    SHELL_BINARIES, build_policy, denials_from_log, expand_hosts, load_policy, secret_groups,
+)
+from harnessx.openshell import PROJECT_DIR, OpenShellSandbox, PendingRule, policy_denials  # noqa: E402
+from openshell._proto import sandbox_pb2  # noqa: E402
 from harnessx.providers import LLMProvider  # noqa: E402
 from harnessx.types import PermissionLevel  # noqa: E402
 
@@ -37,9 +42,35 @@ class Ref:
         self.name, self.id = name, sandbox_id
 
 
+class FakeStub:
+    """The raw gRPC calls OpenShellSandbox makes beyond the SDK's sandbox methods."""
+
+    def __init__(self, gateway) -> None:
+        self.gateway = gateway
+        self.calls: list[tuple[str, Any]] = []
+        self.logs: list[str] = []
+        self.chunks: list[Any] = []
+
+    def __getattr__(self, method):
+        def call(request, timeout=None):
+            self.calls.append((method, request))
+            if method == "ImportProviderProfiles":
+                return SimpleNamespace(imported=True, diagnostics=[])
+            if method == "GetSandboxLogs":
+                return SimpleNamespace(logs=[SimpleNamespace(message=m) for m in self.logs])
+            if method == "GetDraftPolicy":
+                return SimpleNamespace(chunks=self.chunks)
+            return SimpleNamespace()
+        return call
+
+    def names(self):
+        return [method for method, _ in self.calls]
+
+
 class FakeGateway:
     def __init__(self, root) -> None:
         self.root = str(root)
+        self._stub = FakeStub(self)
         self.sandboxes: dict[str, str] = {}
         self.created: list[Any] = []
         self.deleted: list[str] = []
@@ -78,6 +109,9 @@ class FakeGateway:
         yield openshell.ExecChunk(stream="stdout", data=done.stdout)
         yield openshell.ExecChunk(stream="stderr", data=done.stderr)
         yield openshell.ExecResult(exit_code=done.returncode, stdout="", stderr="")
+
+    def wait_deleted(self, name, *, workspace, timeout_seconds=60.0, expected_sandbox_id=None):
+        self._stub.calls.append(("wait_deleted", name))
 
     def delete(self, name, *, workspace, allow_missing=False):
         self.deleted.append(name)
@@ -318,3 +352,164 @@ def test_one_sandbox_belongs_to_one_agent(project, gateway):
     Agent(AgentConfig(model="m", planning=False), provider=Scripted([]), sandbox=sandbox)
     with pytest.raises(ValueError, match="another agent"):
         Agent(AgentConfig(model="m", planning=False), provider=Scripted([]), sandbox=sandbox)
+
+
+# ── network access and secrets ───────────────────────────────────────────────
+
+
+def test_allow_names_hosts_and_brings_their_companions():
+    assert expand_hosts(["github.com", "pypi.org", "example.com:8443", "GitHub.com"]) == [
+        ("github.com", 443), ("api.github.com", 443), ("codeload.github.com", 443),
+        ("objects.githubusercontent.com", 443), ("raw.githubusercontent.com", 443),
+        ("pypi.org", 443), ("files.pythonhosted.org", 443), ("example.com", 8443),
+    ]
+    for bad in ("https://github.com", "github.com/org", "", "host:99999"):
+        with pytest.raises(ValueError):
+            expand_hosts([bad])
+
+
+def test_a_generated_policy_lets_every_command_reach_only_the_allowed_hosts():
+    policy = build_policy(base=None, allow=[("github.com", 443)], credentials={})
+    assert policy.version == 1 and policy.landlock.compatibility == "hard_requirement"
+    assert policy.filesystem.include_workdir and "/tmp" in policy.filesystem.read_write
+    (rule,) = policy.network_policies.values()
+    (endpoint,) = rule.endpoints
+    assert (endpoint.host, list(endpoint.ports)) == ("github.com", [443])
+    assert endpoint.enforcement == sandbox_pb2.NETWORK_ENFORCEMENT_MODE_ENFORCE and endpoint.protocol == ""
+    # Every command runs under sh -c; listing the shells covers what they start.
+    assert [binary.path for binary in rule.binaries] == list(SHELL_BINARIES)
+
+
+def test_a_host_that_receives_a_secret_is_inspected_and_bound_to_its_provider():
+    policy = build_policy(base=None, allow=[("api.example.com", 443)], credentials={"api.example.com": "box-secrets-0"})
+    (endpoint,) = next(iter(policy.network_policies.values())).endpoints
+    assert endpoint.protocol == "rest" and endpoint.access == sandbox_pb2.NETWORK_ACCESS_PRESET_FULL
+    assert endpoint.credential_binding.provider == "box-secrets-0"
+
+
+def test_secrets_are_grouped_by_their_hosts():
+    assert secret_groups(["GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN"]) == [
+        (("GH_TOKEN", "GITHUB_TOKEN"), ("api.github.com", "github.com")), (("HF_TOKEN",), ("huggingface.co",)),
+    ]
+    assert secret_groups({"MY_TOKEN": "api.example.com"}) == [(("MY_TOKEN",), ("api.example.com",))]
+    with pytest.raises(ValueError, match="say which host"):
+        secret_groups(["SOMETHING_PRIVATE"])
+    with pytest.raises(ValueError, match="same hosts"):
+        secret_groups({"A": ["x.com"], "B": ["x.com", "y.com"]})
+
+
+def test_openshell_policy_yaml_is_read_as_written(tmp_path):
+    document = """
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr]
+landlock:
+  compatibility: best_effort
+network_policies:
+  api:
+    endpoints:
+      - host: api.example.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: GET
+              path: /v1/**
+              query:
+                page: "*"
+                state: [open, closed]
+      - host: smtp.example.com
+        port: 25
+        tls: skip
+    binaries:
+      - /usr/bin/curl
+      - path: /usr/bin/git
+"""
+    path = tmp_path / "policy.yaml"
+    path.write_text(document)
+    for source in (str(path), path, document):
+        policy = load_policy(source)
+        rule = policy.network_policies["api"]
+        assert rule.name == "api" and [b.path for b in rule.binaries] == ["/usr/bin/curl", "/usr/bin/git"]
+        rest, smtp = rule.endpoints
+        assert rest.enforcement == sandbox_pb2.NETWORK_ENFORCEMENT_MODE_ENFORCE
+        assert rest.rules[0].allow.query["page"].glob == "*" and list(rest.rules[0].allow.query["state"].any) == ["open", "closed"]
+        assert smtp.tls == sandbox_pb2.NETWORK_TLS_MODE_SKIP and policy.filesystem.read_only == ["/usr"]
+    with pytest.raises(ValueError, match="Not a valid OpenShell policy"):
+        load_policy({"version": 1, "filesystem_policy": {"no_such_field": True}})
+    # allow= adds to a policy you bring.
+    merged = build_policy(base=load_policy(document), allow=[("pypi.org", 443)], credentials={})
+    assert set(merged.network_policies) == {"api", "harnessx_pypi_org_443"}
+    assert merged.landlock.compatibility == "best_effort"
+
+
+def test_allow_and_secrets_shape_the_sandbox_that_is_created(project, gateway, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_real")
+    sandbox = _sandbox(project, gateway, allow=["pypi.org"], secrets=["GITHUB_TOKEN"], providers=["team-npm"])
+    asyncio.run(sandbox.start())
+    spec = gateway.created[-1]
+    hosts = {e.host: e for rule in spec.policy.network_policies.values() for e in rule.endpoints}
+    assert {"pypi.org", "files.pythonhosted.org", "github.com", "api.github.com"} <= set(hosts)
+    assert hosts["github.com"].credential_binding.provider == "box-secrets-0"
+    assert hosts["pypi.org"].credential_binding.provider == ""
+    assert list(spec.providers) == ["team-npm", "box-secrets-0"]
+
+    stub = gateway._stub
+    (_, imported), (_, provider) = [c for c in stub.calls if c[0] in ("ImportProviderProfiles", "CreateProvider")]
+    (profile,) = [item.profile for item in imported.profiles]
+    assert profile.id == "harnessx-box-secrets-0" and list(profile.credentials[0].env_vars) == ["GITHUB_TOKEN"]
+    assert not profile.endpoints  # the sandbox policy is the only place the secret may go
+    assert provider.provider.type == "harnessx-box-secrets-0"
+    assert dict(provider.provider.credentials) == {"GITHUB_TOKEN": "ghp_real"}
+
+    asyncio.run(sandbox.aclose())
+    order = [name for name in stub.names() if name in ("wait_deleted", "DeleteProvider", "DeleteProviderProfile")]
+    assert order == ["wait_deleted", "DeleteProvider", "DeleteProviderProfile"]
+
+
+def test_without_allow_or_a_policy_the_gateway_default_applies(project, gateway):
+    asyncio.run(_sandbox(project, gateway).start())
+    assert not gateway.created[-1].HasField("policy") and gateway._stub.calls == []
+
+
+def test_a_secret_must_be_set_before_the_sandbox_is_made(project, gateway, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    with pytest.raises(ValueError, match="not set in the environment: HF_TOKEN"):
+        _sandbox(project, gateway, secrets=["HF_TOKEN"])
+
+
+def test_the_model_is_told_which_host_the_policy_refused(project, gateway):
+    sandbox = _sandbox(project, gateway)
+    registry = _tools(sandbox)
+    gateway._stub.logs = [
+        "NET:REFUSE [MED] DENIED example.com [reason:policy_dns_ineligible]",
+        "NET:OPEN [MED] DENIED /usr/bin/python3.12(42) -> example.com:443 [reason:transparent_tcp_policy_denied]",
+        "CONFIG:LOADED policy v3",
+    ]
+    result = _call(registry, "run_bash", command="echo 'urlopen error [Errno 13] Permission denied' >&2; exit 1")
+    assert "blocked by the sandbox's network policy: example.com:443." in result.content
+    # A command that succeeds is not followed by a log lookup.
+    before = len(gateway._stub.calls)
+    _call(registry, "run_bash", command="true")
+    assert len(gateway._stub.calls) == before
+    assert denials_from_log(["HTTP:POST [MED] DENIED /usr/bin/bash(7) -> api.example.com:443/v1/x [reason:l7]"]) == [
+        "api.example.com:443/v1/x"]
+
+
+def test_drafted_rules_can_be_approved_or_rejected(project, gateway):
+    sandbox = _sandbox(project, gateway)
+    endpoint = SimpleNamespace(host="pypi.org", ports=[443], port=0)
+    gateway._stub.chunks = [SimpleNamespace(
+        id="c1", rule_name="allow_pypi", binary="/usr/bin/python3.12", rationale="pip install",
+        proposed_rule=SimpleNamespace(endpoints=[endpoint]), review_token="tok",
+    )]
+    (rule,) = asyncio.run(sandbox.pending_rules())
+    assert rule == PendingRule("c1", "allow_pypi", ["pypi.org:443"], "/usr/bin/python3.12", "pip install", "tok")
+    asyncio.run(sandbox.approve_rule(rule))
+    asyncio.run(sandbox.reject_rule(rule, "not needed"))
+    approve = next(r for m, r in gateway._stub.calls if m == "ApproveDraftChunk")
+    reject = next(r for m, r in gateway._stub.calls if m == "RejectDraftChunk")
+    assert (approve.chunk_id, approve.review_token, approve.sandbox) == ("c1", "tok", "box")
+    assert (reject.chunk_id, reject.reason) == ("c1", "not needed")

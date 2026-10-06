@@ -144,6 +144,14 @@ subagents.
 - `SandboxResult.denials` and `SandboxExecData.denials`: what a sandbox's
   network policy refused. `run_bash` tells the model when a command was
   blocked by policy rather than by the network.
+- `OpenShellSandbox(allow=, secrets=, policy=, providers=)`. `allow` opens
+  hosts (with well-known companions) to every command the agent runs; `secrets`
+  makes environment variables usable but unreadable in the sandbox, bound to
+  their hosts through a provider HarnessX creates and removes; `policy` takes
+  OpenShell's own YAML. A refused connection is reported from OpenShell's
+  audit log, so the model learns which host was blocked rather than reading
+  "Permission denied". `pending_rules()`, `approve_rule()`, `reject_rule()`
+  and `policy()` reach OpenShell's drafted rules and the live policy.
 
 ### Fixed
 

@@ -569,6 +569,69 @@ registry = ToolRegistry()
 registry.load_builtin("read_file", base_path=str(Path.cwd()))
 ```
 
+### Running tools in an OpenShell sandbox
+
+`OpenShellSandbox` runs the agent's tools in an [NVIDIA
+OpenShell](https://github.com/NVIDIA/OpenShell) sandbox while the agent itself
+(the loop, model calls, memory, hooks) stays in your process. `run_bash` and the
+file tools run in the sandbox, with the same output as on the host.
+
+```bash
+pip install "harnessx[openshell]"   # and a running gateway: `openshell status`
+```
+
+```python
+from harnessx import Agent, AgentConfig
+from harnessx.openshell import OpenShellSandbox
+
+sandbox = OpenShellSandbox(
+    project="./repo",
+    allow=["github.com", "pypi.org"],   # hosts commands may reach; nothing else is
+    secrets=["GITHUB_TOKEN"],           # usable inside, never readable there
+)
+async with Agent(AgentConfig(), tools=["filesystem", "bash"], sandbox=sandbox) as agent:
+    await agent.run("Run the tests and fix the failure")
+# ./repo now has the agent's changes
+```
+
+You never start, copy into, or clean up the sandbox. The agent:
+
+1. Creates it on the first tool call that needs it, so a run that only talks
+   creates none.
+2. Copies `project` in, leaving out `.venv`, `node_modules`, `__pycache__` and
+   `.DS_Store` (`exclude=`). The model uses project-relative paths. A local path
+   into the project is translated. `inputs=["~/data"]` adds read-only folders.
+3. Copies changed and deleted files back after every run and when it closes.
+   A file you edited locally in the meantime is kept. The sandbox's version is
+   written beside it as `<file>.sandbox`.
+4. Deletes the sandbox when it closes. `keep=True` leaves it running. The
+   sandbox is named after the session, so a resumed session finds it again.
+
+Network access is closed unless you open it:
+
+- `allow` lists the hosts commands may reach, port 443 unless you write
+  `"host:port"`. A few well-known hosts bring their companions: `pypi.org`
+  brings `files.pythonhosted.org`.
+- `secrets` names environment variables a command can use but never read.
+  Inside the sandbox the variable holds a placeholder. OpenShell swaps in the
+  real value only on requests to that secret's hosts. Well-known names
+  (`GITHUB_TOKEN`, `GH_TOKEN`, `HF_TOKEN`, `NPM_TOKEN`) know their hosts. Map any
+  other to its own: `secrets={"MY_TOKEN": "api.example.com"}`.
+
+When the policy refuses a connection, `run_bash` tells the model which host was
+refused and that it is a policy decision, not a network fault.
+`SandboxResult.denials` and the `SANDBOX_EXEC` hook carry the same list.
+
+OpenShell's own `policy=` (a YAML path, YAML text, or a mapping) and
+`providers=` (existing provider names) are accepted too. `allow` and
+`secrets` add to them. To review the rules OpenShell drafts from blocked
+connections, use `await sandbox.pending_rules()`, then `approve_rule(rule)` or
+`reject_rule(rule, reason)`.
+
+On macOS, run the OpenShell gateway with its MicroVM driver
+(`compute_driver = "vm"` in `~/.config/openshell/gateway.toml`). Docker
+Desktop's Linux kernel has no Landlock, which OpenShell requires.
+
 ### Replacement, timeouts, and replay
 
 Duplicate tool names fail by default. Use `replace=True` to deliberately replace a
@@ -1637,6 +1700,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `KnowledgeManager` / `OKFBundle` / `GitSource` | `harnessx` | OKF knowledge bundles from folders or git: `search_concepts`, `read_concept`, `get_neighbors` |
 | `MCPManager` | `harnessx` | MCP server connections |
 | `Sandbox` | `harnessx` | Sandboxed code execution |
+| `OpenShellSandbox` | `harnessx.openshell` | Tools in an NVIDIA OpenShell sandbox: `project`, `allow`, `secrets`; the agent starts, syncs and closes it |
 | `AgentRuntime` | `harnessx` | Durable sessions: `run`, `run_stream`, `stream_text`, `approve(..., resume=True)`, `decline`, `status` |
 | `SQLiteBackend` / `PostgresBackend` / `TemporalBackend` | `harnessx` | Runtime storage; `await Backend.connect(...)`, `async with backend` |
 | `harnessx.durable` | module | Runtime, backends, recorder, and their errors in one namespace |

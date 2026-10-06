@@ -9,6 +9,13 @@ the caller: the agent creates the sandbox on the first tool call that needs it,
 copies the project in, copies changed files back after every run, and deletes
 the sandbox when it closes.
 
+Network access is off unless you allow it. ``allow=["github.com"]`` lets any
+command the agent runs reach those hosts; ``secrets=["GITHUB_TOKEN"]`` lets
+commands use a secret from your environment without ever seeing it (inside
+the sandbox the variable holds a placeholder that OpenShell swaps for the real
+value only on requests to the secret's hosts). ``policy=`` and ``providers=``
+take OpenShell's own policy YAML and provider names instead.
+
 Requires ``pip install harnessx[openshell]`` and a running OpenShell gateway
 (``openshell status``). The OpenShell SDK is synchronous; its calls run in
 worker threads.
@@ -30,9 +37,11 @@ import stat
 import tarfile
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from ._openshell_policy import build_policy, denials_from_log, expand_hosts, load_policy, secret_groups
 from .types import SandboxResult
 
 logger = logging.getLogger(__name__)
@@ -71,6 +80,18 @@ def policy_denials(*outputs: str) -> list[str]:
             if detail and detail not in denials:
                 denials.append(detail[:200])
     return denials
+
+
+@dataclass(frozen=True)
+class PendingRule:
+    """A network rule OpenShell drafted from blocked connections, waiting for a decision."""
+
+    id: str
+    rule_name: str
+    hosts: list[str]
+    binary: str
+    rationale: str
+    review_token: str = field(repr=False, default="")
 
 
 @dataclass
@@ -144,6 +165,18 @@ class OpenShellSandbox:
             ``<file>.sandbox``.
         inputs: Extra local files or folders, copied in read-only and never
             copied back. The model reaches them by their local paths.
+        allow: Hosts commands may reach, such as ``"github.com"`` or
+            ``"example.com:8443"`` (port 443 by default). Well-known
+            companions come along (``pypi.org`` brings
+            ``files.pythonhosted.org``). Nothing else is reachable.
+        secrets: Environment variables commands may use but never read. A
+            list names well-known ones (``GITHUB_TOKEN``, ``HF_TOKEN``,
+            ``NPM_TOKEN``, ...); a mapping names the hosts for any other:
+            ``{"MY_TOKEN": "api.example.com"}``. Their hosts are allowed too.
+        policy: An OpenShell policy (YAML path, YAML text, or mapping) to
+            start from instead of HarnessX's restrictive default. ``allow`` and
+            ``secrets`` add to it.
+        providers: Existing OpenShell providers to attach, by name.
         image: OCI image for the sandbox. None is the gateway's default.
         exclude: Names (shell patterns) left out of both copies. None is
             ``DEFAULT_EXCLUDE``.
@@ -167,6 +200,10 @@ class OpenShellSandbox:
         project: str | os.PathLike[str] = ".",
         *,
         inputs: Sequence[str | os.PathLike[str]] = (),
+        allow: Sequence[str] = (),
+        secrets: Sequence[str] | Mapping[str, str | Sequence[str]] = (),
+        policy: Any | None = None,
+        providers: Sequence[str] = (),
         image: str | None = None,
         exclude: Sequence[str] | None = None,
         keep: bool = False,
@@ -191,6 +228,19 @@ class OpenShellSandbox:
             self.inputs[local] = target
         if type(timeout_seconds) is not int or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive integer")
+        if isinstance(allow, str) or isinstance(providers, str):
+            raise TypeError("allow and providers take a list, such as allow=['github.com']")
+        self.secret_groups = secret_groups(secrets) if secrets else []
+        missing = [name for names, _ in self.secret_groups for name in names if not os.environ.get(name)]
+        if missing:
+            raise ValueError(f"secrets not set in the environment: {', '.join(missing)}")
+        self.allow = expand_hosts(allow)
+        for _, hosts in self.secret_groups:
+            for host in hosts:
+                if (host, 443) not in self.allow:
+                    self.allow.append((host, 443))
+        self.providers = list(providers)
+        self._base_policy = load_policy(policy) if policy is not None else None
         self.image = image
         self.exclude = tuple(DEFAULT_EXCLUDE if exclude is None else exclude)
         self.keep = keep
@@ -273,17 +323,25 @@ class OpenShellSandbox:
         except grpc.RpcError as exc:
             if exc.code() != grpc.StatusCode.NOT_FOUND:
                 raise
+        self._name = name
         if existing is None:
             from openshell._proto import openshell_pb2
 
             spec = openshell_pb2.SandboxSpec()
             if self.image:
                 spec.template.image = self.image
-            created = await asyncio.to_thread(
-                self._client.create, workspace=self.workspace, spec=spec, name=name, labels={"harnessx": "true"},
-            )
+            credentials = await self._create_secret_providers()
+            try:
+                if self.allow or self._base_policy is not None:
+                    spec.policy.CopyFrom(build_policy(base=self._base_policy, allow=self.allow, credentials=credentials))
+                spec.providers.extend([*self.providers, *sorted(set(credentials.values()))])
+                created = await asyncio.to_thread(
+                    self._client.create, workspace=self.workspace, spec=spec, name=name, labels={"harnessx": "true"},
+                )
+            except BaseException:
+                await self._delete_secret_providers()
+                raise
             self.sandbox_id = created.id
-        self._name = name
         ready = await asyncio.to_thread(self._client.wait_ready, name, workspace=self.workspace)
         self.sandbox_id = ready.id
         manifest = await self._read_manifest() if existing is not None else None
@@ -312,6 +370,13 @@ class OpenShellSandbox:
                     await asyncio.to_thread(
                         self._client.delete, self._name, workspace=self.workspace, allow_missing=True,
                     )
+                    if self.secret_groups:
+                        # A provider cannot go while a sandbox still holds it.
+                        await asyncio.to_thread(
+                            self._client.wait_deleted, self._name, workspace=self.workspace,
+                            expected_sandbox_id=self.sandbox_id,
+                        )
+                        await self._delete_secret_providers()
             finally:
                 self._started = False
                 if self._owns_client and self._client is not None:
@@ -381,14 +446,19 @@ class OpenShellSandbox:
         """Run a shell command in the project folder inside the sandbox."""
         limit = self._limit(timeout)
         await self.start()
-        began = time.monotonic()
+        began, began_at = time.monotonic(), time.time()
         exit_code, out, err = await self._run(command, stdin=stdin, timeout=limit)
         stdout, stderr = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
         timed_out = exit_code == _TIMED_OUT
+        denials = policy_denials(stdout, stderr)
+        if exit_code != 0 and not timed_out:
+            for host in await self._logged_denials(began_at, stdout + stderr):
+                if host not in denials:
+                    denials.append(host)
         result = SandboxResult(
             stdout=stdout, stderr=stderr + (f"\nCommand timed out after {limit}s" if timed_out else ""),
             exit_code=exit_code, timed_out=timed_out, execution_time_ms=(time.monotonic() - began) * 1000,
-            denials=policy_denials(stdout, stderr),
+            denials=denials,
         )
         await self._observe("command", result)
         return result
@@ -412,6 +482,151 @@ class OpenShellSandbox:
                 "denials": list(result.denials),
             },
         ))
+
+    # ── the gateway's other services ─────────────────────────────────────
+
+    def _stub(self) -> Any:
+        # The SDK wraps sandboxes, not providers, policy or logs; those go
+        # through the generated gRPC stub it holds.
+        return self._client._stub
+
+    def _scope(self) -> Any:
+        from openshell.sandbox import _workspace_scope
+
+        return _workspace_scope(self.workspace)
+
+    def _secret_names(self) -> list[tuple[str, str]]:
+        """(provider name, profile id) for each secret group, derived from the sandbox name."""
+        return [(f"{self._name}-secrets-{n}", f"harnessx-{self._name}-secrets-{n}") for n in range(len(self.secret_groups))]
+
+    async def _create_secret_providers(self) -> dict[str, str]:
+        """One OpenShell provider per secret group; returns host -> provider name.
+
+        Each gets its own endpointless profile, so the secret's hosts in the
+        sandbox policy are the only places it can be sent.
+        """
+        if not self.secret_groups:
+            return {}
+        from openshell._proto import datamodel_pb2, openshell_pb2
+
+        stub, credentials = self._stub(), {}
+        for (names, hosts), (provider, profile) in zip(self.secret_groups, self._secret_names()):
+            item = openshell_pb2.ProviderProfileImportItem(source="harnessx", profile=openshell_pb2.ProviderProfile(
+                id=profile, display_name=f"HarnessX: {', '.join(names)}",
+                category=openshell_pb2.PROVIDER_PROFILE_CATEGORY_OTHER,
+                credentials=[openshell_pb2.ProviderProfileCredential(
+                    name=name.lower(), env_vars=[name], required=True, auth_style="bearer", header_name="Authorization",
+                ) for name in names],
+            ))
+            response = await asyncio.to_thread(
+                stub.ImportProviderProfiles, openshell_pb2.ImportProviderProfilesRequest(profiles=[item]), timeout=60,
+            )
+            if not response.imported:
+                problems = "; ".join(diagnostic.message for diagnostic in response.diagnostics)
+                raise RuntimeError(f"OpenShell refused the profile for {', '.join(names)}: {problems}")
+            record = datamodel_pb2.Provider(type=profile, credentials={name: os.environ[name] for name in names})
+            record.metadata.name = provider
+            await asyncio.to_thread(
+                stub.CreateProvider, openshell_pb2.CreateProviderRequest(workspace_scope=self._scope(), provider=record),
+                timeout=60,
+            )
+            for host in hosts:
+                credentials[host] = provider
+        return credentials
+
+    async def _delete_secret_providers(self) -> None:
+        if not self.secret_groups:
+            return
+        import grpc
+        from openshell._proto import openshell_pb2
+
+        stub = self._stub()
+        for provider, profile in self._secret_names():
+            for call, request in (
+                (stub.DeleteProvider, openshell_pb2.DeleteProviderRequest(
+                    workspace_scope=self._scope(), name=provider, allow_missing=True)),
+                (stub.DeleteProviderProfile, openshell_pb2.DeleteProviderProfileRequest(id=profile, allow_missing=True)),
+            ):
+                try:
+                    await asyncio.to_thread(call, request, timeout=60)
+                except grpc.RpcError as exc:
+                    logger.warning("OpenShell cleanup of %s failed: %s", request, exc)
+
+    async def _logged_denials(self, since: float, output: str) -> list[str]:
+        """Destinations the sandbox's audit log refused since ``since``.
+
+        A refused connection reaches the command only as "Permission denied",
+        so the log is the reliable record. It can trail the command briefly.
+        """
+        if not hasattr(self._client, "_stub"):
+            return []
+        from google.protobuf.timestamp_pb2 import Timestamp
+        from openshell._proto import openshell_pb2
+
+        start = Timestamp()
+        start.FromMilliseconds(int((since - 1) * 1000))
+        request = openshell_pb2.GetSandboxLogsRequest(
+            workspace_scope=self._scope(), sandbox=self._name, since_time=start, sources=["sandbox"],
+        )
+        attempts = 3 if "denied" in output.lower() or "not permitted" in output.lower() else 1
+        for attempt in range(attempts):
+            try:
+                response = await asyncio.to_thread(self._stub().GetSandboxLogs, request, timeout=15)
+            except Exception as exc:  # the log is a diagnosis, never a reason to fail the command
+                logger.debug("OpenShell log lookup failed: %s", exc)
+                return []
+            found = denials_from_log([line.message for line in response.logs])
+            if found or attempt == attempts - 1:
+                # "host:port" from the connection beats the bare host from DNS.
+                return [d for d in found if not any(o != d and o.startswith(d + ":") for o in found)]
+            await asyncio.sleep(0.5)
+        return []
+
+    async def policy(self) -> dict[str, Any]:
+        """The sandbox's current OpenShell policy, as a mapping."""
+        await self.start()
+        from google.protobuf import json_format
+        from openshell._proto import sandbox_pb2
+
+        response = await asyncio.to_thread(
+            self._stub().GetSandboxConfig,
+            sandbox_pb2.GetSandboxConfigRequest(workspace_scope=self._scope(), name=self._name), timeout=60,
+        )
+        return json_format.MessageToDict(response.policy, preserving_proto_field_name=True)
+
+    async def pending_rules(self) -> list[PendingRule]:
+        """Network rules OpenShell drafted from blocked connections, awaiting a decision."""
+        await self.start()
+        from openshell._proto import openshell_pb2
+
+        response = await asyncio.to_thread(
+            self._stub().GetDraftPolicy, openshell_pb2.GetDraftPolicyRequest(
+                workspace_scope=self._scope(), sandbox=self._name, status_filter="pending"), timeout=60,
+        )
+        return [
+            PendingRule(
+                id=chunk.id, rule_name=chunk.rule_name, binary=chunk.binary, rationale=chunk.rationale,
+                hosts=[f"{e.host}:{','.join(map(str, e.ports or [e.port]))}" for e in chunk.proposed_rule.endpoints],
+                review_token=chunk.review_token,
+            )
+            for chunk in response.chunks
+        ]
+
+    async def approve_rule(self, rule: PendingRule) -> None:
+        """Add a drafted rule to the sandbox's policy; it applies to the next connection."""
+        from openshell._proto import openshell_pb2
+
+        await asyncio.to_thread(self._stub().ApproveDraftChunk, openshell_pb2.ApproveDraftChunkRequest(
+            workspace_scope=self._scope(), sandbox=self._name, chunk_id=rule.id, review_token=rule.review_token,
+        ), timeout=60)
+
+    async def reject_rule(self, rule: PendingRule, reason: str = "") -> None:
+        """Turn a drafted rule down; ``reason`` is shown to whoever proposed it."""
+        from openshell._proto import openshell_pb2
+
+        await asyncio.to_thread(self._stub().RejectDraftChunk, openshell_pb2.RejectDraftChunkRequest(
+            workspace_scope=self._scope(), sandbox=self._name, chunk_id=rule.id, reason=reason,
+        ), timeout=60)
 
     # ── paths ────────────────────────────────────────────────────────────
 
