@@ -83,7 +83,7 @@ def typed(monkeypatch, *lines):
 
 def test_examples_live_in_topic_folders_and_nowhere_else():
     assert [path.name for path in EXAMPLES.glob("*.py")] == []
-    assert len(example_scripts()) == 26
+    assert len(example_scripts()) == 27
 
 
 @pytest.mark.parametrize("path", example_scripts(), ids=lambda p: p.relative_to(EXAMPLES).as_posix())

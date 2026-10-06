@@ -224,6 +224,15 @@ class OpenAIProvider(LLMProvider):
 # ── Translation helpers ─────────────────────────────────────────────────────
 
 
+#: Chat Completions wants an audio container name where the canonical block
+#: carries a media type.
+_OPENAI_AUDIO_FORMATS: dict[str, str] = {
+    "audio/wav": "wav",
+    "audio/mp3": "mp3",
+    "audio/mpeg": "mp3",
+}
+
+
 def _to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -283,9 +292,39 @@ def _to_openai_messages(
             continue
 
         text_parts = []
+        media_parts: list[dict[str, Any]] = []
         for block in content or []:
             btype = _block_type(block)
-            if btype == "tool_result":
+            if btype in ("image", "document", "audio"):
+                source = _block_attr(block, "source") or {}
+                media_type = source.get("media_type") or ""
+                data = source.get("data") or ""
+                if btype == "image":
+                    media_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    })
+                elif btype == "audio":
+                    # Chat Completions names the container, not the media type.
+                    fmt = _OPENAI_AUDIO_FORMATS.get(media_type)
+                    if fmt is None:
+                        raise ValueError(
+                            f"OpenAI does not accept {media_type!r} audio; "
+                            f"send one of {', '.join(sorted(set(_OPENAI_AUDIO_FORMATS.values())))}"
+                        )
+                    media_parts.append({
+                        "type": "input_audio",
+                        "input_audio": {"data": data, "format": fmt},
+                    })
+                else:
+                    media_parts.append({
+                        "type": "file",
+                        "file": {
+                            "filename": "document.pdf",
+                            "file_data": f"data:{media_type};base64,{data}",
+                        },
+                    })
+            elif btype == "tool_result":
                 tc_id = _block_attr(block, "tool_use_id") or _block_attr(block, "tool_call_id")
                 tr_content = _block_attr(block, "content")
                 if isinstance(tr_content, list):
@@ -300,7 +339,16 @@ def _to_openai_messages(
                 })
             elif btype == "text":
                 text_parts.append(_block_attr(block, "text") or "")
-        if text_parts:
+        if media_parts:
+            # Mixed content has to go as a parts list; text alone stays a plain
+            # string so nothing changes for the overwhelming majority of calls.
+            joined = "\n".join(t for t in text_parts if t)
+            parts: list[dict[str, Any]] = []
+            if joined:
+                parts.append({"type": "text", "text": joined})
+            parts.extend(media_parts)
+            out.append({"role": "user", "content": parts})
+        elif text_parts:
             out.append({"role": "user", "content": "\n".join(text_parts)})
 
     return out

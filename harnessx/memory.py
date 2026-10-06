@@ -78,7 +78,8 @@ class ConversationMemory:
         )
         os.makedirs(self._eviction_dir, exist_ok=True)
 
-    def add_user_message(self, content: str) -> None:
+    def add_user_message(self, content: str | list[Any]) -> None:
+        """Text, or content blocks when the turn carries an image, PDF or audio."""
         self._messages.append(Message("user", content))
 
     def add_assistant_message(self, content: list[Any]) -> None:

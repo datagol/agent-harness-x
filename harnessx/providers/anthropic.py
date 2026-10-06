@@ -50,6 +50,14 @@ def _messages_for_request(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                 if block.get("provider") == "anthropic":
                     kept.append(deepcopy(block["data"]))
                 continue
+            if kind == "audio":
+                # Claude has no audio input. Dropping the block would send the
+                # prompt without the clip it refers to, and the model would
+                # answer about nothing; say so instead.
+                raise ValueError(
+                    "Anthropic models do not accept audio input; transcribe it first "
+                    "or send this turn to a provider that does"
+                )
             if kind == "thinking" and not block.get("signature"):
                 continue
             for key in [k for k in block if k.startswith("_")]:

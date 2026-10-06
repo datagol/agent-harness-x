@@ -245,8 +245,12 @@ class Agent:
         if self._busy:
             raise RuntimeStateError("Agent is busy with another run")
 
-    async def run(self, user_message: str) -> RunResult:
-        """Run one turn to completion and return its result. Failures are in result.error."""
+    async def run(self, user_message: str | list[dict[str, Any]]) -> RunResult:
+        """Run one turn to completion and return its result. Failures are in result.error.
+
+        `user_message` is text, or a list of content blocks when the turn carries
+        an image, a PDF or an audio clip alongside it.
+        """
         from .engine import drive, new_state
         self._check_available()
         self._busy = True
@@ -257,8 +261,12 @@ class Agent:
         finally:
             self._busy = False
 
-    def run_stream(self, user_message: str) -> RunStream:
-        """Run one turn as a stream of typed events; the final RunResult is the last event."""
+    def run_stream(self, user_message: str | list[dict[str, Any]]) -> RunStream:
+        """Run one turn as a stream of typed events; the final RunResult is the last event.
+
+        `user_message` is text, or a list of content blocks when the turn carries
+        an image, a PDF or an audio clip alongside it.
+        """
         from .engine import drive, new_state
         async def run(emit):
             self._check_available()
