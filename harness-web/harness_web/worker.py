@@ -48,6 +48,47 @@ def ask(prompt="", *, kind="input"):
         return answer["value"]
 
 
+def observe_agents():
+    """Report every tool call of every agent the example creates.
+
+    The example stays unmodified: its own output still streams as text, and
+    these hooks, added to each Agent as it is constructed, send the calls as
+    structured events the browser shows as tool cards.
+    """
+    from harnessx import Agent
+    from harnessx.hooks import HookEvent
+
+    original = Agent.__init__
+    agents = iter(range(1, 1_000_000))
+
+    def init(agent, *args, **kwargs):
+        original(agent, *args, **kwargs)
+        number = next(agents)
+
+        def event(kind, data):
+            send({"type": "agent", "event": {"type": kind, "data": data}})
+
+        def started(ctx):
+            call = ctx.data["tool_call"]
+            event("tool_call_start", {
+                "id": f"{number}:{call.id}", "name": call.name, "agent": number,
+                "input": json.loads(json.dumps(call.input, default=str)),
+            })
+
+        def ended(ctx):
+            result = ctx.data["result"]
+            content = result.content if isinstance(result.content, str) else json.dumps(result.content, default=str)
+            event("tool_result", {
+                "tool_call_id": f"{number}:{result.tool_call_id}",
+                "content": content[:20000], "is_error": bool(result.is_error),
+            })
+
+        agent.hooks.on(HookEvent.TOOL_CALL_START, started)
+        agent.hooks.on(HookEvent.TOOL_CALL_END, ended)
+
+    Agent.__init__ = init
+
+
 def main():
     example = CATALOG[sys.argv[1]]
     script = str(example.file)
@@ -56,6 +97,7 @@ def main():
     sys.argv = [script, *sys.argv[2:]]
     sys.path.insert(0, os.path.dirname(script))
     builtins.input = ask
+    observe_agents()
     runpy.run_path(script, run_name="__main__")
 
 

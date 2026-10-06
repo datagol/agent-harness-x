@@ -2220,3 +2220,14 @@ kbd {
 .task-item.in_progress.settled .task-dot {
   border-color: var(--accent);
 }
+
+.run-tools {
+  margin-top: 16px;
+}
+.tool-agent {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+}

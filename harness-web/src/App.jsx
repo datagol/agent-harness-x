@@ -891,6 +891,17 @@ function RunView({ id, refresh, examples }) {
             </div>
           </section>
           <Prompt run={run} />
+          <section className="detail-panel run-tools">
+            <h3>
+              <Wrench size={17} /> Tool calls{" "}
+              <span className="count-pill">{feed.tools.length}</span>
+            </h3>
+            {feed.tools.length ? (
+              <ToolList tools={feed.tools} showAgent={new Set(feed.tools.map((t) => t.agent)).size > 1} />
+            ) : (
+              <p>Every tool call an agent in this example makes appears here, with its arguments and result.</p>
+            )}
+          </section>
         </div>
         <aside className="run-details">
           <div className="detail-panel">
@@ -1098,11 +1109,12 @@ function toolHeadline(input) {
   return oneLine.length > 90 ? `${oneLine.slice(0, 90)}…` : oneLine;
 }
 
-function ToolList({ tools = [] }) {
+function ToolList({ tools = [], showAgent = false }) {
   return tools.map((tool) => (
     <details className="tool-detail" key={tool.id}>
       <summary>
         <Code2 size={14} />
+        {showAgent && tool.agent && <span className="tool-agent">agent {tool.agent}</span>}
         <span>{tool.name}</span>
         {toolHeadline(tool.input) && <span className="tool-headline">{toolHeadline(tool.input)}</span>}
         <Badge status={tool.status} />

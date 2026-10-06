@@ -166,6 +166,24 @@ async def test_provider_example_checks_selected_credentials_and_builds_arguments
 
 
 @pytest.mark.asyncio
+async def test_an_example_run_reports_every_tool_call_as_a_structured_event(tmp_path):
+    async with web(tmp_path) as (app, client):
+        run_id = await start(client, "loop_guard")
+        run = app.state.manager.runs[run_id]
+        await asyncio.wait_for(run.task, 30)
+        assert run.status == "completed", output(run)
+        events = [event["event"] for event in run.events if event["type"] == "agent"]
+        starts = [e["data"] for e in events if e["type"] == "tool_call_start"]
+        results = [e["data"] for e in events if e["type"] == "tool_result"]
+        assert [call["name"] for call in starts] == ["check_build"] * 3
+        assert starts[0]["input"] == {"job": "1234"} and starts[0]["agent"] == 1
+        # Results pair with their calls and carry what the tool returned.
+        assert [r["tool_call_id"] for r in results] == [call["id"] for call in starts]
+        assert results[-1]["content"] == "build 1234: queued (position 4)"
+        assert not any(r["is_error"] for r in results)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "example_id, expected",
     [
