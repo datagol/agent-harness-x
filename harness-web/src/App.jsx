@@ -1940,10 +1940,6 @@ function ChatView({ id, providers, refresh, onNew }) {
                 <Mark />
               </div>
               <div className="eyebrow">YOUR HARNESS-X ASSISTANT</div>
-              <h1>
-                A little curiosity.
-                <br />A lot of possibility.
-              </h1>
               <p>
                 Think through an idea, work with code, or ask a question.
                 <br />
