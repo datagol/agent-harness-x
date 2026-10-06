@@ -54,6 +54,8 @@ DEFAULT_EXCLUDE = (".venv", "node_modules", "__pycache__", ".DS_Store")
 
 # One gRPC request carries at most 4 MB; stdin larger than this is uploaded in pieces.
 _CHUNK_BYTES = 3 * 1024 * 1024
+# The gateway's rule for sandbox names: a DNS label of at most 19 characters.
+_SANDBOX_NAME = re.compile(r"(?=.{1,19}$)[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*")
 # The gateway reports a command that ran out of time as exit code 124.
 _TIMED_OUT = 124
 _DENIAL = re.compile(r'"error"\s*:\s*"policy_denied"|not permitted by policy', re.IGNORECASE)
@@ -249,6 +251,11 @@ class OpenShellSandbox:
         self.timeout_seconds = timeout_seconds
         self.hooks: Any | None = None
         self.last_sync: SyncReport | None = None
+        if name is not None and not _SANDBOX_NAME.fullmatch(name):
+            raise ValueError(
+                f"Sandbox name {name!r}: OpenShell takes 1-19 lowercase letters, digits and single hyphens, "
+                "not starting or ending with a hyphen"
+            )
         self._name = name
         self._client: Any = client
         self._owns_client = client is None
@@ -294,7 +301,7 @@ class OpenShellSandbox:
         if record and record.get("name"):
             return str(record["name"])
         session = getattr(self._agent, "session_id", None) or uuid.uuid4().hex
-        return "hx-" + re.sub(r"[^a-z0-9]", "", str(session).lower())[:20]
+        return "hx-" + re.sub(r"[^a-z0-9]", "", str(session).lower())[:16]  # 19 characters, the gateway's limit
 
     # ── lifecycle ────────────────────────────────────────────────────────
 

@@ -322,7 +322,7 @@ def test_the_agent_owns_the_sandbox_and_the_user_never_touches_it(project, gatew
             # Synced when the run ended, before the agent closed.
             assert (project / "src" / "app.py").read_text() == "print('v2')\n"
             name = agent.session_metadata["openshell"]["name"]
-            assert name == "hx-" + agent.session_id.replace("-", "")[:20]
+            assert name == "hx-" + agent.session_id.replace("-", "")[:16] and len(name) == 19
             return name
 
     name = asyncio.run(scenario())
@@ -513,3 +513,10 @@ def test_drafted_rules_can_be_approved_or_rejected(project, gateway):
     reject = next(r for m, r in gateway._stub.calls if m == "RejectDraftChunk")
     assert (approve.chunk_id, approve.review_token, approve.sandbox) == ("c1", "tok", "box")
     assert (reject.chunk_id, reject.reason) == ("c1", "not needed")
+
+
+def test_sandbox_names_follow_the_gateways_rule(project, gateway):
+    assert OpenShellSandbox(project, client=gateway, name="a-b9-c").name == "a-b9-c"
+    for bad in ("x" * 20, "Upper", "-lead", "trail-", "two--hyphens", "under_score", ""):
+        with pytest.raises(ValueError, match="1-19 lowercase"):
+            OpenShellSandbox(project, client=gateway, name=bad)
