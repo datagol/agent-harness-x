@@ -18,6 +18,7 @@ except ImportError as e:
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
+from ..types import ToolChoice
 from .base import normalize_tool_choice, closing_stream, LLMProvider, parse_tool_arguments
 
 
@@ -32,7 +33,7 @@ class OpenAIProvider(LLMProvider):
 
     def __init__(self, client: AsyncOpenAI | None = None, *,
                  allow_missing_finish_reason_for_text: bool = False,
-                 tool_choice: str | None = None) -> None:
+                 tool_choice: "str | ToolChoice | None" = None) -> None:
         # OpenAI spells "any" as "required"; see base.TOOL_CHOICES.
         self.tool_choice = normalize_tool_choice(tool_choice, env_var="OPENAI_TOOL_CHOICE")
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.

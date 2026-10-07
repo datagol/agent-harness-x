@@ -12,6 +12,7 @@ from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolC
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..models import ModelLimits
+from ..types import ToolChoice
 from .base import normalize_tool_choice, LLMProvider
 
 
@@ -137,7 +138,7 @@ class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
     def __init__(self, client: AsyncAnthropic | None = None, *,
-                 tool_choice: str | None = None) -> None:
+                 tool_choice: "str | ToolChoice | None" = None) -> None:
         # Anthropic spells it {"type": "any"}; see base.TOOL_CHOICES.
         self.tool_choice = normalize_tool_choice(
             tool_choice, env_var="ANTHROPIC_TOOL_CHOICE"

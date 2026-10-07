@@ -50,6 +50,7 @@ except ImportError as e:
 
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
+from ..types import ToolChoice
 from .base import normalize_tool_choice
 from .openai import OpenAIProvider
 
@@ -77,7 +78,7 @@ class AzureOpenAIProvider(OpenAIProvider):
         api_version: str | None = None,
         azure_deployment: str | None = None,
         allow_missing_finish_reason_for_text: bool = False,
-        tool_choice: str | None = None,
+        tool_choice: "str | ToolChoice | None" = None,
         **client_kwargs: Any,
     ) -> None:
         # Inherited from OpenAIProvider, which spells "any" as "required".

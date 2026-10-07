@@ -64,6 +64,7 @@ except ImportError as e:
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
+from ..types import ToolChoice
 from .base import normalize_tool_choice, closing_stream, LLMProvider
 
 THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
@@ -93,7 +94,7 @@ class GeminiProvider(LLMProvider):
         api_key: str | None = None,
         thinking_level: str | None = None,
         prompt_cache_ttl: int | None = None,
-        tool_choice: str | None = None,
+        tool_choice: "str | ToolChoice | None" = None,
     ) -> None:
         if client is not None:
             self.client = client

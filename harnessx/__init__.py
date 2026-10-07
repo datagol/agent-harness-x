@@ -69,6 +69,7 @@ from .types import (
     SandboxConfig,
     SandboxResult,
     SessionState,
+    ToolChoice,
     StopReason,
     StreamChunk,
     TokenUsage,
@@ -83,7 +84,8 @@ __all__ = [
     "__version__",
     # Agent and configuration
     "Agent", "SubAgent", "AgentConfig", "Limits", "LoopGuard", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry", "ProgressPolicy",
-    "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "StopReason", "ProviderResponse", "StreamChunk",
+    "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "ToolChoice",
+    "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",
     "ModelLimits", "register_model_limits",

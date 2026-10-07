@@ -16,6 +16,7 @@ except ImportError as e:
         "Install with: pip install 'harnessx[openrouter]'"
     ) from e
 
+from ..types import ToolChoice
 from .base import normalize_tool_choice
 from .openai import OpenAIProvider
 
@@ -49,7 +50,7 @@ class OpenRouterProvider(OpenAIProvider):
         app_name: str | None = None,
         default_headers: dict[str, str] | None = None,
         allow_missing_finish_reason_for_text: bool = False,
-        tool_choice: str | None = None,
+        tool_choice: "str | ToolChoice | None" = None,
         **client_kwargs: Any,
     ) -> None:
         # Inherited from OpenAIProvider, which spells "any" as "required".

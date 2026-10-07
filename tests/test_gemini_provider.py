@@ -736,3 +736,31 @@ class ToolChoiceAcrossProvidersTests(unittest.TestCase):
             AnthropicProvider(client=SimpleNamespace(), tool_choice="any").tool_choice, "any")
         self.assertEqual(
             OpenAIProvider(client=SimpleNamespace(), tool_choice="any").tool_choice, "any")
+
+
+class ToolChoiceIsAnEnumTests(unittest.TestCase):
+    """It is a str Enum, like StopReason and PermissionLevel."""
+
+    def test_the_enum_is_exported_and_string_valued(self):
+        from harnessx import ToolChoice
+        self.assertEqual([c.value for c in ToolChoice], ["auto", "any", "none"])
+        self.assertEqual(ToolChoice.ANY, "any")          # str subclass
+        self.assertEqual(ToolChoice.ANY.upper(), "ANY")  # usable on the wire
+
+    def test_a_provider_takes_the_enum_or_a_plain_string(self):
+        from harnessx import ToolChoice
+        from harnessx.providers.base import normalize_tool_choice
+        self.assertIs(normalize_tool_choice(ToolChoice.ANY), ToolChoice.ANY)
+        self.assertIs(normalize_tool_choice("any"), ToolChoice.ANY)
+        self.assertIs(normalize_tool_choice("ANY"), ToolChoice.ANY)
+
+    def test_openai_s_wire_word_is_not_an_input(self):
+        from harnessx.providers.base import normalize_tool_choice
+        with self.assertRaises(ValueError):
+            normalize_tool_choice("required")
+
+    def test_gemini_still_sends_the_right_mode_given_the_enum(self):
+        from harnessx import ToolChoice
+        p = GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice=ToolChoice.ANY)
+        config = p._build_config(system=None, tools=[_TOOL], max_tokens=10, temperature=None)
+        self.assertEqual(config["tool_config"]["function_calling_config"]["mode"], "ANY")
