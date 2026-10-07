@@ -6,7 +6,8 @@ Content blocks replace the usual string: a `text` block for the question and an
 
 Run: python examples/01-basics/media_input.py
 Run: python examples/01-basics/media_input.py path/to/file.jpg
-Needs: GEMINI_API_KEY
+Needs: pip install "harnessx[gemini]" and GEMINI_API_KEY (or GOOGLE_API_KEY). Set HARNESSX_MODEL to
+use another Gemini model than gemini-3.6-flash.
 """
 
 from __future__ import annotations

@@ -15,7 +15,7 @@ import pytest
 pytest.importorskip("fastapi")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness-web"))
 
-from harness_web.catalog import CATALOG, ROOT, arguments
+from harness_web.catalog import CATALOG, ROOT, arguments, requirements
 from harness_web.chat import create_chat
 from harness_web.files import open_workspace_file
 from harness_web.runs import RunManager
@@ -728,3 +728,15 @@ async def test_api_keys_are_saved_on_the_server_applied_at_once_and_never_return
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     KeyStore(tmp_path)
     assert os.environ["ANTHROPIC_API_KEY"] == secret
+
+
+def test_setup_checks_ask_for_the_key_each_example_actually_uses(monkeypatch):
+    for key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "AGENT_PROVIDER", "AGENT_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("harness_web.catalog.installed", lambda module: True)
+    # media_input runs on Gemini, not the Anthropic default.
+    assert requirements(CATALOG["media_input"]) == ["GEMINI_API_KEY"]
+    # The live evaluation follows AGENT_PROVIDER / AGENT_MODEL, like the skills examples.
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
+    live = requirements(CATALOG["evaluating_with_datasets"], "live")
+    assert "OPENAI_API_KEY" in live and "AGENT_MODEL" in live and "ANTHROPIC_API_KEY" not in live

@@ -13,8 +13,8 @@ A local workspace with two halves:
 `datagol-web` was inspected before building this app. It is a React/Vite marketing
 site with Datagol colors and animated landing-page components. This app reuses its
 React/Vite/Lucide stack, dependency versions, and core color palette. The marketing
-site remains unchanged. The backend follows the existing web example's use of
-FastAPI and HarnessX streaming, with separate chat sessions and explicit approvals.
+site remains unchanged. The backend uses FastAPI and HarnessX streaming, with
+separate chat sessions and explicit approvals.
 
 ## Run
 
@@ -28,8 +28,9 @@ python3 harness-web/run.py
 ```
 
 Open **http://127.0.0.1:8765**. Use `--port 8766` to choose another port, and
-`--host 0.0.0.0` to accept connections from outside this machine. It binds
-localhost by default because the app runs example code.
+`--host 0.0.0.0` to listen on every interface, as the container does. It binds
+localhost by default because the app runs example code, and it answers only
+requests addressed to `localhost` or `127.0.0.1` whatever it binds.
 The frontend build is served by the Python server; no second server is needed.
 
 ## Run everything in containers
@@ -37,7 +38,8 @@ The frontend build is served by the Python server; no second server is needed.
 No Python, no Node, and every optional service provisioned:
 
 ```bash
-docker compose up
+cp .env.example .env    # optional: your model keys
+docker compose up --build
 ```
 
 That builds the frontend, installs the SDK with every extra, and starts
@@ -63,7 +65,7 @@ The app lives in this checkout and is not bundled in the SDK wheel.
 
 There are two ways to give the app your model keys:
 
-- **`.env`.** Copy `.env.example` to `.env` in the repository root and set
+- **`.env`.** Run `cp .env.example .env` in the repository root and set
   `ANTHROPIC_API_KEY` (and any others) before starting. It is loaded without
   overriding variables already set; restart after changing it.
 - **In the app.** Open **Workspace setup** (the HX button, top right) and paste a
@@ -79,7 +81,7 @@ Other chat providers use `OPENAI_API_KEY`, `GEMINI_API_KEY`, or
 provider without a default.
 
 Without a key, start with **Flight recorder**, **Approvals and resume**, **Loop
-guard**, or **Skills, loaded on demand**. General chat also offers an explicitly labelled **Local demo** that
+guard**, or **Skills, loaded on demand**. **Build your agent** also offers an explicitly labelled **Local demo** that
 uses scripted responses and the real calculator; it is not a language model.
 Try `What is 48 * 12?`.
 
@@ -94,6 +96,7 @@ folders. Each entry runs the file unchanged, as `python examples/<topic>/<file>.
 | Basics | Progress and waiting | `01-basics/progress_and_waiting.py` | Offline; prints every event as it arrives |
 | Basics | Streaming chat | `01-basics/streaming_chat.py` | Anthropic; send follow-up messages or `quit` |
 | Basics | Switching providers | `01-basics/switching_providers.py` | Choose Anthropic, OpenAI, Gemini, or OpenRouter, a model ID, and streaming or ordinary responses |
+| Basics | Image, PDF and audio input | `01-basics/media_input.py` | `gemini` extra and `GEMINI_API_KEY`; sends the 1x1 PNG held in the script |
 | Tools | Filesystem tools and permissions | `02-tools/filesystem_tools_and_permissions.py` | Anthropic; writes and shell commands ask for approval |
 | Tools | MCP servers | `02-tools/mcp_servers.py` | `mcp` extra, Anthropic key, stdio command or SSE URL |
 | Skills | Skills, loaded on demand | `03-skills/skills_lazy_loading.py` | Offline; displays real skill and hook events |
@@ -169,8 +172,8 @@ Conversations and run history survive browser navigation/reload while the server
 is alive. **They do not survive a server restart.** Files remain on disk; the UI
 does not claim durable web sessions. Stopping a run does not reverse completed
 effects. The launcher is a development app for a trusted local user, not an
-authenticated multi-tenant deployment or an OS sandbox. It binds only to loopback
-and rejects unrelated browser origins. Do not publish it through a public proxy.
+authenticated multi-tenant deployment or an OS sandbox. It binds to loopback by
+default, answers only local host names, and rejects unrelated browser origins. Do not publish it through a public proxy.
 
 The server retains up to 100 runs, 50 chat sessions, and four active runs. Each
 run retains the latest 4,000 events / approximately 2 MB, with an explicit gap
@@ -209,8 +212,8 @@ Live model, PostgreSQL, MCP, and LangSmith services still require their own
 qualification. Credential/package availability is a prerequisite check, not proof
 that a remote service is reachable. DOM interaction checks with a mocked API
 passed for library search/filtering, example launch, streamed output, download
-links, approvals, and general chat. Browser visual verification could not run in
+links, approvals, and chat. Browser visual verification could not run in
 the build environment because localhost binding and browser startup were blocked.
 After starting locally, verify: run the recorder and download its bundle; approve
-and deny the approval demo; open the original web demo; chat with the local demo;
+and deny the approval demo; chat with the local demo;
 then select your configured provider for a live turn.

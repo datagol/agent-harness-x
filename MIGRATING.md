@@ -1,11 +1,11 @@
-# Migrating to harnessx 0.4
+# Migrating to harnessx 0.4 and later
 
 0.4 tidies the public API without touching the engine: one vocabulary for
 running an agent, grouped configuration, a common error base, typed extension
 points, and fewer ways to do the same thing. Most 0.3 code keeps working and
 emits a `DeprecationWarning` naming the replacement. Everything marked
 **removed in 0.5** below warned in 0.4 and is gone as of 0.5.0 -- see
-[0.5.0](#050) at the end; everything marked **removed** is gone in 0.4 and
+[0.5.0](#050) below; everything marked **removed** is gone in 0.4 and
 listed with its replacement.
 
 Run your suite once with warnings promoted to errors to find every deprecated
@@ -93,11 +93,12 @@ generator closes; wrap it in `contextlib.aclosing()` to make that immediate.
 
 ```python
 result = await agent.run("...")
-if result.ok: ...            # status is COMPLETED
+if result.ok: ...            # status is COMPLETED with a whole answer (see 0.6.0)
 if result.failed: ...        # status is FAILED; result.error has type and message
 if result.needs_input: ...   # status is AWAITING_INPUT; result.pending lists the tools
 
 result.raise_for_status()    # returns result, or raises RunFailed / RunAwaitingInput / RunCancelled
+                             # (later also RunTruncated / RunRefused / RunLimitReached)
 ```
 
 `result.pending` holds `PendingTool` objects instead of dicts. Read attributes:
@@ -132,7 +133,7 @@ With `resume=True` they return the finished `RunResult`. A run with several
 pending tools takes one decision per tool and a single `resume()` at the end,
 exactly as before. `resolve_tool()` also accepts a `PendingTool`.
 
-`RunHandle.backend` is **deprecated**; runtimes own their backend.
+`RunHandle.backend` warned in 0.4 and is **removed in 0.5**; runtimes own their backend.
 
 ## Errors
 
@@ -144,7 +145,7 @@ Every exception the SDK raises now derives from `harnessx.HarnessError`:
 | `RuntimeStateError` | `RuntimeError` | closed or busy agent, runtime not started, run not awaiting a resolution |
 | `ResolutionError` | `ValueError` | an approval or recovery decision that does not fit the tool's state |
 | `UnknownExecutionKey` | `KeyError` | `approve`/`resolve_tool` with a key the run does not have |
-| `RunError`, `RunFailed`, `RunAwaitingInput`, `RunCancelled` | | `raise_for_status()` and `stream_text()`; carry `.result` |
+| `RunError`, `RunFailed`, `RunAwaitingInput`, `RunCancelled` (later `RunTruncated`, `RunRefused`, `RunLimitReached`) | | `raise_for_status()` and `stream_text()`; carry `.result` |
 | `StorageError` and subclasses, `IncidentError`, `RecordingError`, `MaxIterationsError`, `CostLimitError`, `ToolNotFoundError`, `ToolApprovalRequired` | their 0.3 bases | unchanged sites |
 
 Code that caught `ValueError` or `RuntimeError` keeps working; the old bases are
@@ -335,7 +336,7 @@ loop is the retry path. `providers.retry.is_transient` stays, and is what
 
 ## 0.5.0
 
-The three shims 0.4 deprecated with "removed in harnessx 0.5" are gone. Each one
+The shims 0.4 deprecated with "removed in harnessx 0.5" are gone. Each one
 warned for the whole of 0.4; running your suite under
 `python -W error::DeprecationWarning -m pytest` on 0.4 finds every use.
 
@@ -348,6 +349,7 @@ warned for the whole of 0.4; running your suite under
 | `runtime.execute_stream(msg)` | `runtime.run_stream(msg)` |
 | `runtime.get_status()` | `runtime.status()` |
 | `pending["execution_key"]`, `pending.get("timeout")` | `pending.execution_key`, `pending.timeout_seconds` |
+| `handle.backend` (`RunHandle.backend`) | the runtime's own backend (`runtime.backend`) |
 
 A flat keyword now raises `TypeError`, a flat attribute `AttributeError`, and
 indexing a `PendingTool` `TypeError`.
@@ -378,6 +380,15 @@ An explicit `max_tokens` is now the *starting* budget: a truncated reply doubles
 it for the rest of the run. Pair it with `max_truncation_recoveries=0` to make
 it a hard ceiling.
 
+## 0.6.0: examples
+
+The examples are standalone scripts grouped by topic in `examples/01-basics/`
+through `examples/08-sandboxes/`, run by path:
+`python examples/05-control/loop_guard.py`. `python -m examples.*` no longer
+works and `examples` is no longer a package. The
+[changelog](CHANGELOG.md) names the main renames (`simple_chat` is
+`01-basics/streaming_chat.py`, `postgres_runtime` is
+`06-durability/durable_crash_recovery.py`).
 
 ## 0.6.0: reliability behavior changes
 
@@ -410,3 +421,9 @@ Other adapters omit opaque blocks belonging to another provider family.
 Temporal workflow scheduling uses the `harness-reliability-v2` patch marker to
 retain the previous command sequence when replaying older histories. Keep this
 marker until all workflows predating the change have completed.
+
+## 0.7.0
+
+Nothing needs changing. A turn may now carry `image`, `document` and `audio`
+content blocks; a text-only turn is still sent as a plain string. Anthropic
+raises on audio rather than dropping it.
