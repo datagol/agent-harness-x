@@ -22,6 +22,24 @@ class PermissionLevel(str, Enum):
     DENY = "deny"
 
 
+class ToolChoice(str, Enum):
+    """How much freedom the model has about calling a tool.
+
+    AUTO is every vendor's own default: the model may call a tool or answer
+    with text. ANY is for an agent whose every turn is defined as a tool call
+    -- on AUTO such a model may still answer with prose, and a few percent of
+    the time it does, describing the call it meant to make, which reaches the
+    user as raw arguments. NONE forbids tools for a turn.
+
+    Leaving it unset is not the same as AUTO: nothing is sent, so the request
+    is byte for byte what it was before the option existed.
+    """
+
+    AUTO = "auto"
+    ANY = "any"
+    NONE = "none"
+
+
 class StopReason(str, Enum):
     END_TURN = "end_turn"
     TOOL_USE = "tool_use"

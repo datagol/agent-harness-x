@@ -638,3 +638,129 @@ def test_the_built_in_read_tool_result_schema_is_gemini_safe():
     assert declarations, "the built-in tool should be registered"
     for declaration in declarations:
         assert "additionalProperties" not in declaration["parameters"]
+
+
+
+# ── tool_choice ────────────────────────────────────────────────────────
+
+_TOOL = {"name": "t", "description": "d", "input_schema": {"type": "object"}}
+
+
+class ToolChoiceTests(unittest.TestCase):
+    """The knob is opt-in: unset, the request is exactly what it was before."""
+
+    def _config(self, **kw):
+        provider = GeminiProvider(client=SimpleNamespace(), api_key="k", **kw)
+        return provider, provider._build_config(
+            system="s", tools=[_TOOL], max_tokens=100, temperature=None
+        )
+
+    def test_unset_sends_no_tool_config_at_all(self):
+        # Backward compatibility: Gemini keeps its own AUTO default and the
+        # request body is byte-identical to before this option existed.
+        _, config = self._config()
+        self.assertNotIn("tool_config", config)
+
+    def test_any_forbids_a_prose_answer(self):
+        # An agent whose every turn is defined as a tool call cannot allow free
+        # text. On AUTO the model may answer with prose instead of calling a
+        # tool, and a few percent of the time it does -- writing the call out
+        # as text, which reaches the user as raw arguments.
+        _, config = self._config(tool_choice="any")
+        self.assertEqual(
+            config["tool_config"], {"function_calling_config": {"mode": "ANY"}}
+        )
+
+    def test_none_forbids_tools(self):
+        _, config = self._config(tool_choice="none")
+        self.assertEqual(
+            config["tool_config"], {"function_calling_config": {"mode": "NONE"}}
+        )
+
+    def test_omitted_when_no_tools_are_declared(self):
+        provider = GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice="any")
+        config = provider._build_config(
+            system="s", tools=[], max_tokens=100, temperature=None
+        )
+        self.assertNotIn("tool_config", config)
+
+    def test_survives_the_prompt_cache_path(self):
+        # Caching strips system_instruction and tools from the per-call config;
+        # tool_config must not go with them.
+        _, config = self._config(tool_choice="any")
+        trimmed = {k: v for k, v in config.items()
+                   if k not in ("system_instruction", "tools")}
+        self.assertIn("tool_config", trimmed)
+
+    def test_read_from_the_environment(self):
+        import os
+        os.environ["GEMINI_TOOL_CHOICE"] = "none"
+        try:
+            provider = GeminiProvider(client=SimpleNamespace(), api_key="k")
+            self.assertEqual(provider.tool_choice, "none")
+        finally:
+            del os.environ["GEMINI_TOOL_CHOICE"]
+
+    def test_an_unknown_value_is_refused_at_construction(self):
+        with self.assertRaises(ValueError):
+            GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice="sometimes")
+
+
+class ToolChoiceAcrossProvidersTests(unittest.TestCase):
+    """One name, each vendor's own spelling, and opt-in everywhere."""
+
+    def test_every_provider_accepts_the_same_three_values(self):
+        from harnessx.providers.base import TOOL_CHOICES, normalize_tool_choice
+        self.assertEqual(TOOL_CHOICES, ("auto", "any", "none"))
+        for value in TOOL_CHOICES:
+            self.assertEqual(normalize_tool_choice(value), value)
+        self.assertIsNone(normalize_tool_choice(None))
+        with self.assertRaises(ValueError):
+            normalize_tool_choice("required")   # OpenAI's wire word, not ours
+
+    def test_gemini_sends_its_own_dialect(self):
+        p = GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice="any")
+        config = p._build_config(system=None, tools=[_TOOL], max_tokens=10, temperature=None)
+        self.assertEqual(config["tool_config"]["function_calling_config"]["mode"], "ANY")
+
+    def test_anthropic_and_openai_default_to_unset(self):
+        from harnessx.providers.anthropic import AnthropicProvider
+        from harnessx.providers.openai import OpenAIProvider
+        self.assertIsNone(AnthropicProvider(client=SimpleNamespace()).tool_choice)
+        self.assertIsNone(OpenAIProvider(client=SimpleNamespace()).tool_choice)
+
+    def test_anthropic_and_openai_carry_the_setting(self):
+        from harnessx.providers.anthropic import AnthropicProvider
+        from harnessx.providers.openai import OpenAIProvider
+        self.assertEqual(
+            AnthropicProvider(client=SimpleNamespace(), tool_choice="any").tool_choice, "any")
+        self.assertEqual(
+            OpenAIProvider(client=SimpleNamespace(), tool_choice="any").tool_choice, "any")
+
+
+class ToolChoiceIsAnEnumTests(unittest.TestCase):
+    """It is a str Enum, like StopReason and PermissionLevel."""
+
+    def test_the_enum_is_exported_and_string_valued(self):
+        from harnessx import ToolChoice
+        self.assertEqual([c.value for c in ToolChoice], ["auto", "any", "none"])
+        self.assertEqual(ToolChoice.ANY, "any")          # str subclass
+        self.assertEqual(ToolChoice.ANY.upper(), "ANY")  # usable on the wire
+
+    def test_a_provider_takes_the_enum_or_a_plain_string(self):
+        from harnessx import ToolChoice
+        from harnessx.providers.base import normalize_tool_choice
+        self.assertIs(normalize_tool_choice(ToolChoice.ANY), ToolChoice.ANY)
+        self.assertIs(normalize_tool_choice("any"), ToolChoice.ANY)
+        self.assertIs(normalize_tool_choice("ANY"), ToolChoice.ANY)
+
+    def test_openai_s_wire_word_is_not_an_input(self):
+        from harnessx.providers.base import normalize_tool_choice
+        with self.assertRaises(ValueError):
+            normalize_tool_choice("required")
+
+    def test_gemini_still_sends_the_right_mode_given_the_enum(self):
+        from harnessx import ToolChoice
+        p = GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice=ToolChoice.ANY)
+        config = p._build_config(system=None, tools=[_TOOL], max_tokens=10, temperature=None)
+        self.assertEqual(config["tool_config"]["function_calling_config"]["mode"], "ANY")

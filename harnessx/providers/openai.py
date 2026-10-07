@@ -18,7 +18,8 @@ except ImportError as e:
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
-from .base import closing_stream, LLMProvider, parse_tool_arguments
+from ..types import ToolChoice
+from .base import normalize_tool_choice, closing_stream, LLMProvider, parse_tool_arguments
 
 
 class OpenAIProvider(LLMProvider):
@@ -30,7 +31,11 @@ class OpenAIProvider(LLMProvider):
     # unknown parameters set this to False.
     supports_prompt_cache_key = True
 
-    def __init__(self, client: AsyncOpenAI | None = None, *, allow_missing_finish_reason_for_text: bool = False) -> None:
+    def __init__(self, client: AsyncOpenAI | None = None, *,
+                 allow_missing_finish_reason_for_text: bool = False,
+                 tool_choice: "str | ToolChoice | None" = None) -> None:
+        # OpenAI spells "any" as "required"; see base.TOOL_CHOICES.
+        self.tool_choice = normalize_tool_choice(tool_choice, env_var="OPENAI_TOOL_CHOICE")
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncOpenAI(max_retries=0)
         self.allow_missing_finish_reason_for_text = allow_missing_finish_reason_for_text
@@ -65,6 +70,10 @@ class OpenAIProvider(LLMProvider):
             kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
+            if self.tool_choice:
+                kwargs["tool_choice"] = (
+                    "required" if self.tool_choice == "any" else self.tool_choice
+                )
         self._apply_prompt_cache(kwargs, cache)
 
         try:
@@ -102,6 +111,10 @@ class OpenAIProvider(LLMProvider):
             kwargs["temperature"] = temperature
         if openai_tools:
             kwargs["tools"] = openai_tools
+            if self.tool_choice:
+                kwargs["tool_choice"] = (
+                    "required" if self.tool_choice == "any" else self.tool_choice
+                )
         self._apply_prompt_cache(kwargs, cache)
 
         collected_text = ""

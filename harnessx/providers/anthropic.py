@@ -12,7 +12,8 @@ from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolC
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..models import ModelLimits
-from .base import LLMProvider
+from ..types import ToolChoice
+from .base import normalize_tool_choice, LLMProvider
 
 
 def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -136,7 +137,12 @@ class AnthropicProvider(LLMProvider):
 
     name = "anthropic"
 
-    def __init__(self, client: AsyncAnthropic | None = None) -> None:
+    def __init__(self, client: AsyncAnthropic | None = None, *,
+                 tool_choice: "str | ToolChoice | None" = None) -> None:
+        # Anthropic spells it {"type": "any"}; see base.TOOL_CHOICES.
+        self.tool_choice = normalize_tool_choice(
+            tool_choice, env_var="ANTHROPIC_TOOL_CHOICE"
+        )
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncAnthropic(max_retries=0)
         self._limits: dict[str, ModelLimits | None] = {}
@@ -204,6 +210,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
+            if self.tool_choice:
+                kwargs["tool_choice"] = {"type": self.tool_choice}
 
         uncached = _filter_kwargs(self.client.messages.create, kwargs)
         filtered_kwargs = _filter_kwargs(self.client.messages.create, _apply_prompt_cache(kwargs, cache))
@@ -245,6 +253,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
+            if self.tool_choice:
+                kwargs["tool_choice"] = {"type": self.tool_choice}
 
         uncached = _filter_kwargs(self.client.messages.stream, kwargs)
         filtered_kwargs = _filter_kwargs(self.client.messages.stream, _apply_prompt_cache(kwargs, cache))
