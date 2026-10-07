@@ -214,6 +214,12 @@ class GeminiProvider(LLMProvider):
                 cache_config["system_instruction"] = system
             if tools:
                 cache_config["tools"] = base["tools"]
+                # Gemini refuses a request that carries cached_content and
+                # tool_config together: "CachedContent can not be used with
+                # GenerateContent request setting system_instruction, tools or
+                # tool_config." It travels with the tools it constrains.
+                if "tool_config" in base:
+                    cache_config["tool_config"] = base["tool_config"]
             try:
                 created = await self.client.aio.caches.create(
                     model=model, config=cache_config
@@ -232,7 +238,7 @@ class GeminiProvider(LLMProvider):
         config = {
             k: v
             for k, v in base.items()
-            if k not in ("system_instruction", "tools")
+            if k not in ("system_instruction", "tools", "tool_config")
         }
         config["cached_content"] = self._prompt_caches[key][0]
         return config
