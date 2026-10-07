@@ -33,6 +33,7 @@ from .chat import (
     DOWNLOADS_DIR, Chat, close_chat, create_chat, rebuild_chat, run_chat, set_tool_enabled, validate_subagents,
 )
 from .files import open_workspace_file
+from .keys import KeyStore
 from .runs import RunManager, run_example
 
 
@@ -83,6 +84,11 @@ class SubAgentsRequest(BaseModel):
     subagents: list[SubAgentSpec] = Field(default_factory=list, max_length=10)
 
 
+class KeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str = Field(min_length=1, max_length=4096)
+
+
 class SkillUploadRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=262144)
@@ -104,6 +110,8 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
     ).resolve()
     manager = RunManager(directory / "runs")
     chats: dict[str, Chat] = {}
+    # After .env is loaded: a key saved in the app wins over it.
+    keys = KeyStore(directory)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -119,6 +127,7 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
     app = FastAPI(title="harness-web", lifespan=lifespan)
     app.state.manager = manager
     app.state.chats = chats
+    app.state.keys = keys
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"],
@@ -176,6 +185,29 @@ def create_app(*, data_dir=None, load_env=True, chat_factory=create_chat):
             ]
             + [{"id": "demo", "name": "Local demo", "missing": [], "model": "demo"}],
         }
+
+    @app.get("/api/keys")
+    async def list_keys():
+        """Which API keys are set and where they come from; never the values."""
+        return keys.records()
+
+    @app.put("/api/keys/{name}")
+    async def save_key(name: str, body: KeyRequest):
+        try:
+            keys.save(name, body.value)
+        except KeyError:
+            raise HTTPException(404, "Unknown key") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return keys.records()
+
+    @app.delete("/api/keys/{name}")
+    async def remove_key(name: str):
+        try:
+            keys.remove(name)
+        except KeyError:
+            raise HTTPException(404, "Unknown key") from None
+        return keys.records()
 
     @app.get("/api/examples")
     async def examples():

@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -687,3 +688,43 @@ async def test_build_your_agent_adds_subagents_that_delegate_with_only_their_too
 
         cleared = await client.put(f"/api/chats/{chat_id}/subagents", json={"subagents": []})
         assert cleared.json()["subagents"] == [] and not chat.agent.tools.has_tool("delegate_reviewer")
+
+
+@pytest.mark.asyncio
+async def test_api_keys_are_saved_on_the_server_applied_at_once_and_never_returned(tmp_path, monkeypatch):
+    from harness_web.keys import KNOWN_KEYS, KeyStore
+
+    for name in KNOWN_KEYS:  # monkeypatch restores whatever the test environment had
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "from-dotenv-123")
+    secret = "sk-ant-test-0123456789"
+    async with web(tmp_path) as (app, client):
+        listed = {key["name"]: key for key in (await client.get("/api/keys")).json()}
+        assert listed["ANTHROPIC_API_KEY"] == {
+            "name": "ANTHROPIC_API_KEY", "label": "Anthropic", "set": False, "source": None}
+        assert listed["OPENAI_API_KEY"]["source"] == "environment"
+
+        saved = await client.put("/api/keys/ANTHROPIC_API_KEY", json={"value": f"  {secret}\n"})
+        assert saved.status_code == 200 and secret not in saved.text
+        assert os.environ["ANTHROPIC_API_KEY"] == secret
+        health = {p["id"]: p for p in (await client.get("/api/health")).json()["providers"]}
+        assert "ANTHROPIC_API_KEY" not in health["anthropic"]["missing"]
+        stored = tmp_path / "api-keys.json"
+        assert json.loads(stored.read_text()) == {"ANTHROPIC_API_KEY": secret}
+        assert stored.stat().st_mode & 0o777 == 0o600
+        assert secret not in (await client.get("/api/keys")).text
+
+        assert (await client.put("/api/keys/ANTHROPIC_API_KEY", json={"value": "short"})).status_code == 422
+        assert (await client.put("/api/keys/PATH", json={"value": "x" * 20})).status_code == 404
+
+        # A key saved in the app wins over .env; removing it restores the .env value.
+        await client.put("/api/keys/OPENAI_API_KEY", json={"value": "from-the-app-456"})
+        assert os.environ["OPENAI_API_KEY"] == "from-the-app-456"
+        removed = {k["name"]: k for k in (await client.delete("/api/keys/OPENAI_API_KEY")).json()}
+        assert removed["OPENAI_API_KEY"]["source"] == "environment"
+        assert os.environ["OPENAI_API_KEY"] == "from-dotenv-123"
+
+    # A restarted server finds the saved key again.
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    KeyStore(tmp_path)
+    assert os.environ["ANTHROPIC_API_KEY"] == secret

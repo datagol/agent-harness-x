@@ -405,8 +405,9 @@ function LaunchDialog({ example, providers, onClose, onLaunch }) {
             <div>
               <strong>Setup needed</strong>
               <p>
-                Configure {missing.join(", ")} in the server environment, then
-                restart the server. Keys stay on the server.
+                Needs {missing.join(", ")}. Add API keys under Workspace setup
+                (the HX button, top right) or in <code>.env</code>; other
+                settings go in <code>.env</code>.
               </p>
             </div>
           </div>
@@ -1217,6 +1218,91 @@ function ToolCatalog({ tools = [], onToggle, busy = false }) {
         );
       })}
     </div>
+  );
+}
+
+const KEY_SOURCE = { app: "Saved in this app", environment: "From .env" };
+
+function ApiKeys({ onChanged }) {
+  const [keys, setKeys] = useState([]);
+  const [drafts, setDrafts] = useState({});
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api("/keys").then(setKeys).catch((err) => setError(err.message));
+  }, []);
+  async function change(name, request) {
+    setBusy(name);
+    setError("");
+    try {
+      setKeys(await request());
+      setDrafts((current) => ({ ...current, [name]: "" }));
+      onChanged?.();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+  return (
+    <section className="setup-section">
+      <div className="setup-section-title">
+        <div>
+          <ShieldCheck size={17} />
+          <strong>API keys</strong>
+        </div>
+      </div>
+      <p className="detail-copy">
+        Paste a key to use it right away: the next example run and the next
+        conversation pick it up. Keys stay on this machine, in the app’s data
+        folder, and are never shown again; a key saved here takes precedence
+        over <code>.env</code>.
+      </p>
+      <div className="setup-list">
+        {keys.map((key) => (
+          <form
+            key={key.name}
+            className="setup-row key-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              change(key.name, () =>
+                api(`/keys/${key.name}`, { method: "PUT", body: { value: drafts[key.name] || "" } }),
+              );
+            }}
+          >
+            <div>
+              <strong>{key.label}</strong>
+              <small>
+                {key.name} · {key.set ? KEY_SOURCE[key.source] : "Not set"}
+              </small>
+            </div>
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label={`${key.label} API key`}
+              placeholder={key.set ? "Replace key" : "Paste key"}
+              value={drafts[key.name] || ""}
+              onChange={(event) => setDrafts((current) => ({ ...current, [key.name]: event.target.value }))}
+            />
+            <button className="button" disabled={busy === key.name || !(drafts[key.name] || "").trim()}>
+              Save
+            </button>
+            {key.source === "app" && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={`Remove saved ${key.label} key`}
+                disabled={busy === key.name}
+                onClick={() => change(key.name, () => api(`/keys/${key.name}`, { method: "DELETE" }))}
+              >
+                <Trash2 size={15} />
+              </button>
+            )}
+          </form>
+        ))}
+      </div>
+      <ErrorNotice message={error} onDismiss={() => setError("")} />
+    </section>
   );
 }
 
@@ -2082,8 +2168,8 @@ function ChatView({ id, providers, refresh, onNew }) {
         )}
         {!!provider?.missing.length && (
           <div className="setup-note compact">
-            Configure {provider.missing.join(", ")} in the server environment,
-            or choose Local demo.
+            Needs {provider.missing.join(", ")}. Add API keys under Workspace
+            setup (HX, top right), or choose Local demo.
           </div>
         )}
         <form className="composer" onSubmit={send}>
@@ -2432,9 +2518,10 @@ export default function App() {
       {settings && (
         <Modal title="Workspace setup" onClose={() => setSettings(false)}>
           <p className="detail-note">
-            Credentials are read from the repository’s <code>.env</code> file or
-            the server environment. Restart the server after changing them.
+            Add your API keys below, or put them in the repository’s{" "}
+            <code>.env</code> before starting the app.
           </p>
+          <ApiKeys onChanged={connect} />
           <div className="provider-list">
             {(health?.providers || []).map((provider) => (
               <div key={provider.id}>
