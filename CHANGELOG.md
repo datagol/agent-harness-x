@@ -6,8 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-07
+
+### Fixed
+
+- `write_todos` no longer fails when the model marks more than one item in
+  progress. The first stays in progress, the rest go back to pending, and the
+  tool's reply says so, so the model learns the rule without spending a turn
+  sending the list again. Lists that are wrong in other ways (an item without
+  content, an unknown status) are still refused.
+
+## [0.7.2] - 2026-10-07
+
+### Fixed
+
+- Gemini with both `tool_choice` and `prompt_cache_ttl` failed every turn with
+  `400 INVALID_ARGUMENT: CachedContent can not be used with GenerateContent
+  request setting ... tool_config`. The tool config now travels with the tools
+  on the cached content and is left off the request.
+
+## [0.7.1] - 2026-10-07
+
 ### Added
 
+- **`tool_choice` on every provider.** `"auto"`, `"any"` or `"none"` (or the
+  `ToolChoice` enum, exported from `harnessx`), passed to the provider or set
+  with `ANTHROPIC_TOOL_CHOICE`, `OPENAI_TOOL_CHOICE`, `GEMINI_TOOL_CHOICE` and
+  so on. `"any"` makes a tool call the only valid answer, for agents whose
+  every turn is a tool call. Each provider sends it in its own form; left
+  unset, nothing is added to the request.
 - **harness-web takes API keys in the app.** Open **Workspace setup** (the HX
   button, top right) and paste a key under **API keys** for Anthropic, OpenAI,
   Gemini, OpenRouter, LangSmith, Tavily or Jev; the next example run and the
@@ -23,11 +50,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- `write_todos` no longer fails when the model marks more than one item in
-  progress. The first stays in progress, the rest go back to pending, and the
-  tool's reply says so, so the model learns the rule without spending a turn
-  sending the list again. Lists that are wrong in other ways (an item without
-  content, an unknown status) are still refused.
 - harness-web asked for an Anthropic key before running the media-input
   example, which runs on Gemini; it now checks `GEMINI_API_KEY` and the
   `gemini` extra.
@@ -645,7 +667,10 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/datagol/agent-harness-x/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/datagol/agent-harness-x/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/datagol/agent-harness-x/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/datagol/agent-harness-x/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/datagol/agent-harness-x/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/datagol/agent-harness-x/compare/v0.4.3...v0.5.0
