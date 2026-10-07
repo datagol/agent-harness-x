@@ -50,6 +50,7 @@ except ImportError as e:
 
 from ..types import ProviderResponse, StreamChunk
 from ..types import PromptCacheHint
+from .base import normalize_tool_choice
 from .openai import OpenAIProvider
 
 
@@ -76,8 +77,11 @@ class AzureOpenAIProvider(OpenAIProvider):
         api_version: str | None = None,
         azure_deployment: str | None = None,
         allow_missing_finish_reason_for_text: bool = False,
+        tool_choice: str | None = None,
         **client_kwargs: Any,
     ) -> None:
+        # Inherited from OpenAIProvider, which spells "any" as "required".
+        self.tool_choice = normalize_tool_choice(tool_choice, env_var="AZURE_OPENAI_TOOL_CHOICE")
         if client is not None:
             # A preconfigured client manages its own auth/endpoint/version;
             # use it as-is and skip all env validation and SDK construction.

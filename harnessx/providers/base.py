@@ -30,6 +30,39 @@ DEFAULT_MAX_TOKENS = DEFAULT_OUTPUT_CAP
 INVALID_ARGUMENTS = "__invalid_arguments__"
 
 
+# How much freedom the model has about calling a tool. One name across every
+# provider; each one spells it differently on the wire.
+#
+#   "auto"  the model may call a tool or answer with text   (every vendor's default)
+#   "any"   the model MUST call one of the declared tools
+#   "none"  the model must not call a tool
+#
+# "any" exists for agents whose every turn is defined as a tool call. On "auto"
+# such a model may still answer with prose, and a few percent of the time it
+# does -- describing the call it meant to make, which reaches the user as raw
+# arguments. No prompt wording closes that door, because the prompt is advice
+# and "auto" is permission.
+#
+# Unset is not the same as "auto": nothing is sent, so the request is byte for
+# byte what it was before this existed.
+TOOL_CHOICES = ("auto", "any", "none")
+
+
+def normalize_tool_choice(value: str | None, *, env_var: str | None = None) -> str | None:
+    """Validate a tool_choice, falling back to the environment, else None."""
+    import os
+
+    raw = value if value is not None else (os.environ.get(env_var) if env_var else None)
+    if raw is None or raw == "":
+        return None
+    choice = str(raw).strip().lower()
+    if choice not in TOOL_CHOICES:
+        raise ValueError(
+            f"tool_choice must be one of {TOOL_CHOICES}, not {raw!r}"
+        )
+    return choice
+
+
 def native_continuation(response) -> bool:
     if response.stop_reason == "pause_turn":
         return True

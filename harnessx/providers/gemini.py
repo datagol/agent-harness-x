@@ -64,7 +64,7 @@ except ImportError as e:
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
-from .base import closing_stream, LLMProvider
+from .base import normalize_tool_choice, closing_stream, LLMProvider
 
 THOUGHT_SIGNATURE_KEY = "_gemini_thought_signature"
 
@@ -93,6 +93,7 @@ class GeminiProvider(LLMProvider):
         api_key: str | None = None,
         thinking_level: str | None = None,
         prompt_cache_ttl: int | None = None,
+        tool_choice: str | None = None,
     ) -> None:
         if client is not None:
             self.client = client
@@ -107,6 +108,14 @@ class GeminiProvider(LLMProvider):
         if prompt_cache_ttl is None:
             prompt_cache_ttl = int(os.environ.get("GEMINI_PROMPT_CACHE_TTL") or 0)
         self.prompt_cache_ttl = prompt_cache_ttl or None  # None/0 = disabled
+        # "auto" (Gemini's default) lets the model answer with prose instead of
+        # calling a tool, which is right for a chat agent and wrong for one
+        # whose every turn is defined as a tool call: the model takes the prose
+        # door a few percent of the time and writes the call out as text.
+        # "any" removes that door. "none" forbids tools for a turn.
+        self.tool_choice = normalize_tool_choice(
+            tool_choice, env_var="GEMINI_TOOL_CHOICE"
+        )
         # key -> (cache_name, expires_at monotonic)
         self._prompt_caches: dict[str, tuple[str, float]] = {}
         # key -> monotonic time before which caches.create is not retried
@@ -131,6 +140,10 @@ class GeminiProvider(LLMProvider):
             config["system_instruction"] = system
         if tools:
             config["tools"] = [{"function_declarations": _to_gemini_tools(tools)}]
+            if self.tool_choice:
+                config["tool_config"] = {
+                    "function_calling_config": {"mode": self.tool_choice.upper()}
+                }
         if self.thinking_level:
             config["thinking_config"] = {"thinking_level": self.thinking_level}
         return config
