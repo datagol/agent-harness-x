@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `write_todos` no longer fails when the model marks more than one item in
+  progress. The first stays in progress, the rest go back to pending, and the
+  tool's reply says so, so the model learns the rule without spending a turn
+  sending the list again. Lists that are wrong in other ways (an item without
+  content, an unknown status) are still refused.
 - harness-web asked for an Anthropic key before running the media-input
   example, which runs on Gemini; it now checks `GEMINI_API_KEY` and the
   `gemini` extra.

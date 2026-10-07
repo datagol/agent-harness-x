@@ -42,8 +42,14 @@ def _agent():
     return current_agent()
 
 
-def normalize(todos: Any) -> list[dict[str, str]]:
-    """Validate and clean a list the model supplied. Raises ValueError on junk."""
+def normalize(todos: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """Validate and clean a list the model supplied. Raises ValueError on junk.
+
+    One item may be in progress. When the model marks several, the first stays
+    in progress and the rest go back to pending: the list is still usable, so it
+    is fixed rather than refused, and the second value names what was moved so
+    the model can be told.
+    """
     if not isinstance(todos, list):
         raise ValueError("todos must be a list of {content, status} objects")
     if len(todos) > MAX_TODOS:
@@ -60,9 +66,9 @@ def normalize(todos: Any) -> list[dict[str, str]]:
             raise ValueError(f"todo {index} has status {status!r}; use one of {', '.join(STATUSES)}")
         cleaned.append({"content": content[:MAX_CONTENT_CHARS], "status": status})
     active = [item for item in cleaned if item["status"] == "in_progress"]
-    if len(active) > 1:
-        raise ValueError("only one todo may be in_progress at a time")
-    return cleaned
+    for item in active[1:]:
+        item["status"] = "pending"
+    return cleaned, [item["content"] for item in active[1:]]
 
 
 def render(todos: list[dict[str, str]]) -> str:
@@ -92,17 +98,23 @@ def register_planning_tools(
         for trivial work is noise.
 
         Send the whole list every time, including items already completed. Keep
-        exactly one item in_progress while you work on it.
+        exactly one item in_progress while you work on it; if you send more, the
+        first is kept and the rest go back to pending.
 
         Args:
             todos: Objects of {"content": str, "status": "pending"|"in_progress"|"completed"}.
         """
-        cleaned = normalize(todos)
+        cleaned, demoted = normalize(todos)
         agent = _agent()
         if agent is not None:
             agent.todos = cleaned
         done = sum(1 for item in cleaned if item["status"] == "completed")
-        return f"Task list recorded: {done}/{len(cleaned)} complete."
+        reply = f"Task list recorded: {done}/{len(cleaned)} complete."
+        if demoted:
+            kept = next(item["content"] for item in cleaned if item["status"] == "in_progress")
+            moved = ", ".join(f'"{content}"' for content in demoted)
+            reply += f' Only one item can be in progress: kept "{kept}", set {moved} back to pending.'
+        return reply
 
     async def read_todos() -> str:
         """Read the current task list."""
