@@ -722,14 +722,13 @@ TODOS = [
 def test_a_task_list_is_validated_before_it_is_believed():
     from harnessx.builtin.planning import normalize
 
-    assert len(normalize(TODOS)) == 3
-    assert "[x] research" in render(normalize(TODOS))
-    assert "1/3 complete" in render(normalize(TODOS))
+    cleaned, demoted = normalize(TODOS)
+    assert len(cleaned) == 3 and demoted == []
+    assert "[x] research" in render(cleaned)
+    assert "1/3 complete" in render(cleaned)
     assert render([]) == ""
 
     for bad, because in [
-        ([{"content": "a", "status": "in_progress"}, {"content": "b", "status": "in_progress"}],
-         "two items cannot both be in progress"),
         ([{"content": "", "status": "pending"}], "an item needs content"),
         ([{"content": "a", "status": "done"}], "status must be one of the three"),
         ("not a list", "the whole thing must be a list"),
@@ -737,6 +736,23 @@ def test_a_task_list_is_validated_before_it_is_believed():
         with pytest.raises(ValueError):
             normalize(bad)
         assert because
+
+
+def test_a_second_item_in_progress_goes_back_to_pending():
+    """One item in progress is the rule, but a list that breaks it is still
+    usable, so it is fixed rather than refused: a refusal costs the model a
+    turn to send the same list again."""
+    from harnessx.builtin.planning import normalize
+
+    sent = [
+        {"content": "a", "status": "in_progress"},
+        {"content": "b", "status": " In_Progress "},
+        {"content": "c", "status": "in_progress"},
+    ]
+    cleaned, demoted = normalize(sent)
+    assert [item["status"] for item in cleaned] == ["in_progress", "pending", "pending"]
+    assert demoted == ["b", "c"]
+    assert sent[1]["status"] == " In_Progress ", "the model's own call is left as it sent it"
 
 
 def _planning_agent(script):
@@ -764,6 +780,24 @@ async def test_the_list_is_sent_with_every_later_request():
     assert tail["role"] == "user", "never an assistant turn"
     assert "write the report" in str(tail["content"])
     assert "1/3 complete" in str(tail["content"])
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_told_when_its_list_was_corrected():
+    plan = [{"content": "Read the code", "status": "in_progress"},
+            {"content": "Write the fix", "status": "in_progress"}]
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
+        ProviderResponse(text="planned"),
+        ProviderResponse(text="the rest is left for later"),  # answers the unfinished-plan reminder
+    ])
+    async with agent:
+        await agent.run("plan it")
+
+    assert [item["status"] for item in agent.todos] == ["in_progress", "pending"]
+    result = provider.calls[1]["messages"][-1]["content"][0]
+    assert result["type"] == "tool_result" and not result.get("is_error")
+    assert 'kept "Read the code", set "Write the fix" back to pending' in str(result["content"])
 
 
 @pytest.mark.asyncio
