@@ -684,13 +684,43 @@ class ToolChoiceTests(unittest.TestCase):
         )
         self.assertNotIn("tool_config", config)
 
-    def test_survives_the_prompt_cache_path(self):
-        # Caching strips system_instruction and tools from the per-call config;
-        # tool_config must not go with them.
-        _, config = self._config(tool_choice="any")
-        trimmed = {k: v for k, v in config.items()
-                   if k not in ("system_instruction", "tools")}
-        self.assertIn("tool_config", trimmed)
+    def test_tool_config_goes_into_the_cache_not_the_request(self):
+        """Gemini refuses cached_content alongside tool_config.
+
+        "CachedContent can not be used with GenerateContent request setting
+        system_instruction, tools or tool_config." So tool_config travels with
+        the tools it constrains, into CachedContent, and is stripped from the
+        per-call request exactly as system_instruction and tools are.
+        """
+        provider = GeminiProvider(client=SimpleNamespace(), api_key="k", tool_choice="any")
+        base = provider._build_config(
+            system="s", tools=[_TOOL], max_tokens=100, temperature=None
+        )
+        self.assertIn("tool_config", base)
+
+        created = []
+
+        class _Caches:
+            async def create(self, *, model, config):
+                created.append(config)
+                return SimpleNamespace(name="caches/abc")
+
+        provider.client = SimpleNamespace(aio=SimpleNamespace(caches=_Caches()))
+        config = _run(provider._cached_config(
+            model="gemini-3.6-flash", system="s", tools=[_TOOL],
+            base=base, settings=("k", 600),
+        ))
+        self.assertEqual(
+            created[0]["tool_config"],
+            {"function_calling_config": {"mode": "ANY"}},
+            "tool_config must be created on the cache",
+        )
+        for forbidden in ("system_instruction", "tools", "tool_config"):
+            self.assertNotIn(
+                forbidden, config,
+                f"{forbidden} alongside cached_content is a 400 from Gemini",
+            )
+        self.assertEqual(config["cached_content"], "caches/abc")
 
     def test_read_from_the_environment(self):
         import os
