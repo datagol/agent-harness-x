@@ -58,7 +58,7 @@ COPY harness-web/harness_web ./harness-web/harness_web
 COPY harness-web/run.py ./harness-web/run.py
 COPY --from=frontend /build/dist ./harness-web/dist
 
-# Examples import `examples.*`; harness_web.worker imports both.
+# harness_web.worker runs each example by its path and imports harnessx.
 ENV PYTHONPATH=/app:/app/harness-web
 
 EXPOSE 8765

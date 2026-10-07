@@ -78,7 +78,7 @@ EXAMPLES = [
         "Image, PDF and audio input",
         "Send a file alongside the text of a turn as content blocks.",
         "message",
-        detail="Uses a 1x1 PNG held in the script, so it runs without a file on disk. Pass a path to send your own image, PDF or audio clip.",
+        detail="Runs on Gemini (GEMINI_API_KEY and the gemini extra). Uses a 1x1 PNG held in the script, so it runs without a file on disk. Pass a path to send your own image, PDF or audio clip.",
     ),
     Example(
         "prompt_caching",
@@ -346,18 +346,24 @@ def provider_missing(provider):
     return missing
 
 
+# Examples whose model comes from AGENT_PROVIDER / AGENT_MODEL rather than a fixed provider.
+FOLLOWS_AGENT_PROVIDER = ("skills_interactive", "knowledge_bundles_okf", "evaluating_with_datasets")
+
+
 def requirements(example, mode="offline", *, provider="anthropic"):
     missing = []
     if example.extra and not installed(example.extra):
         missing.append(f"Python package: {example.extra}")
     if not example.offline or (example.id == "evaluating_with_datasets" and mode == "live"):
-        if example.id in ("skills_interactive", "knowledge_bundles_okf"):
+        if example.id in FOLLOWS_AGENT_PROVIDER:
             provider = os.getenv("AGENT_PROVIDER", "anthropic")
+        elif example.id == "media_input":
+            provider = "gemini"
         elif example.id != "switching_providers":
             provider = "anthropic"
         missing.extend(provider_missing(provider))
         if (
-            example.id in ("skills_interactive", "knowledge_bundles_okf")
+            example.id in FOLLOWS_AGENT_PROVIDER
             and provider != "anthropic"
             and not os.getenv("AGENT_MODEL")
         ):

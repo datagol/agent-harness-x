@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **harness-web takes API keys in the app.** Open **Workspace setup** (the HX
+  button, top right) and paste a key under **API keys** for Anthropic, OpenAI,
+  Gemini, OpenRouter, LangSmith, Tavily or Jev; the next example run and the
+  next conversation use it. Keys are saved in the app's data folder as
+  `api-keys.json`, readable by you only (mode 0600); under Docker Compose that
+  folder is the `harness-web-data` volume, so saved keys, run files and
+  uploaded skills survive `docker compose up --build` and never reach the image
+  or the repository. A key is never returned to the browser, which only sees
+  whether it is set and whether it came from the app or from `.env`. A key
+  saved in the app takes precedence over `.env`; removing it restores the
+  `.env` value, and a restarted server loads saved keys again. The README
+  documents both ways, starting from `cp .env.example .env`.
+
+### Fixed
+
+- harness-web asked for an Anthropic key before running the media-input
+  example, which runs on Gemini; it now checks `GEMINI_API_KEY` and the
+  `gemini` extra.
+- The evaluation example's live mode read `AGENT_MODEL` but always used
+  Anthropic, so a model chosen for another provider was sent to Anthropic. It
+  now follows `AGENT_PROVIDER` too, as the skills and knowledge examples do.
+
 ## [0.7.0] - 2026-10-06
 
 ### Added
@@ -614,6 +640,7 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
+[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/datagol/agent-harness-x/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/datagol/agent-harness-x/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/datagol/agent-harness-x/compare/v0.4.3...v0.5.0

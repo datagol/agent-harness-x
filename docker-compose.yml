@@ -1,6 +1,6 @@
 # Everything the examples can need, in one command.
 #
-#   docker compose up            the web app on http://localhost:8765
+#   docker compose up --build    the web app on http://localhost:8765
 #   docker compose run --rm tests   the suite, with nothing skipped for want of a service
 #
 # Model API keys come from your own .env, which is read but never baked into an

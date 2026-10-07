@@ -7,7 +7,8 @@ then prints a summary. With LangSmith keys set, a live run also uploads the expe
 Run:
     python examples/07-quality/evaluating_with_datasets.py --offline   # scripted model, no network
     python examples/07-quality/evaluating_with_datasets.py             # live model; uploads when LangSmith is set
-Needs: pip install "harnessx[langsmith]". --offline needs nothing else. Live: ANTHROPIC_API_KEY, and optionally
+Needs: pip install "harnessx[langsmith]". --offline needs nothing else. Live: ANTHROPIC_API_KEY (or AGENT_PROVIDER and
+AGENT_MODEL with that provider's key and extra), and optionally
 LANGSMITH_API_KEY (and LANGSMITH_PROJECT) to upload.
 """
 
@@ -91,6 +92,8 @@ def build_math_agent(inputs: dict, *, fixture: bool = False) -> Agent:
     agent = Agent(
         provider=ScriptedProvider(scripted_replies(inputs["prompt"])) if fixture else None,
         config=AgentConfig(
+            # AGENT_PROVIDER and AGENT_MODEL go together, as in the other examples.
+            provider=os.getenv("AGENT_PROVIDER", "anthropic"),
             model=os.getenv("AGENT_MODEL", "claude-sonnet-4-6"),
             system_prompt="Use the calculate tool for arithmetic. Answer other questions directly without it.",
             limits=Limits(max_iterations=5),
@@ -136,6 +139,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if not args.offline and os.getenv("AGENT_PROVIDER", "anthropic") != "anthropic" and not os.getenv("AGENT_MODEL"):
+        raise SystemExit("Set AGENT_MODEL to a model of AGENT_PROVIDER, or unset AGENT_PROVIDER to use Anthropic.")
     upload = not args.offline and bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
     print("Mode:", "SCRIPTED FIXTURE (no network)" if args.offline else "LIVE MODEL (API usage applies)")
     print("LangSmith upload:", "enabled" if upload else "disabled")

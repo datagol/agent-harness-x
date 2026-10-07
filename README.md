@@ -7,21 +7,22 @@
 **A provider-agnostic, library-first Python toolkit for building production-grade LLM agents.**
 
 Try [harness-web](https://github.com/datagol/agent-harness-x/blob/main/harness-web/README.md) to launch all examples from a browser,
-review approvals and live output, or use a separate general chat workspace.
+review approvals and live output, or build your own agent in a chat workspace.
 
 Rather than locking developers into rigid state-machine graphs or opaque persona prompts, `harnessx` gives you a composable set of building blocks: real-time streaming, typed tool registration with schema inference, lazy-loaded skills, multi-agent delegation, 4-tier memory, sandboxed code execution, Model Context Protocol (MCP) tool bridges, native LangSmith tracing, and evaluation suites.
 
 ### Why HarnessX?
 
 - **No Graph Boilerplate:** Write simple async Python functions instead of complex state graphs.
-- **Provider-Agnostic:** First-class support for Anthropic (Claude 3.5/3.7/Sonnet/Opus) and OpenAI (GPT-4o/GPT-5).
+- **Provider-Agnostic:** First-class support for Anthropic, OpenAI, Gemini, OpenRouter, and Azure OpenAI, chosen with one config field.
+- **Images, PDFs, and Audio:** A turn can carry media as content blocks; see [sending an image, a PDF, or audio](#sending-an-image-a-pdf-or-audio).
 - **Streaming-First:** First-class typed event stream (`run_stream`) for WebSocket and SSE frontends.
 - **Lazy Instruction Packs (Skills):** Load specialized guidelines only when needed via YAML-frontmatter `SKILL.md` packs.
 - **Knowledge Bundles (OKF):** Point an agent at a folder or git URL for BM25F search, concept reads, and link traversal over curated knowledge with provenance.
-- **Guardrails & Execution Backends:** Budget and iteration limits, host subprocess execution, and Docker or macOS Seatbelt access isolation.
-- **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote SSE) in 3 lines of code.
+- **Guardrails & Execution Backends:** Budget and iteration limits, host subprocess execution, Docker or macOS Seatbelt access isolation, and an [NVIDIA OpenShell sandbox](#running-tools-in-an-openshell-sandbox) for the agent's shell and file tools.
+- **MCP Native:** Connect to any Model Context Protocol server (stdio subprocess or remote HTTP, with an SSE fallback) in 3 lines of code.
 - **Full Observability & Evals:** Zero-overhead lifecycle hooks, middleware transforms, native LangSmith tracing, and benchmark evaluations.
-- **Typed Decisions:** Optional Jev SDK for Choice routing/classification, Score rubrics, and Noul evidence checks. See the [decision SDK guide](https://harnessx-site.vercel.app/docs/decisions/).
+- **Typed Decisions:** Optional Jev SDK for Choice routing/classification, Score rubrics, and Noul evidence checks. See the [decision SDK guide](https://www.datagol-harness.dev/docs/decisions/).
 
 ---
 
@@ -34,7 +35,7 @@ Rather than locking developers into rigid state-machine graphs or opaque persona
 - [6. Knowledge (OKF bundles)](#6-knowledge-okf-bundles)
 - [7. Memory](#7-memory)
 - [8. Permissions and guardrails](#8-permissions-and-guardrails)
-- [9. Hooks and middleware](#9-hooks-and-middleware)
+- [9. Middleware, hooks, and extensions](#9-middleware-hooks-and-extensions)
 - [10. MCP servers](#10-mcp-servers)
 - [11. Session persistence](#11-session-persistence)
 - [12. Shipping a web app](#12-shipping-a-web-app)
@@ -51,7 +52,7 @@ to `harnessx` (there is no compatibility alias) and see the [changelog](https://
 
 ```bash
 # Add it to a uv project (extras: openai, azure, gemini, openrouter, jev, mcp,
-# postgres, temporal, docker, langsmith, server, all)
+# postgres, temporal, docker, openshell, langsmith, server, all)
 uv add harnessx
 uv add "harnessx[openai]"
 uv add "harnessx[all]"
@@ -70,21 +71,21 @@ uv sync --all-extras          # SDK, every integration, and the dev tools
 uv run pytest -q              # the suite runs offline
 ```
 
-Eleven of those tests skip, because PostgreSQL, Temporal and Redis are not
+Twelve of those tests skip, because PostgreSQL, Temporal and Redis are not
 running. To get all of them, and the example browser, without installing
 anything:
 
 ```bash
-docker compose up                  # the app on http://localhost:8765
+docker compose up --build          # the app on http://localhost:8765
 docker compose run --rm tests      # the suite with nothing skipped
 ```
 
-Set your key (a root `.env` is auto-loaded by the `examples` package):
+Set your key in a root `.env`, which every example loads:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
-# or, for OpenAI-backed agents:
-OPENAI_API_KEY=sk-...
+cp .env.example .env
+# then fill in ANTHROPIC_API_KEY=sk-ant-...
+# or, for OpenAI-backed agents, OPENAI_API_KEY=sk-...
 ```
 
 The examples live in the repository, not in the package. Each is one standalone
@@ -106,14 +107,14 @@ OpenAI, Gemini, OpenRouter, or Azure OpenAI, use [switching providers](https://g
 See the [provider setup guide](https://github.com/datagol/agent-harness-x/blob/main/examples/README.md#choose-a-provider) for API keys,
 optional dependencies, and streaming options.
 
-The standalone [decision SDK](https://harnessx-site.vercel.app/docs/decisions/) provides typed Jev assessments
+The standalone [decision SDK](https://www.datagol-harness.dev/docs/decisions/) provides typed Jev assessments
 alongside agents. Try its offline examples with `python
 examples/07-quality/decisions_routing.py --min-confidence 0.8` or `python
 examples/07-quality/decisions_answer_review.py`. Live calls require the `jev` extra,
 `TYPESAFE_API_KEY`, and an explicit `--live` flag.
 
-Upgrading from 0.3? [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md) lists every
-renamed, deprecated, and removed name in 0.4. The [durable runtime guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/)
+Upgrading from an earlier release? [MIGRATING.md](https://github.com/datagol/agent-harness-x/blob/main/MIGRATING.md) lists every
+renamed, deprecated, and removed name in 0.4, and what changed in 0.4.3, 0.5.0 and 0.6.0. The [durable runtime guide](https://www.datagol-harness.dev/docs/durable-agent-runs/)
 covers the 0.3 runtime changes.
 
 ---
@@ -152,14 +153,16 @@ asyncio.run(main())
 |---|---|---|
 | `model` | `"claude-sonnet-4-6"` | Model id passed to the provider |
 | `provider` | `"anthropic"` | `"anthropic"`, `"openai"`, `"gemini"`, `"openrouter"`, `"azure"`, or a name passed to `register_provider()` |
-| `max_tokens` | `None` | Reply token budget. Unset, the provider chooses for the model: 20,000 on Claude 4 models, 8,192 elsewhere |
+| `max_tokens` | `None` | Reply token budget. Unset, it is the model's own output limit capped at 32K, fitted into what is left of the context window |
 | `system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
-| `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=150_000`, `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None` |
+| `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=None` (the model's own window), `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None`, `loop_guard=LoopGuard()`, `max_truncation_recoveries=3`, `final_answer_on_limit=True` |
 | `fallbacks` | `()` | Providers to try, in order, when the primary fails transiently: `Fallback(provider, model=None, max_tokens=None)` |
-| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts, connection loss): `attempts=2` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=30.0` caps one wait, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget, `switch_after=1` and `cooldown_seconds=0.0` govern failover |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts, connection loss): `attempts=4` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=60.0` caps one wait, `jitter=0.25`, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget, `stream_idle_timeout_seconds=180.0` abandons a stalled stream, `switch_after=1` and `cooldown_seconds=0.0` govern failover |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
 | `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (300 s), `dedupe_calls=False`, `retry=None` (a `ToolRetry` applied to tools registered without one) |
+| `planning` | `True` | Gives the agent `write_todos` and `read_todos`; `False` removes them |
+| `progress` | `ProgressPolicy()` | `WAITING` events while a call is quiet: `first_after_seconds=10.0` (`None` turns them off), `repeat_every_seconds=15.0` |
 
 The sub-policies are frozen dataclasses; change one with `dataclasses.replace`.
 The 0.3 flat names (`max_iterations=`, `llm_max_attempts=`, ...) were removed in
@@ -308,7 +311,7 @@ checked when the message is built, so a typo fails there rather than as a
 provider error several seconds later.
 
 Not every model takes every kind. Gemini takes all three. OpenAI, Azure and
-OpenRouter take images, audio and PDFs. Anthropic takes images and PDFs and
+OpenRouter take images, audio (WAV or MP3) and PDFs. Anthropic takes images and PDFs and
 **raises on audio** rather than sending the prompt without it — a question
 about a clip the model never received gets answered confidently about nothing,
 which is worse than a failed call. Transcribe it first, or send that turn to a
@@ -344,7 +347,7 @@ ASK or DENY. A preconfigured `ToolDefinition` retains its explicit permission.
 Registration style does not choose the permission default.
 
 Prefer functions for simple registration and helpers for configured capabilities.
-Bundle names currently include `filesystem`, `bash`, `web`, `memory`, and `all`;
+Bundle names currently include `filesystem`, `bash`, `web`, `memory`, `planning`, and `all`;
 a bundle can contain more tools than one standalone function.
 
 ### Constructor registration and registration afterward
@@ -656,8 +659,8 @@ refused and that it is a policy decision, not a network fault.
 OpenShell's own `policy=` (a YAML path, YAML text, or a mapping) and
 `providers=` (existing provider names) are accepted too. `allow` and
 `secrets` add to them. To review the rules OpenShell drafts from blocked
-connections, use `await sandbox.pending_rules()`, then `approve_rule(rule)` or
-`reject_rule(rule, reason)`.
+connections, use `await sandbox.pending_rules()`, then `await sandbox.approve_rule(rule)` or
+`await sandbox.reject_rule(rule, reason)`.
 
 On macOS, run the OpenShell gateway with its MicroVM driver
 (`compute_driver = "vm"` in `~/.config/openshell/gateway.toml`). Docker
@@ -780,7 +783,7 @@ asyncio.run(main())
 
 Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
 `TOOL_CALL_COMPLETE`, `TOOL_RESULT`, `THINKING_DELTA`, `TURN_COMPLETE`,
-`ERROR`, `ATTEMPT_RESET`, `WAITING`, and `RUN_RESULT`. Durable runs also emit
+`ERROR`, `ATTEMPT_RESET`, `TODOS_UPDATED`, `WAITING`, and `RUN_RESULT`. Durable runs also emit
 approval and recovery events. Text deltas are provisional; discard an
 interrupted attempt's text when `ATTEMPT_RESET` arrives.
 
@@ -811,7 +814,9 @@ Usage stats accumulate on the guardrails engine:
 
 ```python
 agent.guardrails.usage_summary
-# {'iterations': 3, 'input_tokens': 5120, 'output_tokens': 640, 'estimated_cost': '$0.0250'}
+# {'iterations': 3, 'lifetime_iterations': 3, 'input_tokens': 5120, 'output_tokens': 640,
+#  'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0, 'thinking_tokens': 0,
+#  'estimated_cost': '$0.0250'}
 ```
 
 ---
@@ -824,7 +829,7 @@ delegation wrappers.
 
 ```python
 import asyncio
-from harnessx import Agent, AgentConfig, SubAgent
+from harnessx import Agent, AgentConfig, Limits, SubAgent
 from harnessx.builtin.web import fetch_url
 
 async def main():
@@ -874,7 +879,7 @@ during construction. No separate orchestrator class is necessary.
 
 The model decides whether to delegate. Naming specialists does not force a fixed
 sequence; write workflow code when you need a mandatory sequence. Use
-`examples/multi_agent.py` for research, code review, and scoped file analysis.
+`examples/05-control/delegating_to_subagents.py` for research, code review, and scoped file analysis.
 
 ### Context, resources, and permissions
 
@@ -1012,7 +1017,7 @@ async def on_skill(ctx: HookContext):
 agent.hooks.on(HookEvent.SKILL_INVOKED, on_skill)
 ```
 
-Full demo: `examples/skills_agent.py`, with sample skills under
+Full demo: `examples/03-skills/skills_interactive.py` (offline: `examples/03-skills/skills_lazy_loading.py`), with sample skills under
 `examples/skills/`.
 
 ---
@@ -1151,7 +1156,7 @@ async def on_knowledge(ctx: HookContext):
 agent.hooks.on(HookEvent.KNOWLEDGE_ACCESSED, on_knowledge)
 ```
 
-Full demo: `examples/knowledge_agent.py`, with a sample bundle under
+Full demo: `examples/04-context/knowledge_bundles_okf.py`, with a sample bundle under
 `examples/knowledge/`. See the [knowledge guide](docs/knowledge.md) for retrieval
 semantics, trust validation, Git cache behavior, limits, and custom retrieval.
 
@@ -1163,8 +1168,9 @@ Three layers, all optional:
 
 ### Conversation memory (default)
 
-Every agent has a `ConversationMemory` that stores the message list and trims
-itself when approaching the context limit. You rarely touch it directly, but
+Every agent has a `ConversationMemory` that stores the message list and moves
+oversized tool results to disk; the engine condenses it when the conversation
+nears the context window. You rarely touch it directly, but
 you can:
 
 ```python
@@ -1216,8 +1222,10 @@ long_term.update(fact_id, "User prefers light mode")
 ```
 
 Tell the agent about these tools in the system prompt and when to use them
-("proactively save useful information"). A complete two-layer example is in
-`examples/memory_agent.py`.
+("proactively save useful information"). Or skip writing them:
+`register_memory_tools(agent.tools, long_term, memory)` from `harnessx.builtin`
+gives the model `save_memory` and `recall_memories` over both stores.
+`examples/04-context/custom_memory_tools.py` uses it and adds tools of its own.
 
 ---
 
@@ -1286,13 +1294,19 @@ agent = Agent(config=AgentConfig(limits=Limits(
 agent.guardrails.usage_summary
 ```
 
-Limits are validated at construction. A reached guardrail returns a failed
-`RunResult` with error details. `Limits(max_iterations=0)` means unlimited.
+Limits are validated at construction. Reaching `max_cost_dollars` returns a
+failed `RunResult` with error details. Reaching `max_iterations` asks the model
+once more, without tools, for what it did and its best answer; the run completes
+with stop reason `max_iterations` (`result.limited`, not `ok`;
+`raise_for_status()` raises `RunLimitReached`). `Limits(final_answer_on_limit=False)`
+fails it instead. `Limits(max_iterations=0)` means unlimited.
 
-A reply cut off at the token budget ends the run with status `completed` and
-stop reason `max_tokens`; `result.truncated` is true, `result.ok` is false, and
-`raise_for_status()` raises `RunTruncated`. Raise `max_tokens` or ask for
-shorter output.
+A reply cut off at the token budget is recovered: a truncated tool call is
+refused and asked for again, truncated text is continued, and the budget doubles
+each time, up to `Limits.max_truncation_recoveries` (default 3; `0` stops at the
+first cut). Past that, the run ends with status `completed` and stop reason
+`max_tokens`; `result.truncated` is true, `result.ok` is false, and
+`raise_for_status()` raises `RunTruncated`.
 
 ### Errors
 
@@ -1302,7 +1316,9 @@ busy agent raises `RuntimeStateError` (a `RuntimeError`); an unknown execution
 key raises `UnknownExecutionKey` (a `KeyError`). Runs report their outcome as
 data: `result.ok`, `result.failed`, and `result.needs_input` inspect the
 status, and `result.raise_for_status()` turns a run that did not complete into
-`RunFailed`, `RunAwaitingInput`, or `RunCancelled`, each carrying `.result`.
+`RunFailed`, `RunAwaitingInput`, or `RunCancelled`, and one that completed
+truncated, refused, or at its step limit into `RunTruncated`, `RunRefused`, or
+`RunLimitReached`, each carrying `.result`.
 `PermissionLevel`, like every other enum here, is a `str` enum. A tool handler
 that raises `TransientToolError` asks for a retry rather than reporting a
 failure; see [Retrying a flaky tool](#retrying-a-flaky-tool).
@@ -1434,9 +1450,9 @@ agent = Agent(extensions=[SearchNormalization()])
 
 Read the detailed guides:
 
-- [Middleware and hooks](https://harnessx-site.vercel.app/docs/hooks/): all four stages, ordering, complete
+- [Middleware and hooks](https://www.datagol-harness.dev/docs/hooks/): all four stages, ordering, complete
   examples, streaming behavior, errors, retries, and observation boundaries.
-- [Extensions](https://harnessx-site.vercel.app/docs/extensions/): when to use an extension, composing middleware
+- [Extensions](https://www.datagol-harness.dev/docs/extensions/): when to use an extension, composing middleware
   with tools and hooks, lifecycle callbacks, ownership, persistence, and built-ins.
 
 Hook data is event specific, and the keys each built-in event carries are
@@ -1459,7 +1475,7 @@ already retained by durable execution or recording.
 ## 10. MCP servers
 
 `MCPManager` connects to Model Context Protocol servers (stdio subprocess or
-remote SSE). `Agent(mcp=manager)` bridges the discovered tools into the agent's
+remote HTTP, with an SSE fallback). `Agent(mcp=manager)` bridges the discovered tools into the agent's
 registry at construction, so MCP tools look exactly like native tools to the
 model; their names are listed on `agent.mcp_tools`.
 
@@ -1494,7 +1510,7 @@ yours to choose: it keys the connection and prefixes every bridged tool. The
 manager is caller-owned: closing the agent leaves it connected, and one manager
 can serve several agents. Connecting a server name twice raises `ValueError`.
 
-See `examples/mcp_agent.py` for the interactive version.
+See `examples/02-tools/mcp_servers.py` for the interactive version.
 
 ---
 
@@ -1518,7 +1534,7 @@ unsupported values instead of stringifying them. Saved artifacts survive agent
 closure until `PersistentMemory(directory).delete_session(session_id)`.
 
 For managed multi-session services (checkpointing, pause/resume, expiry),
-use `AgentRuntime` with a backend; see the [durable runtime guide](https://harnessx-site.vercel.app/docs/durable-agent-runs/).
+use `AgentRuntime` with a backend; see the [durable runtime guide](https://www.datagol-harness.dev/docs/durable-agent-runs/).
 
 ```python
 from harnessx import Agent, AgentRuntime, SQLiteBackend
@@ -1547,17 +1563,17 @@ construct a fresh compatible `Agent` and call `await runtime.resume(session_id)`
 No agent registry is needed for this pattern. `AgentRef` and `AgentRegistry` remain
 available for named definitions and Temporal workers.
 
-Try the [PostgreSQL crash-and-resume walkthrough](https://harnessx-site.vercel.app/docs/postgres-durability/): write
+Try the [PostgreSQL crash-and-resume walkthrough](https://www.datagol-harness.dev/docs/backends/#crash-and-resume): write
 a report, let the process exit abruptly, and finish the same run in another process
 with the tool invocation count still at one. It uses scripted model responses,
 so only PostgreSQL and the `postgres` extra are required, not a model API key.
 Connection details can come from `DATABASE_URL` or `--config
-examples/postgres.config.json`; the [config template](https://github.com/datagol/agent-harness-x/blob/main/examples/postgres.config.example.json)
+examples/06-durability/postgres.config.json`; the [config template](https://github.com/datagol/agent-harness-x/blob/main/examples/06-durability/postgres.config.example.json)
 supports automatic password URL encoding. Use the `check` command to connect and
 prepare the runtime schema before starting a run.
 
 For incident debugging, opt in with `AgentRuntime(..., recording=True)`. The
-[flight recorder](https://harnessx-site.vercel.app/docs/flight-recorder/) preserves model/tool attempt boundaries,
+[flight recorder](https://www.datagol-harness.dev/docs/flight-recorder/) preserves model/tool attempt boundaries,
 exports portable incident bundles, and verifies/plays them back offline. Export
 payloads and artifacts are opt-in. SQLite is locally tested; PostgreSQL requires
 service qualification, and Temporal recording is not implemented. Try
@@ -1617,7 +1633,8 @@ async def stream(req: dict):
 The repository's complete web application is [harness-web](https://github.com/datagol/agent-harness-x/tree/main/harness-web):
 a FastAPI backend and a Vite frontend that run every example in this
 repository, stream their output, present approvals in the browser, and host a
-general chat with per-conversation skills and MCP servers. From the checkout:
+"Build your agent" workspace with per-conversation tools, skills, MCP servers
+and subagents. From the checkout:
 
 ```bash
 npm --prefix harness-web ci && npm --prefix harness-web run build
@@ -1657,7 +1674,8 @@ def make_agent(inputs):
     agent.tools.register_tool(calculate, permission=PermissionLevel.ALLOW, replay_policy="safe")
     return agent
 
-# 2. Define test cases or use built-in suites ("tool_calling", "skills", "all")
+# 2. Define test cases or use built-in suites ("tool_calling", "skills",
+#    "multi_agent", "guardrails", "memory", "all")
 dataset = [
     build_example(
         inputs={"prompt": "What is 144 / 12?"},
@@ -1712,10 +1730,10 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | Class / function | Module | Purpose |
 |---|---|---|
 | `Agent` | `harnessx` | Core agentic loop (`await agent.run(msg)`) |
-| `RunResult` / `RunStream` | `harnessx` | Completion result (`ok`, `failed`, `needs_input`, `raise_for_status()`) and event stream (`text()`) |
+| `RunResult` / `RunStream` | `harnessx` | Completion result (`ok`, `failed`, `needs_input`, `truncated`, `refused`, `limited`, `raise_for_status()`) and event stream (`text()`) |
 | `PendingTool` | `harnessx` | A tool the run stopped on: `execution_key`, `call`, `status` |
-| `AgentConfig` | `harnessx` | Model, provider, prompt, plus the `limits`, `retry`, `prompt_cache`, and `tools` sub-policies |
-| `Limits` / `RetryPolicy` / `ToolPolicy` | `harnessx` | Budgets, transient-failure handling, registry-wide tool options |
+| `AgentConfig` | `harnessx` | Model, provider, prompt, `fallbacks`, `planning`, plus the `limits`, `retry`, `prompt_cache`, `tools`, and `progress` sub-policies |
+| `Limits` / `RetryPolicy` / `ToolPolicy` / `ProgressPolicy` | `harnessx` | Budgets, transient-failure handling, registry-wide tool options, `WAITING` events |
 | `HarnessError` and subclasses | `harnessx` | `ConfigurationError`, `RuntimeStateError`, `UnknownExecutionKey`, `RunFailed`, `RunAwaitingInput`, ... |
 | `register_provider` | `harnessx` | Add a provider name that `AgentConfig` accepts |
 | `PromptCachePolicy` / `PromptCacheHint` | `harnessx` | Prompt-cache policy on the config; the per-request hint providers receive |
@@ -1761,6 +1779,7 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `01-basics/progress_and_waiting.py` | A run's event stream, including `waiting` events while a slow model call is quiet | No services |
 | `01-basics/streaming_chat.py` | Streaming interactive chat, a calculator tool, workspace reads | Anthropic key |
 | `01-basics/switching_providers.py --provider P --model M` | The same agent across Anthropic, OpenAI, Gemini, OpenRouter, and Azure; streaming or ordinary runs | The provider's extra and key |
+| `01-basics/media_input.py [FILE]` | An image, PDF, or audio clip sent with a turn as content blocks; a built-in 1x1 PNG by default | `gemini` extra and a Gemini key |
 | `03-skills/skills_lazy_loading.py` | Skill discovery, invocation, and hook ordering | No services |
 | `02-tools/filesystem_tools_and_permissions.py` | File and shell tools, an audit middleware, terminal approvals | Anthropic key |
 | `02-tools/mcp_servers.py --server NAME --command CMD` | MCP tools alongside native tools | `mcp` extra, an MCP server, Anthropic key |
@@ -1783,4 +1802,4 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `07-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
 | `08-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
 | `08-sandboxes/openshell_backend.py` | Tools in an NVIDIA OpenShell sandbox while the agent stays here; changes synced back | `openshell` extra, an OpenShell gateway, Anthropic key |
-| `python harness-web/run.py` | The web workspace that runs every example above and hosts a general chat | `server` extra, `npm --prefix harness-web run build`; keys per example |
+| `python harness-web/run.py` | The web workspace that runs every example above and lets you build your own agent in a chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

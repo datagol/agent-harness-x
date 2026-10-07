@@ -22,7 +22,7 @@ build your own agent. In containers, with PostgreSQL, Temporal and Redis already
 running and no Python or Node to install:
 
 ```bash
-docker compose up                                          # the browser at localhost:8765
+docker compose up --build                                  # the browser at localhost:8765
 docker compose run --rm web python examples/03-skills/skills_lazy_loading.py
 ```
 
@@ -55,6 +55,7 @@ python examples/07-quality/evaluating_with_datasets.py --offline   # needs the l
 | `progress_and_waiting.py` | A long run's event stream, including the `waiting` events sent while a slow model call is quiet (`ProgressPolicy`) | Nothing |
 | `streaming_chat.py` | Interactive streaming chat with a bounded calculator and workspace reads; `usage` prints token counts | `ANTHROPIC_API_KEY` |
 | `switching_providers.py` | The same agent on Anthropic, OpenAI, Gemini or OpenRouter; streaming or not; one-shot with `--prompt` | The provider's key and extra (below) |
+| `media_input.py` | An image, PDF or audio clip sent with a turn as `image`, `document` or `audio` content blocks; pass a file path, or it sends a 1x1 PNG held in the script | `GEMINI_API_KEY` and `harnessx[gemini]`; `HARNESSX_MODEL` overrides `gemini-3.6-flash` |
 
 ## 02-tools
 
@@ -154,7 +155,7 @@ changes that.
 
 ## PostgreSQL recovery
 
-Follow the [PostgreSQL durability walkthrough](../doc/postgres_durability.md).
+Follow the [PostgreSQL durability walkthrough](https://www.datagol-harness.dev/docs/backends/#crash-and-resume).
 Copy `06-durability/postgres.config.example.json` to `postgres.config.json` in
 the same folder (it is Git-ignored), fill in the connection details and password,
 and leave `{password}` in the URL:

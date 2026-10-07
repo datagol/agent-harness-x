@@ -14,6 +14,8 @@ Run:
     python examples/06-durability/durable_crash_recovery.py resume --config examples/06-durability/postgres.config.json
     python examples/06-durability/durable_crash_recovery.py chat   --config examples/06-durability/postgres.config.json
 Copy postgres.config.example.json beside this file to postgres.config.json and fill it in, or set DATABASE_URL.
+--workspace (default .agent_sessions/postgres-demo) and --schema (default harness_x) must be the same for every
+command of one experiment.
 
 Needs: pip install "harnessx[postgres]" and a PostgreSQL database. Only ``chat`` (the default) calls a model,
 so it also needs ANTHROPIC_API_KEY. Walkthrough: https://harnessx-site.vercel.app/docs/postgres-durability/

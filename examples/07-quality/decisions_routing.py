@@ -9,7 +9,8 @@ illustrative; calibrate your own.
 
 Run:
     python examples/07-quality/decisions_routing.py --min-confidence 0.8
-    python examples/07-quality/decisions_routing.py --min-confidence 0.8 --live --provider anthropic --model MODEL_ID
+    python examples/07-quality/decisions_routing.py --min-confidence 0.8 --live --provider anthropic --model MODEL_ID \
+        --query "Top customers by revenue" --text "W-2 Wage and Tax Statement"
 Needs: Nothing by default: fixed decisions and scripted agents, no network.
 --live needs pip install "harnessx[jev]", TYPESAFE_API_KEY, and the chosen provider's API key.
 """
