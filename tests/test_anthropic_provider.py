@@ -369,3 +369,96 @@ async def test_coding_agent_streams_real_sdk_tool_call(tmp_path, monkeypatch, ca
     assert len(requests) == 2 and all(request["stream"] for request in requests)
     assert (tmp_path / "fibonacci.py").read_text() == PROGRAM
     assert "Created fibonacci.py." in out
+
+
+# ── tool arguments stream as the model writes them ───────────────────────────
+
+WEB_SEARCH = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["ordinary", "streaming"])
+async def test_our_tools_ask_for_their_arguments_as_they_are_written(tmp_path, streaming):
+    """Without it the API holds a tool call back until it is complete, and a
+    model writing a long file into write_file sends nothing for minutes: the
+    stall check takes that for a dead stream and starts the reply over."""
+    requests = []
+    responses = [tool_message(), message([{"type": "text", "text": "Created fibonacci.py."}])]
+    async with client_for(responses, requests) as client:
+        async with Agent(provider=AnthropicProvider(client=client)) as agent:
+            register_filesystem_tools(agent.tools, base_path=str(tmp_path))
+            agent.permissions.set_permission("write_file", PermissionLevel.ALLOW)
+            if streaming:
+                async with agent.run_stream("Write a Fibonacci program") as stream:
+                    [event async for event in stream]
+                    result = await stream.result()
+            else:
+                result = await agent.run("Write a Fibonacci program")
+    assert result.status == "completed", result.error
+    for body in requests:
+        assert body["tools"] and all(tool["eager_input_streaming"] is True for tool in body["tools"])
+
+
+@pytest.mark.asyncio
+async def test_server_tools_and_explicit_choices_are_left_alone():
+    requests = []
+    mine = {"name": "lookup", "description": "Look up.", "input_schema": {"type": "object"}}
+    declined = {**mine, "name": "quiet", "eager_input_streaming": False}
+    tools = [mine, declined, WEB_SEARCH]
+    sent = deepcopy(tools)
+    async with client_for([message([{"type": "text", "text": "ok"}])], requests) as client:
+        provider = AnthropicProvider(client=client)
+        await provider.create(model="claude-sonnet-4-6", messages=[{"role": "user", "content": "hi"}],
+                              system=None, tools=tools, max_tokens=1000)
+    by_name = {tool["name"]: tool for tool in requests[0]["tools"]}
+    assert by_name["lookup"]["eager_input_streaming"] is True
+    assert by_name["quiet"]["eager_input_streaming"] is False
+    assert by_name["web_search"] == WEB_SEARCH
+    assert tools == sent, "the caller's tool definitions are not modified"
+
+
+@pytest.mark.asyncio
+async def test_it_can_be_turned_off():
+    requests = []
+    tools = [{"name": "lookup", "description": "Look up.", "input_schema": {"type": "object"}}]
+    async with client_for([message([{"type": "text", "text": "ok"}])], requests) as client:
+        provider = AnthropicProvider(client=client, eager_tool_streaming=False)
+        await provider.create(model="claude-sonnet-4-6", messages=[{"role": "user", "content": "hi"}],
+                              system=None, tools=tools, max_tokens=1000)
+    assert "eager_input_streaming" not in requests[0]["tools"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["ordinary", "streaming"])
+async def test_an_endpoint_that_refuses_the_field_gets_requests_without_it(streaming):
+    """Anthropic-compatible gateways may not know the field. The first refusal
+    turns it off for the provider, and the same request goes again without it."""
+    bodies = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if any("eager_input_streaming" in tool for tool in body.get("tools", [])):
+            return httpx.Response(400, json={"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": "tools.0.custom.eager_input_streaming: Extra inputs are not permitted"}})
+        reply = message([{"type": "text", "text": "ok"}])
+        if body.get("stream"):
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse_message(reply))
+        return httpx.Response(200, json=reply)
+
+    tools = [{"name": "lookup", "description": "Look up.", "input_schema": {"type": "object"}}]
+    request = dict(model="claude-sonnet-4-6", messages=[{"role": "user", "content": "hi"}],
+                   system=None, tools=tools, max_tokens=1000)
+    async with AsyncAnthropic(api_key="test-key", base_url="https://anthropic.invalid", max_retries=0,
+                              http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))) as client:
+        provider = AnthropicProvider(client=client)
+        for _ in range(2):
+            if streaming:
+                chunks = [chunk async for chunk in provider.stream(**request)]
+                response = chunks[-1].data
+            else:
+                response = await provider.create(**request)
+            assert response.text == "ok"
+    assert len(bodies) == 3, "refused once, then never sent again"
+    assert provider.eager_tool_streaming is False

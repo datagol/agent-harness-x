@@ -132,17 +132,45 @@ def _rejected_cache_control(exc: BaseException) -> bool:
     return "cache_control" in str(exc)
 
 
+def _eager(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Our tools, marked to stream their arguments as the model writes them.
+
+    Without it the API holds a tool call back until its arguments are complete:
+    a model writing a whole report into ``write_file`` sends nothing for
+    minutes, which the stall check takes for a dead stream and retries from
+    scratch. Server tools (``web_search`` and the like) have no ``input_schema``
+    and are left as they are; a tool that already says either way keeps its
+    choice. Sent on every request, streamed or not, so the tool definitions --
+    part of the cached prefix -- are the same for both.
+    """
+    return [
+        {**tool, "eager_input_streaming": True}
+        if isinstance(tool, dict) and "input_schema" in tool
+        and tool.get("type", "custom") == "custom" and "eager_input_streaming" not in tool
+        else tool
+        for tool in tools
+    ]
+
+
+def _rejected_eager_streaming(exc: BaseException) -> bool:
+    return "eager_input_streaming" in str(exc)
+
+
 class AnthropicProvider(LLMProvider):
     """Talks to Anthropic's Messages API and normalizes responses to ProviderResponse."""
 
     name = "anthropic"
 
     def __init__(self, client: AsyncAnthropic | None = None, *,
-                 tool_choice: "str | ToolChoice | None" = None) -> None:
+                 tool_choice: "str | ToolChoice | None" = None,
+                 eager_tool_streaming: bool = True) -> None:
         # Anthropic spells it {"type": "any"}; see base.TOOL_CHOICES.
         self.tool_choice = normalize_tool_choice(
             tool_choice, env_var="ANTHROPIC_TOOL_CHOICE"
         )
+        # See _eager. An Anthropic-compatible endpoint that refuses the field
+        # turns it off for this provider on the first refusal.
+        self.eager_tool_streaming = eager_tool_streaming
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncAnthropic(max_retries=0)
         self._limits: dict[str, ModelLimits | None] = {}
@@ -209,7 +237,7 @@ class AnthropicProvider(LLMProvider):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = _eager(tools) if self.eager_tool_streaming else tools
             if self.tool_choice:
                 kwargs["tool_choice"] = {"type": self.tool_choice}
 
@@ -224,6 +252,12 @@ class AnthropicProvider(LLMProvider):
             else:
                 raise
         except Exception as exc:
+            if self.eager_tool_streaming and tools and _rejected_eager_streaming(exc):
+                self.eager_tool_streaming = False
+                return await self.create(
+                    model=model, messages=messages, system=system, tools=tools,
+                    max_tokens=max_tokens, temperature=temperature, cache=cache,
+                )
             # Caching is an optimization: a rejected marker runs the call uncached.
             if filtered_kwargs is not uncached and filtered_kwargs != uncached and _rejected_cache_control(exc):
                 resp = await self._create(uncached)
@@ -252,7 +286,7 @@ class AnthropicProvider(LLMProvider):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = _eager(tools) if self.eager_tool_streaming else tools
             if self.tool_choice:
                 kwargs["tool_choice"] = {"type": self.tool_choice}
 
@@ -275,6 +309,14 @@ class AnthropicProvider(LLMProvider):
                     yield chunk
                 final_resp = await stream.get_final_message()
         except Exception as exc:
+            if not delivered and self.eager_tool_streaming and tools and _rejected_eager_streaming(exc):
+                self.eager_tool_streaming = False
+                async for chunk in self.stream(
+                    model=model, messages=messages, system=system, tools=tools,
+                    max_tokens=max_tokens, temperature=temperature, cache=cache,
+                ):
+                    yield chunk
+                return
             # Only before any output: a rejected marker fails at stream open, and
             # restarting a stream that has delivered text would repeat it.
             if not delivered and filtered_kwargs != uncached and _rejected_cache_control(exc):

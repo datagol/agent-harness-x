@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long tool calls no longer stall on Anthropic.** A model writing a large
+  file with `write_file` sent nothing until the whole argument was complete:
+  about 170 seconds of silence for a 12K-token report, so the stall check
+  abandoned the reply and started it over, three times, then failed. Our tools
+  now ask for `eager_input_streaming`, so the arguments arrive as they are
+  written (longest gap measured: 1.2 seconds). Server tools such as web search,
+  and tools that set the field themselves, are left alone. An
+  Anthropic-compatible endpoint that refuses the field gets the request again
+  without it; `AnthropicProvider(eager_tool_streaming=False)` turns it off.
+
 ## [0.7.3] - 2026-10-07
 
 ### Fixed
