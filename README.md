@@ -1,4 +1,9 @@
-# HarnessX
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/datagol/agent-harness-x/main/.github/assets/harnessx-logo-inverse.svg">
+    <img alt="HarnessX" src="https://raw.githubusercontent.com/datagol/agent-harness-x/main/.github/assets/harnessx-logo.svg" width="320">
+  </picture>
+</p>
 
 [![PyPI version](https://img.shields.io/pypi/v/harnessx.svg)](https://pypi.org/project/harnessx/)
 [![Python versions](https://img.shields.io/pypi/pyversions/harnessx.svg)](https://pypi.org/project/harnessx/)
