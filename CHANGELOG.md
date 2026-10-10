@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-10
+
 ### Fixed
 
 - **Long tool calls no longer stall on Anthropic.** A model writing a large
@@ -679,7 +681,8 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/datagol/agent-harness-x/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/datagol/agent-harness-x/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/datagol/agent-harness-x/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/datagol/agent-harness-x/compare/v0.7.0...v0.7.1
