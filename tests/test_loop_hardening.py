@@ -227,6 +227,83 @@ async def test_a_stream_that_stalls_is_abandoned_and_retried():
     assert any(e.type.value == "attempt_reset" for e in events), "consumers are told to drop the stalled text"
 
 
+class NeverStarts(Scripted):
+    """Opens, then sends nothing on its first call: stuck, not thinking."""
+
+    first_event_promptly = True
+
+    def __init__(self, *, first_wait=10.0):
+        super().__init__([])
+        self.first_wait = first_wait
+
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            await asyncio.sleep(self.first_wait)
+        yield StreamChunk(kind="progress")
+        yield StreamChunk(kind="text_delta", data="Hello")
+        yield StreamChunk(kind="response", data=ProviderResponse(text="Hello"))
+
+    async def create(self, **kwargs):
+        raise AssertionError("a provider that streams is streamed, even for agent.run()")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False], ids=["run_stream", "run"])
+async def test_a_stream_that_never_starts_is_retried_well_before_the_idle_limit(streaming):
+    provider = NeverStarts()
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.05, stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        if streaming:
+            async with agent.run_stream("go") as stream:
+                [event async for event in stream]
+                result = await stream.result()
+        else:
+            result = await asyncio.wait_for(agent.run("go"), 5)
+    assert result.ok and result.output == "Hello" and len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_start_is_tolerated_where_it_may_be_a_model_thinking():
+    """OpenAI's and Gemini's reasoning models say nothing until they answer:
+    their providers do not claim a prompt first event, so the first wait gets
+    the idle limit like any other gap."""
+    provider = NeverStarts(first_wait=0.2)
+    provider.first_event_promptly = False
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.05, stream_idle_timeout_seconds=5, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        async with agent.run_stream("go") as stream:
+            [event async for event in stream]
+            result = await stream.result()
+    assert result.ok and len(provider.calls) == 1, "not cut, not retried"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_a_stream_of_its_own_is_not_cut_by_either_deadline():
+    class OnlyCreate(Scripted):
+        first_event_promptly = True
+
+        async def create(self, **kwargs):
+            await asyncio.sleep(0.2)
+            return await super().create(**kwargs)
+
+    provider = OnlyCreate([ProviderResponse(text="done")])
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.05, stream_idle_timeout_seconds=0.1, backoff_seconds=0)
+    async with _agent(provider, retry=retry) as agent:
+        result = await agent.run("go")
+    assert result.ok and result.output == "done"
+
+
+def test_the_first_event_deadline_grows_with_the_request_and_never_passes_the_idle_limit():
+    retry = RetryPolicy()
+    assert retry.first_event_timeout(0) == 20.0
+    assert retry.first_event_timeout(100_000) == 30.0
+    assert RetryPolicy(stream_idle_timeout_seconds=25).first_event_timeout(1_000_000) == 25
+    assert RetryPolicy(stream_first_event_timeout_seconds=None).first_event_timeout(10) == 180.0
+
+
 @pytest.mark.parametrize("name", ["RemoteProtocolError", "ReadError", "IncompleteStreamError"])
 def test_a_connection_dropped_mid_reply_is_transient(name):
     assert is_transient(type(name, (Exception,), {})("peer closed connection"))

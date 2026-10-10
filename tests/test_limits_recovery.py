@@ -421,6 +421,31 @@ async def test_a_tool_timeout_in_a_direct_run_is_told_to_the_model():
     assert answer["is_error"] and "timed out" in answer["content"]
 
 
+
+@pytest.mark.asyncio
+async def test_a_tool_timeout_in_a_durable_run_says_what_timed_out(tmp_path):
+    """The bare TimeoutError had no message, so the failed run's error read
+    as an empty string."""
+    from harnessx import AgentRuntime, SQLiteBackend
+    from harnessx.types import ToolRetry
+
+    provider = Scripted([ProviderResponse(tool_calls=[ToolCall("c1", "slow", {})], stop_reason="tool_use")])
+    agent = Agent(config=AgentConfig(planning=False), provider=provider)
+
+    async def slow() -> str:
+        await asyncio.sleep(10)
+        return "never"
+
+    agent.tools.register_with_schema(
+        "slow", "slow", {"type": "object", "properties": {}}, slow, permission=PermissionLevel.ALLOW,
+        timeout_seconds=0.05, replay_policy="safe", retry=ToolRetry(attempts=1),
+    )
+    backend = await SQLiteBackend.connect(tmp_path / "r.db")
+    async with backend, AgentRuntime(agent, backend=backend) as runtime:
+        result = await runtime.run("go")
+    assert not result.ok
+    assert "Tool 'slow' timed out after 0.05s" in str(result.error), result.error
+
 # ── condensing is not a retry ────────────────────────────────────────────────
 
 

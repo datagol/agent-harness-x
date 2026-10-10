@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import uuid
 from dataclasses import asdict, replace
@@ -36,7 +37,7 @@ from .models import (
     reply_limit_from_error,
     resolve_model_limits,
 )
-from .providers.base import INVALID_ARGUMENTS, native_continuation
+from .providers.base import INVALID_ARGUMENTS, native_continuation, streams
 from .providers.retry import is_context_overflow, is_transient, retry_after_seconds
 from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .tools import retry_wanted
@@ -132,31 +133,41 @@ async def await_with_notices(awaitable, policy, event, *, on, name=None):
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def stream_with_notices(iterator, policy, event, *, on, idle=None):
+async def stream_with_notices(iterator, policy, event, *, on, idle=None, first=None):
     """The same, for a stream: the gap before the first chunk is the slow part.
 
     Between chunks the wait restarts, so a provider that stalls mid-answer is
     reported too. With ``idle`` seconds set, a gap that long abandons the
     stream with ``IncompleteStreamError``, which the driver retries: the
     whole-call timeout alone let a stalled stream hold a run for many minutes.
+    ``first`` is the same for the wait before the first chunk, when that can
+    be shorter (see RetryPolicy.stream_first_event_timeout_seconds); it
+    defaults to ``idle``.
     """
     from .errors import IncompleteStreamError
 
     iterator = iterator.__aiter__()
     notices = policy is not None and policy.enabled
+    started = False
     try:
         while True:
             step = iterator.__anext__()
-            if idle:
-                step = asyncio.wait_for(step, idle)
+            limit = idle if started else (first or idle)
+            if limit:
+                step = asyncio.wait_for(step, limit)
             try:
                 chunk = await (await_with_notices(step, policy, event, on=on) if notices else step)
             except StopAsyncIteration:
                 return
             except TimeoutError as exc:
-                if not idle:
+                if not limit:
                     raise
-                raise IncompleteStreamError(f"The stream stalled: no data for {idle:g}s") from exc
+                if not started:
+                    raise IncompleteStreamError(
+                        f"The stream stalled: nothing arrived within {limit:g}s of the request"
+                    ) from exc
+                raise IncompleteStreamError(f"The stream stalled: no data for {limit:g}s") from exc
+            started = True
             yield chunk
     finally:
         closer = getattr(iterator, "aclose", None)
@@ -165,6 +176,21 @@ async def stream_with_notices(iterator, policy, event, *, on, idle=None):
                 await closer()
             except Exception:
                 pass
+
+
+def first_event_deadline(agent, request) -> float | None:
+    """How long this call may wait for its first event (see stream_with_notices).
+
+    The short deadline applies only to providers that send an event as soon
+    as the model starts; for the rest a quiet start may be a model thinking,
+    so the first event gets the idle limit like any other gap.
+    """
+    retry = agent.config.retry
+    if not getattr(agent.provider, "first_event_promptly", False):
+        return retry.stream_idle_timeout_seconds
+    # A rough size (four characters a token) is enough to scale a deadline.
+    size = len(json.dumps([request.get("system"), request.get("messages"), request.get("tools")], default=str))
+    return retry.first_event_timeout(size // 4)
 
 
 async def model_limits(agent):
@@ -529,8 +555,19 @@ async def command(agent, state, name, emit, *, record=None):
         # existed simply has none. Providers that predate the contract are
         # called without it.
         cache_hint = hint_from_wire(request.pop("cache", None))
+        # ``stream`` says whether the caller sees the reply as it is written.
+        # How the provider is called is separate. A provider that sends its
+        # first event promptly is always streamed, so the stall deadlines bound
+        # agent.run() as well as run_stream(): unstreamed, a stalled call waited
+        # out the whole call timeout -- sixteen minutes at the default reply
+        # budget -- per attempt. (Anthropic's create() streams internally at
+        # that budget anyway.) Others keep create() for run(): a gateway or a
+        # test double may support only that.
         streaming = state.get("stream", False)
-        provider_call = agent.provider.stream if streaming else agent.provider.create
+        use_stream = streaming or (
+            streams(agent.provider) and getattr(agent.provider, "first_event_promptly", False)
+        )
+        provider_call = agent.provider.stream if use_stream else agent.provider.create
         if cache_hint is not None and accepts_cache(provider_call):
             request["cache"] = cache_hint
         if record:
@@ -542,7 +579,7 @@ async def command(agent, state, name, emit, *, record=None):
             model=request["model"],
             max_tokens=request.get("max_tokens"),
             temperature=request.get("temperature"),
-            stream=streaming,
+            stream=use_stream,
             message_count=len(request["messages"]),
             tool_count=len(request["tools"]),
             prefix_key=cache_hint.prefix_key if cache_hint is not None and cache_hint.enabled else None,
@@ -564,14 +601,15 @@ async def command(agent, state, name, emit, *, record=None):
             response = None
             budget_for_timeout = getattr(agent.provider, "call_budget", lambda budget: budget)(request.get("max_tokens"))
             async with asyncio.timeout(agent.config.retry.effective_call_timeout(budget_for_timeout)):
-                if streaming:
+                if use_stream:
                     async for chunk in stream_with_notices(
                         agent.provider.stream(**request), progress, event, on="model",
-                        idle=getattr(agent.config.retry, "stream_idle_timeout_seconds", None),
+                        idle=agent.config.retry.stream_idle_timeout_seconds,
+                        first=first_event_deadline(agent, request),
                     ):
                         if chunk.kind == "response":
                             response = chunk.data
-                        elif not buffered and chunk.kind in (
+                        elif streaming and not buffered and chunk.kind in (
                             "text_delta",
                             "thinking_delta",
                         ):
@@ -965,7 +1003,9 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         except TimeoutError:
             if state["durable"]:
                 # A durable run can stop and ask whether the call took effect.
-                raise
+                # The bare TimeoutError has no message, and the run's error
+                # would read as an empty string.
+                raise TimeoutError(f"Tool '{call.name}' timed out after {entry['timeout']:g}s") from None
             # A direct run cannot: there is no one to ask and no way to resume,
             # and stopping here left an unanswered tool call that failed every
             # later request in the session. Tell the model instead, the way the

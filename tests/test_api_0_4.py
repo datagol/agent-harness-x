@@ -205,9 +205,9 @@ def test_replay_policy_members_are_accepted_and_stored_as_strings():
         ToolDefinition("t", "t", {"type": "object"}, lambda: None, replay_policy="sometimes")
 
 
-def test_default_timeout_is_one_constant():
-    assert DEFAULT_TIMEOUT_SECONDS == 300.0
-    assert ToolDefinition("t", "t", {"type": "object"}, lambda: None).timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+def test_default_timeouts_are_named_constants():
+    assert DEFAULT_TIMEOUT_SECONDS == 300.0 and harnessx.DEFAULT_TOOL_TIMEOUT_SECONDS == 25.0
+    assert ToolDefinition("t", "t", {"type": "object"}, lambda: None).timeout_seconds == 25.0
     assert RetryPolicy().call_timeout_seconds is None, "derived from the reply budget unless set"
     assert RetryPolicy().effective_call_timeout(8192) == DEFAULT_TIMEOUT_SECONDS
     assert harnessx.SubAgent(name="s", description="d", config=AgentConfig()).timeout_seconds == DEFAULT_TIMEOUT_SECONDS
@@ -227,7 +227,8 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     assert shape["limits"]["max_iterations"] == 3 and shape["limits"]["max_cost_dollars"] == 1.5
     assert shape["retry"] == {
         "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 60.0,
-        "stream_idle_timeout_seconds": 180.0, "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
+        "stream_idle_timeout_seconds": 180.0, "stream_first_event_timeout_seconds": 20.0,
+        "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
     }
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}
     assert shape["prompt_cache"] == {"ttl_seconds": None, "cache_history": True, "key_salt": ""}

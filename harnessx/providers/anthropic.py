@@ -160,6 +160,7 @@ class AnthropicProvider(LLMProvider):
     """Talks to Anthropic's Messages API and normalizes responses to ProviderResponse."""
 
     name = "anthropic"
+    first_event_promptly = True  # message_start arrives before any thinking or text
 
     def __init__(self, client: AsyncAnthropic | None = None, *,
                  tool_choice: "str | ToolChoice | None" = None,

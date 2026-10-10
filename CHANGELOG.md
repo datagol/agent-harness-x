@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A stream that never starts is retried after 20 seconds, not 180.** On
+  Anthropic, an event (`message_start`) arrives within a second or so of a
+  request, about 4 seconds at 140K tokens of prompt, so a stream that opens and
+  then sends nothing is stuck. `RetryPolicy.stream_first_event_timeout_seconds`
+  (default 20, plus 10 seconds per 100K tokens of request) abandons it and the
+  call is retried. Once events flow, the 180-second limit between them is
+  unchanged. Providers whose reasoning models say nothing until they answer
+  (OpenAI, OpenRouter, Gemini, Azure) keep the 180-second limit for the first
+  event too; a provider opts in with `first_event_promptly = True`.
+  `stream_first_event_timeout_seconds=None` turns it off.
+- **`agent.run()` is bounded by the stream deadlines too**, on providers that
+  opt in as above. It called `create()`, which no stall check covered, so a
+  stalled call waited out the call timeout: 960 seconds per attempt at the
+  default reply budget, four attempts in all.
+- **A tool registered without a timeout gets 25 seconds, not 300**
+  (`DEFAULT_TOOL_TIMEOUT_SECONDS`). A tool that has not answered in 25 seconds
+  is far more often stuck than busy, and the model is told it timed out and
+  carries on. Built-ins that legitimately run longer declare their own limit:
+  `run_bash`, MCP tools, subagents and file tools in a sandbox that owns the
+  filesystem keep 300 seconds, `fetch_url` gets 60. Give a slow tool of your own
+  `timeout_seconds=`, or restore the old default for all of them with
+  `ToolPolicy(default_timeout_seconds=300)`.
+
+### Fixed
+
+- `register_tool(ToolDefinition(...))`, and a `ToolDefinition` passed in an
+  agent's tools list, ignored `ToolPolicy(default_timeout_seconds=...)`. A
+  definition that never set its own timeout now takes the registry's, as a
+  decorated function does.
+- A tool timeout in a durable run failed the run with an empty error message.
+  It now says which tool timed out and after how long.
+
 ## [0.7.4] - 2026-10-10
 
 ### Fixed
