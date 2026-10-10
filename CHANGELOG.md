@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-10
+
 ### Changed
 
 - **A stream that never starts is retried after 20 seconds, not 180.** On
@@ -715,7 +717,8 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/datagol/agent-harness-x/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/datagol/agent-harness-x/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/datagol/agent-harness-x/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/datagol/agent-harness-x/compare/v0.7.1...v0.7.2
