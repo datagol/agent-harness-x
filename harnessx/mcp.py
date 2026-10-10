@@ -29,7 +29,7 @@ from typing import Any, Literal, Mapping, Sequence, overload
 from .tools import ToolRegistry
 from .errors import ConfigurationError, TransientToolError
 from .providers.retry import is_transient_text
-from .types import PermissionLevel, ReplayPolicy, ToolResult, ToolRetry
+from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolResult, ToolRetry
 
 # Bridged tools re-run a throttled or failed call up to three times, once the
 # server is declared safe or idempotent (a manual tool is never retried).
@@ -641,6 +641,9 @@ class MCPManager:
                     replay_policy=conn.config.replay_policy,
                     retry=conn.config.retry or DEFAULT_MCP_RETRY,
                     retry_if_result=mcp_result_transient,
+                    # A remote server, often doing real work (search, queries):
+                    # not held to the default for local tools.
+                    timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                 )
 
                 self._tool_to_server[tool_name] = server_name

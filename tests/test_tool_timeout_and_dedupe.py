@@ -4,7 +4,9 @@ A tool that calls a remote API can hang indefinitely and take the whole turn
 with it. And a model that re-emits the same call has the work done twice —
 two identical side effects, two lots of latency, double the cost.
 
-Both default to off, so nothing that exists today changes behaviour.
+A tool without a timeout of its own gets DEFAULT_TOOL_TIMEOUT_SECONDS (25 s);
+built-ins that legitimately run longer declare their own. Dedupe is off by
+default.
 """
 
 import asyncio
@@ -94,8 +96,7 @@ def test_a_tools_own_timeout_beats_the_registry_default():
     asyncio.run(_run())
 
 
-def test_no_timeout_is_the_default():
-    """Existing consumers must not suddenly acquire a deadline."""
+def test_a_tool_well_inside_the_default_deadline_is_untouched():
     async def _run():
         registry = _registry()
 
@@ -108,6 +109,70 @@ def test_no_timeout_is_the_default():
 
     asyncio.run(_run())
 
+
+
+# --- the default for tools you register, and the built-ins that run longer ----
+
+
+def test_a_tool_you_register_without_a_timeout_gets_25_seconds_however_it_is_registered():
+    from harnessx.types import ToolDefinition
+
+    registry = _registry()
+
+    @registry.register()
+    async def decorated() -> str:
+        return "ok"
+
+    async def plain() -> str:
+        return "ok"
+
+    registry.register_tool(plain)
+    _register(registry, plain, name="schema")
+    registry.register_tool(ToolDefinition("defined", "d", {"type": "object"}, plain))
+    registry.register_tool(ToolDefinition("own", "d", {"type": "object"}, plain, timeout_seconds=90))
+    timeouts = {t.name: t.timeout_seconds for t in registry.get_tools()}
+    assert timeouts == {"decorated": 25.0, "plain": 25.0, "schema": 25.0, "defined": 25.0, "own": 90}
+
+
+def test_a_tool_policy_reaches_a_tool_registered_as_a_definition():
+    """register_tool(ToolDefinition) used to keep its own default and ignore
+    ToolPolicy(default_timeout_seconds=...)."""
+    from harnessx import Agent, AgentConfig
+    from harnessx.types import ToolDefinition, ToolPolicy
+
+    async def plain() -> str:
+        return "ok"
+
+    tools = [ToolDefinition("defined", "d", {"type": "object"}, plain),
+             ToolDefinition("own", "d", {"type": "object"}, plain, timeout_seconds=90)]
+    agent = Agent(config=AgentConfig(model="m", tools=ToolPolicy(default_timeout_seconds=7)), tools=tools)
+    assert agent.tools.get_tool("defined").timeout_seconds == 7
+    assert agent.tools.get_tool("own").timeout_seconds == 90
+
+    registry = _registry()
+    registry.register_tool(ToolDefinition("later", "d", {"type": "object"}, plain))
+    registry.adopt_policy(ToolPolicy(default_timeout_seconds=3))
+    assert registry.get_tool("later").timeout_seconds == 3
+
+
+def test_built_ins_that_run_long_keep_longer_limits():
+    from types import SimpleNamespace
+
+    from harnessx.builtin.bash import register_bash_tools
+    from harnessx.builtin.filesystem import register_filesystem_tools
+    from harnessx.builtin.web import register_web_tools
+
+    registry = _registry()
+    register_bash_tools(registry)
+    register_web_tools(registry)
+    register_filesystem_tools(registry, include=["read_file"])
+    assert registry.get_tool("run_bash").timeout_seconds == 300
+    assert registry.get_tool("fetch_url").timeout_seconds == 60
+    assert registry.get_tool("read_file").timeout_seconds == 25, "on the host, a file read is quick"
+
+    inside = _registry()
+    register_filesystem_tools(inside, include=["read_file"], sandbox=SimpleNamespace(owns_filesystem=True))
+    assert inside.get_tool("read_file").timeout_seconds == 300, "the first call may start the sandbox"
 
 # --- dedupe -------------------------------------------------------------------
 

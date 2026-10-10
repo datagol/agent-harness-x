@@ -22,7 +22,7 @@ from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origi
 from jsonschema import Draft202012Validator, validate
 
 from .permissions import PermissionManager
-from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolCall, ToolDefinition, ToolPolicy, ToolResult, ToolRetry
+from .types import DEFAULT_TOOL_TIMEOUT_SECONDS, PermissionLevel, ReplayPolicy, ToolCall, ToolDefinition, ToolPolicy, ToolResult, ToolRetry
 from .providers.retry import is_transient, is_transient_text
 
 
@@ -205,12 +205,12 @@ class ToolRegistry:
         self.sandbox = sandbox
 
     def _resolve_timeout(self, timeout_seconds: float | None) -> float:
-        """A tool's own timeout, else the registry default, else DEFAULT_TIMEOUT_SECONDS."""
+        """A tool's own timeout, else the registry default, else DEFAULT_TOOL_TIMEOUT_SECONDS."""
         if timeout_seconds is not None:
             return timeout_seconds
         if self._default_timeout_seconds is not None:
             return self._default_timeout_seconds
-        return DEFAULT_TIMEOUT_SECONDS
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
 
     def _resolve_retry(self, retry: ToolRetry | None) -> ToolRetry | None:
         """A tool's own retry, else the registry default, else None (the engine's default)."""
@@ -341,10 +341,18 @@ class ToolRegistry:
                 "retry": retry, "retry_if_result": retry_if_result,
             }
             definition = replace_definition(tool, **{k: v for k, v in overrides.items() if v is not None})
+            # A definition still at the class default never chose a timeout:
+            # it takes the registry's, and follows a ToolPolicy adopted later,
+            # as a decorated function does.
+            inherited_timeout = timeout_seconds is None and tool.timeout_seconds == DEFAULT_TOOL_TIMEOUT_SECONDS
+            if inherited_timeout:
+                definition = replace_definition(definition, timeout_seconds=self._resolve_timeout(None))
             inherited = definition.retry is None
             if inherited:
                 definition = replace_definition(definition, retry=self._default_retry)
-            return self._store(definition, replace=replace, inherited_retry=inherited)
+            return self._store(
+                definition, replace=replace, inherited_timeout=inherited_timeout, inherited_retry=inherited,
+            )
 
         decorator = self.register(
             name=name,

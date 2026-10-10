@@ -105,11 +105,30 @@ def parse_tool_arguments(raw: str | None) -> dict[str, Any]:
     return value
 
 
+def streams(provider: Any) -> bool:
+    """Whether ``provider`` has a streaming call of its own.
+
+    The base ``stream()`` only awaits ``create()`` and yields the whole reply
+    at the end, so the stream deadlines cannot apply to it.
+    """
+    declared = getattr(provider, "streams_natively", None)  # a chain answers for its members
+    if isinstance(declared, bool):
+        return declared
+    stream = getattr(type(provider), "stream", None)
+    return stream is not None and stream is not LLMProvider.stream
+
+
 class LLMProvider(ABC):
     """Backend that knows how to talk to one LLM vendor."""
 
     name: str = ""
     _harness_model_limits: dict[str, dict[str, int]]
+    # True when ``stream()`` yields something as soon as the model starts,
+    # even if it then thinks without showing it (Anthropic sends message_start
+    # first). Only then can a quiet start be told from a stuck one, and the
+    # engine applies RetryPolicy.stream_first_event_timeout_seconds. A vendor
+    # whose reasoning models say nothing until they answer leaves it False.
+    first_event_promptly: bool = False
 
     def default_max_tokens(self, model: str) -> int:
         """The reply budget used when AgentConfig.max_tokens is None.

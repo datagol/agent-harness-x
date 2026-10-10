@@ -427,3 +427,35 @@ marker until all workflows predating the change have completed.
 Nothing needs changing. A turn may now carry `image`, `document` and `audio`
 content blocks; a text-only turn is still sent as a plain string. Anthropic
 raises on audio rather than dropping it.
+
+## 0.8.0: shorter default deadlines
+
+Two defaults are shorter. Both have the same mechanism as before; only the
+waiting time changed.
+
+- **Tools.** A tool registered without `timeout_seconds` is cut off after
+  25 seconds (was 300), and the model receives "Tool 'x' timed out after 25s".
+  A tool of yours that legitimately takes longer -- a heavy SQL query, a slow
+  API -- should say so when it is registered:
+
+  ```python
+  agent.tools.register_tool(query_postgres, timeout_seconds=120)
+  ```
+
+  Or keep the old default for every tool:
+
+  ```python
+  AgentConfig(tools=ToolPolicy(default_timeout_seconds=300))
+  ```
+
+  `run_bash`, MCP tools, subagents and file tools inside a sandbox that owns
+  the filesystem keep 300 seconds; `fetch_url` has 60. These built-in limits
+  are their own, so `ToolPolicy(default_timeout_seconds=...)` no longer changes
+  them.
+- **Streams that never start.** On Anthropic, a reply that sends no event at
+  all within 20 seconds (more for very large requests) is abandoned and
+  retried. Once events arrive, the 180-second limit between them is unchanged.
+  Turn it off with `RetryPolicy(stream_first_event_timeout_seconds=None)`.
+  `agent.run()` on Anthropic now uses the streaming call internally so these
+  deadlines apply; the result is the same.
+

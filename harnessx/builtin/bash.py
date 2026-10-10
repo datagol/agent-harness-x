@@ -8,7 +8,7 @@ import os
 import signal
 from typing import TYPE_CHECKING, Any
 
-from harnessx.types import PermissionLevel
+from harnessx.types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel
 from ._registration import select_tools
 from .filesystem import _mark_builtin
 
@@ -135,7 +135,8 @@ def register_bash_tools(
 
         _mark_builtin(sandboxed_run_bash, sandbox, functools.partial(
             register_bash_tools, include=["run_bash"], permission=permission, replace=True))
-        registry.register_tool(sandboxed_run_bash, name="run_bash", permission=permission, replace=replace)
+        registry.register_tool(sandboxed_run_bash, name="run_bash", permission=permission, replace=replace,
+                               timeout_seconds=DEFAULT_TIMEOUT_SECONDS)
     elif cwd is not None:
         async def scoped_run_bash(command: str, timeout: int = 30) -> str:
             """Execute a bash command in the working directory and return its output.
@@ -148,7 +149,8 @@ def register_bash_tools(
 
         _mark_builtin(scoped_run_bash, None, functools.partial(
             register_bash_tools, include=["run_bash"], permission=permission, replace=True))
-        registry.register_tool(scoped_run_bash, name="run_bash", permission=permission, replace=replace)
+        registry.register_tool(scoped_run_bash, name="run_bash", permission=permission, replace=replace,
+                               timeout_seconds=DEFAULT_TIMEOUT_SECONDS)
     else:
         # The public function is shared, so the mark goes on a per-registration wrapper.
         async def host_run_bash(command: str, timeout: int = 30) -> str:
@@ -157,6 +159,7 @@ def register_bash_tools(
         host_run_bash.__doc__ = run_bash.__doc__
         _mark_builtin(host_run_bash, None, functools.partial(
             register_bash_tools, include=["run_bash"], permission=permission, replace=True))
-        registry.register_tool(host_run_bash, name="run_bash", permission=permission, replace=replace)
+        registry.register_tool(host_run_bash, name="run_bash", permission=permission, replace=replace,
+                               timeout_seconds=DEFAULT_TIMEOUT_SECONDS)
 
     return ["run_bash"]

@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from harnessx.types import PermissionLevel
+
 from ._registration import select_tools
 
 if TYPE_CHECKING:
     from harnessx.tools import ToolRegistry
+
+# A slow site is worth waiting for longer than a local tool, not five minutes.
+FETCH_TIMEOUT_SECONDS = 60.0
 
 
 async def fetch_url(url: str, max_length: int = 500_000) -> str:
@@ -66,8 +70,10 @@ def register_web_tools(
             """
             return await fetch_url(url, max_length=max_length)
 
-        registry.register_tool(custom_fetch_url, name="fetch_url", permission=permission, replace=replace)
+        registry.register_tool(custom_fetch_url, name="fetch_url", permission=permission, replace=replace,
+                               timeout_seconds=FETCH_TIMEOUT_SECONDS)
     else:
-        registry.register_tool(fetch_url, name="fetch_url", permission=permission, replace=replace)
+        registry.register_tool(fetch_url, name="fetch_url", permission=permission, replace=replace,
+                               timeout_seconds=FETCH_TIMEOUT_SECONDS)
 
     return ["fetch_url"]

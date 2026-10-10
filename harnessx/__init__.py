@@ -51,6 +51,7 @@ from .registry import AgentRef, AgentRegistry, agents
 from .tools import ToolNotFoundError, ToolRegistry, normalize_tool_registry
 from .types import (
     DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
     AgentConfig,
     CheckpointData,
     Fallback,
@@ -84,7 +85,7 @@ __all__ = [
     "__version__",
     # Agent and configuration
     "Agent", "SubAgent", "AgentConfig", "Limits", "LoopGuard", "RetryPolicy", "PromptCachePolicy", "ToolPolicy", "ToolRetry", "ProgressPolicy",
-    "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "ToolChoice",
+    "PromptCacheHint", "DEFAULT_TIMEOUT_SECONDS", "DEFAULT_TOOL_TIMEOUT_SECONDS", "ToolChoice",
     "StopReason", "ProviderResponse", "StreamChunk",
     # Providers
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",

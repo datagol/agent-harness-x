@@ -13,7 +13,13 @@ from .errors import ConfigurationError
 if TYPE_CHECKING:  # type-only: providers import this module at runtime
     from .providers.base import LLMProvider
 
-DEFAULT_TIMEOUT_SECONDS = 300.0  # model calls, tool calls, and sub-agent delegation
+DEFAULT_TIMEOUT_SECONDS = 300.0  # model calls, sub-agent delegation, and built-in tools that run long
+# A tool registered without a timeout of its own. Most tools answer in seconds;
+# one that has not answered in 25 is far more often stuck than busy, and the
+# model is better told so than left waiting. Built-ins that legitimately run
+# longer (run_bash, MCP tools, subagents, fetch_url, sandbox file tools) declare
+# their own limit, and a slow tool of yours should pass timeout_seconds.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 25.0
 
 
 class PermissionLevel(str, Enum):
@@ -70,7 +76,7 @@ class ToolDefinition:
     permission_level: PermissionLevel | None = None
     concurrent: bool = True
     replay_policy: ReplayPolicy | str = "manual"
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
     # Automatic re-execution after a transient failure; None means the registry
     # default, else ToolRetry(). Applies only to safe and idempotent tools.
     retry: ToolRetry | None = None
@@ -432,6 +438,15 @@ class RetryPolicy:
     # call timeout alone let a stalled stream hold a run for many minutes.
     # None turns the check off.
     stream_idle_timeout_seconds: float | None = 180.0
+    # Longest wait for the first event of a streamed reply, on providers that
+    # send one as soon as the model starts (Anthropic's message_start; see
+    # LLMProvider.first_event_promptly). A stream that opens and then says
+    # nothing is stuck, not thinking, so it is retried long before the idle
+    # limit. Raised by 10 seconds per 100K tokens of request, since a large
+    # prompt takes longer to read before the first event. Providers whose
+    # reasoning models are silent until they answer (OpenAI, Gemini) wait the
+    # idle limit instead. None turns the check off.
+    stream_first_event_timeout_seconds: float | None = 20.0
     # Failover, when AgentConfig.fallbacks names other providers. Transient
     # failures one provider may collect before the chain moves to the next, and
     # how long a provider stays out of rotation after being passed over.
@@ -450,11 +465,26 @@ class RetryPolicy:
         _positive(self.max_backoff_seconds, "max_backoff_seconds")
         if self.stream_idle_timeout_seconds is not None:
             _positive(self.stream_idle_timeout_seconds, "stream_idle_timeout_seconds")
+        if self.stream_first_event_timeout_seconds is not None:
+            _positive(self.stream_first_event_timeout_seconds, "stream_first_event_timeout_seconds")
         if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
             raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
             raise ConfigurationError("switch_after must be a positive integer")
         _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
+
+    def first_event_timeout(self, request_tokens: int) -> float | None:
+        """How long to wait for a reply's first event, for a request of ``request_tokens``.
+
+        Never longer than the idle limit: past that the stream counts as
+        stalled anyway.
+        """
+        first = self.stream_first_event_timeout_seconds
+        if first is None:
+            return self.stream_idle_timeout_seconds
+        first += 10.0 * max(0, request_tokens) / 100_000
+        idle = self.stream_idle_timeout_seconds
+        return first if idle is None else min(first, idle)
 
     def effective_call_timeout(self, max_tokens: int | None) -> float:
         """The timeout for one model call: the explicit value, or one sized for ``max_tokens``."""
@@ -638,7 +668,7 @@ class ProgressPolicy:
 class ToolPolicy:
     """Registry-wide tool options that an Agent applies to the registry it adopts."""
 
-    default_timeout_seconds: float | None = None  # None: the registry's own default, else DEFAULT_TIMEOUT_SECONDS
+    default_timeout_seconds: float | None = None  # None: the registry's own default, else DEFAULT_TOOL_TIMEOUT_SECONDS
     dedupe_calls: bool = False  # identical repeated calls within one run return the first result
     retry: ToolRetry | None = None  # default for tools registered without a retry of their own
 

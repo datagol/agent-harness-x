@@ -13,7 +13,7 @@ import stat
 from typing import TYPE_CHECKING, Any
 import uuid
 
-from harnessx.types import PermissionLevel
+from harnessx.types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel
 from ._registration import select_tools
 
 if TYPE_CHECKING:
@@ -524,6 +524,7 @@ def register_filesystem_tools(
         "list_directory": (scoped_list, list_directory, True),
         "generate_file": (scoped_generate, generate_file, False),
     }
+    owns = getattr(sandbox, "owns_filesystem", False)
     for name in names:
         handler, public, concurrent = handlers[name]
         handler.__doc__ = public.__doc__
@@ -532,8 +533,11 @@ def register_filesystem_tools(
             max_read_bytes=max_read_bytes, max_write_bytes=max_write_bytes,
             max_directory_entries=max_directory_entries, output_dir=output_dir,
         ))
+        # In a sandbox that owns the filesystem, the first call starts it and
+        # copies the project in; on the host these answer in moments.
         registry.register_tool(handler, name=name, permission=permission,
-                               concurrent=concurrent, replace=replace)
+                               concurrent=concurrent, replace=replace,
+                               timeout_seconds=DEFAULT_TIMEOUT_SECONDS if owns else None)
     return names
 
 

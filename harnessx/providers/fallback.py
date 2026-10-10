@@ -176,6 +176,18 @@ class FallbackProvider(LLMProvider):
     def set_reply_budget(self, budget):
         (self._active or self._eligible()[0]).reply_budget = budget
 
+    @property
+    def streams_natively(self) -> bool:
+        """Only when every member streams: any of them may serve the call."""
+        from .base import streams
+
+        return all(streams(m.provider) for m in self._members)
+
+    @property
+    def first_event_promptly(self) -> bool:  # type: ignore[override]
+        """Only when every member does: any of them may serve the call."""
+        return all(getattr(m.provider, "first_event_promptly", False) for m in self._members)
+
     def call_budget(self, budget):
         return max([budget or 0, *(m.reply_budget or m.max_tokens or budget or 0 for m in self._eligible())])
 
