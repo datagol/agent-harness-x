@@ -333,10 +333,58 @@ async def test_a_request_too_long_for_the_window_is_condensed_and_repeated():
 
 @pytest.mark.asyncio
 async def test_an_overflow_with_nothing_to_condense_still_fails():
-    provider = Scripted([Exception("prompt is too long: 250000 tokens > 200000 maximum")])
+    """A short request refused twice: tried once more, then a typed failure."""
+    overflow = "prompt is too long: 250000 tokens > 200000 maximum"
+    provider = Scripted([Exception(overflow), Exception(overflow)])
     async with _agent(provider, tools=False) as agent:
         result = await agent.run("x" * 100)
-    assert result.failed and "too long" in result.error["message"]
+    assert result.failed and result.error["type"] == "ContextOverflowError"
+    assert "too long" in result.error["message"] and len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_short_request_refused_as_too_long_is_tried_once_more():
+    """Benchmark fault: the API answers the second call with "prompt is too long"
+    while the history is three messages. 0.8.0 failed at once."""
+    provider = Scripted([Exception("prompt is too long: 1047231 tokens > 1000000 maximum"), ProviderResponse(text="ok")])
+    agent = _agent(provider, tools=False)
+    recoveries, retries = [], []
+    agent.hooks.on(HookEvent.RECOVERY, lambda ctx: recoveries.append(ctx.data["reason"]))
+    agent.hooks.on(HookEvent.RETRY, lambda ctx: retries.append(ctx.data))
+    async with agent:
+        result = await agent.run("go")
+    assert result.ok and result.output == "ok" and len(provider.calls) == 2
+    assert recoveries == ["spurious_overflow"] and retries == []
+
+
+@pytest.mark.asyncio
+async def test_a_large_tool_result_is_spilled_before_the_run_gives_up():
+    big = "row,value\n" + "x" * 60_000
+    agent_calls = []
+
+    def first(kwargs):
+        agent_calls.append(kwargs)
+        return ProviderResponse(tool_calls=[ToolCall("c1", "dump", {})], stop_reason="tool_use")
+
+    provider = Scripted([first, Exception("prompt is too long: 300000 tokens > 200000 maximum"), ProviderResponse(text="ok")])
+    agent = _agent(provider, tools=False, limits=Limits(max_result_chars=100_000))
+    agent.tools.register_tool(lambda: big, name="dump", permission=PermissionLevel.ALLOW)
+    recoveries = []
+    agent.hooks.on(HookEvent.RECOVERY, lambda ctx: recoveries.append(ctx.data["reason"]))
+    async with agent:
+        result = await agent.run("go")
+    assert result.ok and result.output == "ok" and recoveries == ["context_overflow_spill"]
+    sent = str(provider.calls[2]["messages"])
+    assert "Full output saved to:" in sent and "x" * 10_000 not in sent
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_large_request_fails_with_a_typed_error():
+    provider = Scripted([Exception("prompt is too long: 230000 tokens > 200000 maximum")])
+    async with _agent(provider, tools=False, limits=Limits(max_context_tokens=200_000)) as agent:
+        result = await agent.run("x" * 900_000)
+    assert result.failed and result.error["type"] == "ContextOverflowError" and len(provider.calls) == 1
+    assert "200000-token window" in result.error["message"]
 
 
 # ── an empty reply ───────────────────────────────────────────────────────────

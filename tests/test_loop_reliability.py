@@ -1176,3 +1176,27 @@ def test_loop_guard_is_exported_like_every_other_config_type():
 
     assert harnessx.LoopGuard is LoopGuard
     assert "LoopGuard" in harnessx.__all__
+
+
+def test_spill_large_results_moves_only_large_results_and_is_idempotent(tmp_path):
+    from harnessx.memory import ConversationMemory
+
+    from harnessx.types import ToolResult
+
+    memory = ConversationMemory()
+    memory.add_user_message("go")
+    memory.add_assistant_message([
+        {"type": "tool_use", "id": "a", "name": "t", "input": {}},
+        {"type": "tool_use", "id": "b", "name": "t", "input": {}},
+    ])
+    memory.add_tool_results([
+        ToolResult(tool_call_id="a", content="small"),
+        ToolResult(tool_call_id="b", content="y" * 10_000),  # under the 12,000 kept on arrival
+    ])
+    freed = memory.spill_large_results()
+    assert freed > 6_000
+    blocks = memory.get_messages()[-1]["content"]
+    assert blocks[0]["content"] == "small"
+    assert "Full output saved to:" in blocks[1]["content"]
+    assert memory.spill_large_results() == 0, "already on disk"
+    assert "y" * 100 in memory.read_evicted("b", max_chars=200), "still readable"

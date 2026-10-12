@@ -198,6 +198,38 @@ class ConversationMemory:
             self._messages[index] = Message("user", content)
         return freed
 
+    def spill_large_results(self, *, threshold_chars: int = 2_000) -> int:
+        """Move every tool result over ``threshold_chars`` to disk, newest first.
+
+        The same eviction ``add_tool_results`` applies past ``max_result_chars``,
+        at a lower bar: for a request the provider refused as too long when the
+        history is too short to condense. Results already evicted or cleared
+        are left alone. Returns the characters freed.
+        """
+        freed = 0
+        for index in range(len(self._messages) - 1, -1, -1):
+            message = self._messages[index]
+            if message.role != "user" or not isinstance(message.content, list):
+                continue
+            changed = False
+            content = []
+            for block in message.content:
+                body = block.get("content") if isinstance(block, dict) else None
+                if (
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                    and isinstance(body, str) and len(body) > threshold_chars
+                    and body != CLEARED_TOOL_RESULT and not _SAVED_PATH.search(body[:600])
+                ):
+                    preview = self._evict_large_result(str(block.get("tool_use_id", "")), body)
+                    if len(preview) < len(body):
+                        freed += len(body) - len(preview)
+                        block = {**block, "content": preview}
+                        changed = True
+                content.append(block)
+            if changed:
+                self._messages[index] = Message("user", content)
+        return freed
+
     def _evict_large_result(self, tool_use_id: str, content: str) -> str:
         """Save full result to disk, return a preview with file path reference."""
         safe_id = tool_use_id.replace("/", "_").replace("..", "_")

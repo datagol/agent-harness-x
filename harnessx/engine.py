@@ -24,7 +24,7 @@ from .execution import (
     transition,
     wire,
 )
-from .errors import MalformedToolInputError, TransientToolError
+from .errors import ContextOverflowError, MalformedToolInputError, TransientToolError
 from .permissions import MaxIterationsError
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
@@ -535,7 +535,7 @@ async def command(agent, state, name, emit, *, record=None):
                     **({"force": True} if state.get("compact_forced") else {}),
                 )
         if state.get("compact_forced") and len(str(agent.memory.get_messages())) >= before_size:
-            raise ValueError("Context overflow: no safe compaction reduced the request")
+            raise ContextOverflowError("Context overflow: no safe compaction reduced the request")
         await emit_hook(
             agent, HookEvent.CONTEXT_CONDENSED,
             messages_dropped=len(dropped), summary_chars=len(summary),
@@ -665,23 +665,58 @@ async def command(agent, state, name, emit, *, record=None):
                 set_reply_budget(agent, limit)
                 await emit_hook(agent, HookEvent.RECOVERY, reason="reply_limit", attempt=1, reply_budget=limit)
                 response = await call_provider()
-            elif is_context_overflow(exc) and overflow_recoverable(agent, state):
+            elif is_context_overflow(exc):
                 window = context_window_from_error(exc)
                 if window:
                     learn_model_limits(target_model, provider=target_provider, context_window=window)
-                attempt = state.get("overflow_recoveries", 0) + 1
-                logger.info("request overflowed the context window; condensing (recovery %d)", attempt)
-                await emit_hook(
-                    agent, HookEvent.RECOVERY, reason="context_overflow", attempt=attempt,
-                    reply_budget=request.get("max_tokens"),
-                )
-                # No model reply to record: condense, then prepare the call again.
-                # attempt resets because nothing was delivered and condensing is
-                # not a retry of this call.
-                return {
-                    **await snapshot(agent), "recovery": "context_overflow",
-                    "overflow_recoveries": attempt, "attempt": 0, "compact_forced": True,
-                }
+                recoveries = state.get("overflow_recoveries", 0)
+                if overflow_recoverable(agent, state):
+                    attempt = recoveries + 1
+                    logger.info("request overflowed the context window; condensing (recovery %d)", attempt)
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="context_overflow", attempt=attempt,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    # No model reply to record: condense, then prepare the call again.
+                    # attempt resets because nothing was delivered and condensing is
+                    # not a retry of this call.
+                    return {
+                        **await snapshot(agent), "recovery": "context_overflow",
+                        "overflow_recoveries": attempt, "attempt": 0, "compact_forced": True,
+                    }
+                # Too short a history to condense. Large tool results can still go
+                # to disk, the same eviction an oversized result gets on arrival.
+                spill = getattr(agent.memory, "spill_large_results", None)
+                if (
+                    recoveries < MAX_OVERFLOW_RECOVERIES and not state.get("provider_continuation")
+                    and callable(spill) and spill() > 0
+                ):
+                    logger.info("request overflowed the context window; spilled large tool results")
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="context_overflow_spill", attempt=recoveries + 1,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    return {
+                        **await snapshot(agent), "recovery": "context_overflow_spill",
+                        "overflow_recoveries": recoveries + 1, "attempt": 0,
+                    }
+                limits = await model_limits(agent)
+                window_size = context_window(agent, limits)
+                estimated = estimate_request_tokens(request)
+                if not state.get("overflow_retried") and window_size and estimated * 4 < window_size:
+                    # Far below the window by any count: a refusal that is not
+                    # about this request. Worth one more call per run.
+                    logger.info("a %d-token request was refused as too long; trying once more", estimated)
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="spurious_overflow", attempt=1,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    return {**await snapshot(agent), "recovery": "spurious_overflow", "overflow_retried": True, "attempt": 0}
+                raise ContextOverflowError(
+                    f"Context overflow: {exc} (about {estimated} tokens estimated against a "
+                    f"{window_size}-token window; nothing left to condense)",
+                    estimated_tokens=estimated, context_window=window_size,
+                ) from exc
             else:
                 raise
         agent.guardrails.track_usage(response.usage)
