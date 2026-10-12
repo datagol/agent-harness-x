@@ -111,7 +111,8 @@ class RecoveryData(TypedDict):
 
     reason: Literal[
         "truncated_tool_call", "truncated_text", "empty_reply", "reply_limit", "context_overflow",
-        "paused_turn", "iteration_limit", "unfinished_plan",
+        "context_overflow_spill", "spurious_overflow", "paused_turn", "malformed_tool_input",
+        "iteration_limit", "unfinished_plan",
     ]
     attempt: int  # how many recoveries of this kind the run has made, this one included
     reply_budget: int | None  # the budget the next call asks for
