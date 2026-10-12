@@ -199,18 +199,29 @@ def estimate_request_tokens(request) -> int:
     return size // 4
 
 
-def first_event_deadline(agent, request, attempt: int = 1) -> float | None:
+def first_event_deadline(agent, request, attempt: int = 1, slowest_seen: float | None = None) -> float | None:
     """How long this call may wait for its first event (see stream_with_notices).
 
     The short deadline applies only to providers that send an event as soon
     as the model starts; for the rest a quiet start may be a model thinking,
     so the first event gets the idle limit like any other gap. ``attempt`` is
     the 1-based call for this step; later attempts wait longer.
+
+    ``slowest_seen`` is the longest a reply in this run took to start. A server
+    that took 25 seconds once will likely do it again, so every later call gets
+    ``stream_first_event_growth`` times that, instead of timing out at 20
+    seconds and spending a retry each step to find out.
     """
     retry = agent.config.retry
     if not getattr(agent.provider, "first_event_promptly", False):
         return retry.stream_idle_timeout_seconds
-    return retry.first_event_timeout(estimate_request_tokens(request), attempt)
+    deadline = retry.first_event_timeout(estimate_request_tokens(request), attempt)
+    growth = float(retry.stream_first_event_growth)
+    if deadline is None or not slowest_seen or growth <= 1.0:
+        return deadline
+    learned = float(slowest_seen) * growth
+    idle = retry.stream_idle_timeout_seconds
+    return max(deadline, learned if idle is None else min(learned, idle))
 
 
 async def model_limits(agent):
@@ -616,18 +627,25 @@ async def command(agent, state, name, emit, *, record=None):
         # same request would cure.
         progress = getattr(agent.config, "progress", None)
         delivered = False
+        first_event_after: float | None = None
 
         async def call_provider():
-            nonlocal delivered
+            nonlocal delivered, first_event_after
             response = None
+            started = asyncio.get_running_loop().time()
             budget_for_timeout = getattr(agent.provider, "call_budget", lambda budget: budget)(request.get("max_tokens"))
             async with asyncio.timeout(agent.config.retry.effective_call_timeout(budget_for_timeout)):
                 if use_stream:
                     async for chunk in stream_with_notices(
                         agent.provider.stream(**request), progress, event, on="model",
                         idle=agent.config.retry.stream_idle_timeout_seconds,
-                        first=first_event_deadline(agent, request, max(1, int(state.get("attempt") or 1))),
+                        first=first_event_deadline(
+                            agent, request, max(1, int(state.get("attempt") or 1)),
+                            state.get("slowest_first_event"),
+                        ),
                     ):
+                        if first_event_after is None:
+                            first_event_after = asyncio.get_running_loop().time() - started
                         if chunk.kind == "response":
                             response = chunk.data
                         elif streaming and not buffered and chunk.kind in (
@@ -795,6 +813,9 @@ async def command(agent, state, name, emit, *, record=None):
             "provider_continuation": native_continuation(canonical),
             # A readable reply re-arms the one re-ask an unreadable one gets.
             "malformed_recovered": False,
+            "slowest_first_event": max(
+                float(state.get("slowest_first_event") or 0.0), first_event_after or 0.0,
+            ) or None,
         }
 
     if name == "prepare_tools":

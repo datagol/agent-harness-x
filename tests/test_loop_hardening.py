@@ -312,6 +312,34 @@ async def test_a_slow_server_gets_through_on_a_later_attempt():
 
 
 @pytest.mark.asyncio
+async def test_a_run_remembers_a_slow_server_and_waits_long_enough_next_time():
+    """Growth alone made every step pay one timed-out call before the longer
+    deadline: 20 s lost per model call in the benchmark. Once a reply has taken
+    a while to start, later calls in the run wait twice that from the outset."""
+
+    class SlowTools(SlowStart):
+        async def stream(self, **kwargs):
+            self.calls.append(kwargs)
+            await asyncio.sleep(self.delay)
+            yield StreamChunk(kind="progress")
+            if len(self.calls) <= 2:
+                call = ToolCall("c1", "probe", {})
+                yield StreamChunk(kind="response", data=ProviderResponse(tool_calls=[call], stop_reason="tool_use"))
+            else:
+                yield StreamChunk(kind="response", data=ProviderResponse(text="Hello"))
+
+    provider = SlowTools(delay=0.4)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=10.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    agent.tools.register_tool(lambda: "ok", name="probe", permission=PermissionLevel.ALLOW)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 10)
+    assert result.ok and result.output == "Hello"
+    assert len(provider.calls) == 3, "one timeout in the first step, none in the second"
+
+
+@pytest.mark.asyncio
 async def test_without_growth_a_slow_server_exhausts_the_retry_budget():
     """The 0.8.0 behaviour, kept reachable with growth 1.0: the same deadline every time."""
     provider = SlowStart(delay=0.15)
