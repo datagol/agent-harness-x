@@ -89,7 +89,10 @@ faults injected between the agent and the API.
   the prompt was counted with an extra HTTP call to Anthropic: three per
   five-call run. The provider's own count of the previous request is now used,
   and the network count only runs above 60% of the room. Model limits from the
-  Models API are fetched once per process and endpoint, not once per Agent.
+  Models API are fetched once per process and endpoint, not once per Agent,
+  and for a model the built-in table knows, the lookup runs beside the first
+  call instead of before it. That lookup was 260-320 ms of every fresh
+  process; HarnessX's own work per run is about 10 ms.
 
 ## [0.8.0] - 2026-10-10
 

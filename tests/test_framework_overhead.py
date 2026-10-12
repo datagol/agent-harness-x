@@ -132,8 +132,8 @@ async def test_a_failed_limits_lookup_is_not_shared():
             api_key="k", base_url="https://anthropic.invalid", max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
         ) as client:
-            assert await AnthropicProvider(client=client).model_limits(MODEL) is None
-    assert calls[f"/v1/models/{MODEL}"] == 2
+            assert await AnthropicProvider(client=client).model_limits("claude-future-9") is None
+    assert calls["/v1/models/claude-future-9"] == 2
 
 
 class CountingProvider:
@@ -178,3 +178,69 @@ async def test_framework_overhead_budget():
             times.append(time.perf_counter() - started)
     budget = float(os.environ.get("HARNESSX_OVERHEAD_BUDGET", "0.25"))
     assert min(times) < budget, f"five-call run took {min(times):.3f}s of framework time"
+
+
+def limits_client(paths, release):
+    """A Models API that answers only once ``release`` is set."""
+    async def handle(request):
+        paths[request.url.path] += 1
+        await release.wait()
+        return httpx.Response(200, json={
+            "id": "m", "type": "model", "display_name": "x", "created_at": "2025-01-01T00:00:00Z",
+            "max_input_tokens": 300_000, "max_tokens": 40_000,
+        })
+
+    return AsyncAnthropic(api_key="k", base_url="https://limits.invalid", max_retries=0,
+                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+
+
+@pytest.mark.asyncio
+async def test_a_known_model_does_not_wait_for_the_models_api():
+    """The lookup took 260-320 ms before the first call of every fresh process,
+    which was all of HarnessX's measured overhead. The table answers until the
+    API does."""
+    import asyncio
+
+    from harnessx.models import ModelLimits, resolve_model_limits
+
+    paths, release = collections.Counter(), asyncio.Event()
+    async with limits_client(paths, release) as client:
+        provider = AnthropicProvider(client=client)
+        first = await asyncio.wait_for(resolve_model_limits(provider, MODEL), 0.5)
+        assert first.context_window == 1_000_000, "the built-in table, without waiting"
+        release.set()
+        await asyncio.sleep(0.05)
+        assert await provider.model_limits(MODEL) == ModelLimits(300_000, 40_000), "the API's figures once known"
+        await provider.aclose()
+    assert sum(paths.values()) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_model_still_waits_for_the_models_api():
+    import asyncio
+
+    from harnessx.models import ModelLimits
+
+    paths, release = collections.Counter(), asyncio.Event()
+    async with limits_client(paths, release) as client:
+        provider = AnthropicProvider(client=client)
+        asking = asyncio.ensure_future(provider.model_limits("claude-future-9"))
+        await asyncio.sleep(0.05)
+        assert not asking.done(), "no table entry to fall back on"
+        release.set()
+        assert await asking == ModelLimits(300_000, 40_000)
+
+
+@pytest.mark.asyncio
+async def test_closing_the_provider_stops_a_lookup_still_running():
+    import asyncio
+
+    paths, release = collections.Counter(), asyncio.Event()
+    async with limits_client(paths, release) as client:
+        provider = AnthropicProvider(client=client)
+        assert await provider.model_limits(MODEL) is None
+        [asking] = provider._asking.values()
+        await provider.aclose()
+        await asyncio.sleep(0)
+        assert asking.cancelled()
+

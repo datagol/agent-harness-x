@@ -13,7 +13,7 @@ from anthropic import AsyncAnthropic
 from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallDelta
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
-from ..models import ModelLimits
+from ..models import ModelLimits, lookup_model_limits
 from ..types import ToolChoice
 from .base import INVALID_ARGUMENTS, normalize_tool_choice, LLMProvider
 
@@ -177,6 +177,7 @@ class AnthropicProvider(LLMProvider):
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncAnthropic(max_retries=0)
         self._limits: dict[str, ModelLimits | None] = {}
+        self._asking: dict[str, Any] = {}  # model -> Models API lookup running beside the first calls
 
     async def model_limits(self, model: str) -> ModelLimits | None:
         """Ask the Models API: it reports ``max_input_tokens`` and ``max_tokens``
@@ -185,6 +186,12 @@ class AnthropicProvider(LLMProvider):
         Asked once per model. Any failure -- an older API, a proxy that does not
         serve ``/v1/models``, a client double in tests -- is remembered as "no
         answer", and the built-in table is used instead.
+
+        For a model the built-in table knows, the question no longer holds up
+        the first call: it took 260-320 ms, every run in a fresh process, and
+        was all of the framework overhead the benchmarks measured. The table
+        answers until the API does; later calls use the API's figures. A model
+        the table does not know still waits for the answer.
         """
         if model in self._limits:
             return self._limits[model]
@@ -196,20 +203,39 @@ class AnthropicProvider(LLMProvider):
         if shared_key is not None and shared_key in _MODEL_LIMITS:
             self._limits[model] = _MODEL_LIMITS[shared_key]
             return self._limits[model]
-        found: ModelLimits | None = None
-        try:
-            import asyncio
+        import asyncio
 
-            info = await asyncio.wait_for(self.client.models.retrieve(model), timeout=10)
-            window, output = getattr(info, "max_input_tokens", None), getattr(info, "max_tokens", None)
-            if type(window) is int and type(output) is int and window > 0 and output > 0:
-                found = ModelLimits(window, output)
-        except Exception:
-            found = None
+        asking = self._asking.get(model)
+        if asking is not None and asking.get_loop() is not asyncio.get_running_loop():
+            asking = None  # started on a loop that has since closed (a sync wrapper's)
+        if asking is None:
+            asking = self._asking[model] = asyncio.ensure_future(self._ask_models_api(model))
+        if not asking.done() and lookup_model_limits(model) is not None:
+            return None  # the table answers this call
+        found = await asking
+        self._asking.pop(model, None)
         self._limits[model] = found
         if found is not None and shared_key is not None:
             _MODEL_LIMITS[shared_key] = found
         return found
+
+    async def _ask_models_api(self, model: str) -> ModelLimits | None:
+        import asyncio
+
+        try:
+            info = await asyncio.wait_for(self.client.models.retrieve(model), timeout=10)
+        except Exception:
+            return None
+        window, output = getattr(info, "max_input_tokens", None), getattr(info, "max_tokens", None)
+        if type(window) is int and type(output) is int and window > 0 and output > 0:
+            return ModelLimits(window, output)
+        return None
+
+    async def aclose(self) -> None:
+        for asking in self._asking.values():
+            asking.cancel()
+        self._asking.clear()
+        await super().aclose()
 
     @staticmethod
     def clear_model_limits_cache() -> None:
