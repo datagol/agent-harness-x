@@ -165,8 +165,9 @@ async def test_parallel_specialists_ask_for_approval_one_at_a_time(monkeypatch):
         return True
 
     permissions = PermissionManager(PermissionLevel.ASK, approval_callback=approve)
-    child = lambda: Scripted([ProviderResponse(tool_calls=[ToolCall("x", "action", {})], stop_reason="tool_use"),
-                              ProviderResponse(text="reviewed")])
+    def child():
+        return Scripted([ProviderResponse(tool_calls=[ToolCall("x", "action", {})], stop_reason="tool_use"),
+                         ProviderResponse(text="reviewed")])
     worker = SubAgent("worker", "Does work", AgentConfig(planning=False), tools=[action])
     async with parent(monkeypatch, child, ["a", "b"], worker=worker, permissions=permissions) as agent:
         assert (await agent.run("go")).ok
@@ -188,8 +189,9 @@ async def test_serial_tools_never_overlap_across_parallel_specialists(monkeypatc
 
     tools = ToolRegistry()
     tools.register_tool(write_note, permission=PermissionLevel.ALLOW, concurrent=False)
-    child = lambda: Scripted([ProviderResponse(tool_calls=[ToolCall("w", "write_note", {})], stop_reason="tool_use"),
-                              ProviderResponse(text="ok")])
+    def child():
+        return Scripted([ProviderResponse(tool_calls=[ToolCall("w", "write_note", {})], stop_reason="tool_use"),
+                         ProviderResponse(text="ok")])
     worker = SubAgent("worker", "Does work", AgentConfig(planning=False), tools=tools)
     async with parent(monkeypatch, child, ["a", "b", "c"], worker=worker) as agent:
         assert (await asyncio.wait_for(agent.run("go"), 5)).ok
