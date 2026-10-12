@@ -19,6 +19,11 @@ Anthropic SDK, LangChain deepagents, CrewAI and pi ran the same tasks again.
   as the model left it, which also keeps a plan a session carries into its
   next run. The one reminder remains for a reply with no answer at all,
   the case where work may have been dropped.
+- **The planning guidance says when not to update the list.** Told to
+  "update it as each step finishes", the model spent a turn of its own on a
+  closing `write_todos` before answering in a third of the tool tasks. The
+  guidance and the tool description now say to update the list alongside the
+  tool calls that do the work and to answer, not update, when the work is done.
 - **Spilled tool results say "search" before "read on", and one read returns
   more.** The notice on a result of many lines named `offset=20, limit=200`
   as the way to continue, and a small model paged a batch of thirty source
