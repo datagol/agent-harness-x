@@ -61,9 +61,8 @@ WRITE_TODOS_SCHEMA: dict[str, Any] = {
 }
 
 WRITE_TODOS_DESCRIPTION = (
-    "Record the task list, replacing it entirely.\n\n"
-    "Use this for work with several distinct steps, and keep it current as you go. "
-    "Skip it for anything you can finish in one or two steps: a task list for trivial work is noise.\n\n"
+    "Plan multi-step work and track progress: the list of steps, replaced whole on every call.\n\n"
+    "Call it before starting any task with three or more steps, then again as each step finishes. "
     "Send the whole list every time, including items already completed. Keep exactly one item "
     "in_progress while you work on it; if you send more, the first is kept and the rest go back to pending."
 )
@@ -71,9 +70,8 @@ WRITE_TODOS_DESCRIPTION = (
 # Added to the system prompt while the built-in write_todos is installed. Static
 # text, so the cacheable prefix does not change as the list does.
 PLANNING_GUIDANCE = (
-    "Planning: when a task needs three or more distinct steps, call write_todos before starting, "
-    "with one item per step, and update it as each step finishes so exactly one item is in_progress. "
-    "Skip the list for work you can finish in one or two tool calls."
+    "Planning: when a task needs three or more steps, call write_todos before you start, with one "
+    "item per step, and update it as each step finishes so exactly one item is in_progress."
 )
 
 
