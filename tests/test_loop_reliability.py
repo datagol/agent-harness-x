@@ -1007,6 +1007,32 @@ async def test_the_system_prompt_does_not_change_as_the_list_does():
     assert len(provider.calls) == 4 and len(systems) == 1
 
 
+@pytest.mark.asyncio
+async def test_each_request_extends_the_last_one_while_a_list_is_kept():
+    """The reminder went onto the newest message only, so the message before it
+    changed on every turn and the whole conversation was written to the prompt
+    cache again: cache writes nearly tripled in the 2026-10-12 benchmark once
+    the model planned. Each copy now stays where it was first sent."""
+    plan = [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "pending"}]
+    ticked = [{"content": "a", "status": "completed"}, {"content": "b", "status": "in_progress"}]
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c2", "read_todos", {})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c3", "write_todos", {"todos": ticked})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c4", "read_todos", {})], stop_reason="tool_use"),
+        ProviderResponse(text="done for now"),
+        ProviderResponse(text="b is left for later"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+    requests = [call["messages"] for call in provider.calls]
+    for earlier, later in zip(requests[1:], requests[2:]):
+        assert later[: len(earlier)] == earlier, "an earlier message changed between requests"
+    newest = str(requests[-1][-1]["content"])
+    assert "1/2 complete" in newest, "the newest message carries the current list"
+    assert "0/2 complete" in str(requests[-1]), "earlier copies stay where they were sent"
+
+
 # ── a tool-heavy conversation can actually be condensed ─────────────────────
 
 

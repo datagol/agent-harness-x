@@ -493,10 +493,16 @@ async def command(agent, state, name, emit, *, record=None):
         )
         if state.get("provider_continuation") and messages != agent.memory.get_messages():
             raise ValueError("Request middleware cannot change a pending provider continuation")
-        messages = (messages if state.get("provider_continuation")
-                    else sanitize_history(with_task_reminder(agent, messages)))
+        reminders = state.get("task_reminders") or {}
+        if reminders.get("condensations") != state.get("condensations", 0):
+            reminders = {}  # the history was rewritten; earlier copies no longer line up
+        if not state.get("provider_continuation"):
+            messages, reminders = with_task_reminder(agent, messages, reminders)
+            messages = sanitize_history(messages)
+        reminders = {**reminders, "condensations": state.get("condensations", 0)}
         return {
             **await snapshot(agent),
+            "task_reminders": reminders,
             **({"final_answer": True} if final_answer else {}),
             "iterations": agent.guardrails.iteration_count,
             "request": wire(
@@ -1693,41 +1699,63 @@ def _as_blocks(content) -> list[dict]:
     return [b for b in content or [] if isinstance(b, dict)]
 
 
-def with_task_reminder(agent, messages: list[dict]) -> list[dict]:
-    """Append the current task list, when there is one.
+def _attach_reminder(message: dict, reminder: str) -> dict | None:
+    """``message`` with ``reminder`` appended, or None when it cannot carry text."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return {**message, "content": f"{content}\n\n{reminder}"}
+    if isinstance(content, list):
+        return {**message, "content": [*content, {"type": "text", "text": reminder}]}
+    return None
+
+
+def with_task_reminder(agent, messages: list[dict], sent: dict | None = None) -> tuple[list[dict], dict]:
+    """Append the current task list, when there is one, and keep earlier copies.
 
     At the tail rather than in the system prompt: the system prompt heads the
     cacheable prefix, so rewriting it every time a task is ticked off would
-    invalidate the prompt cache for the whole conversation. Appending leaves the
-    prefix untouched.
+    invalidate the prompt cache for the whole conversation.
 
     Rebuilt from the agent each turn, so the model always reads the current list
-    rather than whichever copy survived condensing.
+    rather than whichever copy survived condensing. Each copy also stays on the
+    message it was first sent with: dropping it from that message on the next
+    turn changed an earlier message, so every turn re-wrote the whole
+    conversation to the cache. ``sent`` records those copies (message index to
+    text, plus the condensation count they belong to) and the updated record
+    is returned for the run state.
     """
+    sent = dict(sent or {})
+    copies = {int(k): v for k, v in (sent.get("at") or {}).items() if int(k) < len(messages)}
     todos = getattr(agent, "todos", None)
-    if not todos:
-        return messages
-    from .builtin.planning import render
+    reminder = ""
+    if todos:
+        from .builtin.planning import render
 
-    reminder = render(todos)
-    if not reminder:
-        return messages
-    # Merge into the last message when it is already user-role, rather than
-    # appending a second one. A tool-result message is user-role too, so
-    # appending produced two consecutive user turns on every agentic turn.
-    # Anthropic tolerates that; other providers are stricter, and a declared
-    # fallback can be any of them.
-    if messages and messages[-1].get("role") == "user":
-        last = messages[-1]
-        content = last.get("content")
-        if isinstance(content, str):
-            merged = {**last, "content": f"{content}\n\n{reminder}"}
-        elif isinstance(content, list):
-            merged = {**last, "content": [*content, {"type": "text", "text": reminder}]}
+        reminder = render(todos)
+    out = list(messages)
+    for index, text in sorted(copies.items()):
+        if index == len(out) - 1:
+            continue  # the newest message takes the current list below
+        attached = _attach_reminder(out[index], text) if out[index].get("role") == "user" else None
+        if attached is None:
+            copies.pop(index)
         else:
-            return [*messages, {"role": "user", "content": reminder}]
-        return [*messages[:-1], merged]
-    return [*messages, {"role": "user", "content": reminder}]
+            out[index] = attached
+    last = len(out) - 1
+    copies.pop(last, None)
+    if reminder:
+        # Merge into the last message when it is already user-role, rather than
+        # appending a second one. A tool-result message is user-role too, so
+        # appending produced two consecutive user turns on every agentic turn.
+        # Anthropic tolerates that; other providers are stricter, and a declared
+        # fallback can be any of them.
+        attached = _attach_reminder(out[last], reminder) if out and out[last].get("role") == "user" else None
+        if attached is not None:
+            out[last] = attached
+            copies[last] = reminder
+        else:
+            out.append({"role": "user", "content": reminder})
+    return out, {**sent, "at": {str(k): v for k, v in copies.items()}}
 
 
 def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:
