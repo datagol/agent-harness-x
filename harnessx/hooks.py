@@ -105,8 +105,9 @@ class RecoveryData(TypedDict):
       the call could not be identified; the reply was asked for again, once.
     * ``iteration_limit`` -- the run reached ``max_iterations``; the model was
       asked for a final answer without tools instead of the run failing.
-    * ``unfinished_plan`` -- the model was finishing with its task list still
-      open; it was asked once to mark it done or say what is left.
+    * ``unfinished_plan`` -- the model ended with no answer and its task list
+      still open; it was asked once to finish or say what is left. (A run that
+      ends with an answer keeps the list as the model left it; no model call.)
     """
 
     reason: Literal[

@@ -378,10 +378,17 @@ class ConversationMemory:
             if shown < len(content):
                 preview += "\n... [preview truncated]"
                 hidden = f"Not shown: characters {shown + 1:,} to {len(content):,}."
-                follow = f"{call}, char_offset={shown}, max_chars={window})"
+                follow = (
+                    f'{call}, pattern="<regex>") finds passages; '
+                    f"{call}, char_offset={shown}, max_chars={window}) reads on from the preview"
+                )
             else:
                 hidden, follow = "", f"{call})"
         else:
+            # Lines (source, logs, listings): the preview is the head and tail.
+            # Searching is named first. A model paging a 30-file batch 200 lines
+            # at a time read for five turns and still missed what it needed,
+            # where one pattern= read, or grep, would have found it (2026-10-12).
             head = "\n".join(lines[:n])
             tail = "\n".join(lines[-n:])
             omitted = total_lines - (n * 2)
@@ -389,7 +396,10 @@ class ConversationMemory:
             if len(preview) > max_preview_chars:
                 preview = preview[:max_preview_chars] + "\n... [preview truncated]"
             hidden = f"Not shown: lines {n + 1:,} to {total_lines - n:,} of {total_lines:,}."
-            follow = f"{call}, offset={n}, limit=200)"
+            follow = (
+                f'{call}, pattern="<regex>") finds the lines you need; '
+                f"{call}, offset={n}) reads on from the preview, up to {window:,} characters a read"
+            )
 
         logger.info(
             "Evicted tool result %s: %d chars / %d lines -> preview (%d chars). Saved to %s",
@@ -397,8 +407,8 @@ class ConversationMemory:
         )
         unit = "line" if total_lines == 1 else "lines"
         guide = (
-            f"[{hidden + ' ' if hidden else ''}Read the rest before searching again for the same "
-            f"information: {follow}. read_file cannot open this location.]"
+            f"[{hidden + ' ' if hidden else ''}Search it or read the rest before calling the tool again "
+            f"for the same information: {follow}. read_file cannot open this location.]"
         )
         return (
             f"[Tool result too large ({total_lines:,} {unit}, {len(content):,} chars). "
@@ -425,22 +435,24 @@ class ConversationMemory:
         return path
 
     def read_evicted(
-        self, tool_use_id: str, offset: int = 0, limit: int = 200, *, max_chars: int = 6_000,
+        self, tool_use_id: str, offset: int = 0, limit: int = 2_000, *, max_chars: int = 0,
         char_offset: int = 0, pattern: str = "",
     ) -> str:
         """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
 
         A section is also capped at ``max_chars`` characters, so a single very
-        long line (minified JSON, a CSV row) is paged with ``char_offset``. With
-        ``pattern`` it returns the passages that match instead. Every reply stays
-        under ``max_result_chars``, so a read is never spilled itself. The
-        result is found by the tool-use id of the call that produced it, so it
-        survives session save and load, where the file moves.
+        long line (minified JSON, a CSV row) is paged with ``char_offset``. The
+        default (0) is the most one read may return: just under
+        ``max_result_chars``, so a result that spilled by a little comes back
+        whole in one read, and a read is never spilled itself. With ``pattern``
+        it returns the passages that match instead. The result is found by the
+        tool-use id of the call that produced it, so it survives session save
+        and load, where the file moves.
         """
         path = self._evicted_path(tool_use_id)
         offset = max(int(offset), 0)
         limit = max(min(int(limit), 2_000), 1)
-        max_chars = max(min(int(max_chars), 50_000, self._read_window()), 200)
+        max_chars = self._read_window() if int(max_chars) <= 0 else max(min(int(max_chars), 50_000, self._read_window()), 200)
         char_offset = max(int(char_offset), 0)
         with open(path, encoding="utf-8", errors="replace") as handle:
             full = handle.read()

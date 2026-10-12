@@ -996,6 +996,11 @@ async def plan_recovery(agent, state, response, budget: int) -> dict:
     * Cut off mid-text: the model is asked to continue, with double the budget.
       The fragments are joined into the run's output.
     * Said nothing at all: nudged to go on, a bounded number of times.
+    * Said nothing at all with its own task list still open: reminded once to
+      finish or say what is left. An *answer* with the list open ends the run
+      as it stands; asking the model to settle the list (0.9.0) cost two calls
+      on every planned run in the 2026-10-12 benchmark, and the list may be a
+      plan the session carries into its next run.
     """
     stop = getattr(response.stop_reason, "value", response.stop_reason)
     limits = agent.config.limits
@@ -1038,18 +1043,16 @@ async def plan_recovery(agent, state, response, budget: int) -> dict:
     if (
         stop in ("end_turn", "stop_sequence") and not response.tool_calls
         and not state.get("plan_reminded") and unfinished_plan(agent)
+        and not (response.text or "").strip() and not state.get("partial_output", "").strip()
     ):
-        # The run is ending with its own task list still open: either the work
-        # is done and the list is stale -- every viewer of the plan is told
-        # "0/1 done" about finished work -- or something was dropped. Once per
-        # run, ask the model to settle it. Its reply so far is kept.
+        # No answer and an open list: something may have been dropped. Once per
+        # run, ask the model to finish it or say what is left. A reply that
+        # *is* an answer ends the run with the list as the model left it: the
+        # list may be a plan the session carries into its next run, and asking
+        # the model to tick it cost two calls per run for nothing (0.9.0).
         agent.memory.add_user_message(plan_reminder(agent))
         await emit_hook(agent, HookEvent.RECOVERY, reason="unfinished_plan", attempt=1, reply_budget=budget or None)
-        text = response.text or ""
-        return {
-            "recovery": "unfinished_plan", "plan_reminded": True,
-            "partial_output": state.get("partial_output", "") + (text + "\n\n" if text.strip() else ""),
-        }
+        return {"recovery": "unfinished_plan", "plan_reminded": True}
     if (
         stop not in ("safety", "refusal") and not response.tool_calls
         and not (response.text or "").strip() and not state.get("partial_output", "").strip()

@@ -957,11 +957,12 @@ async def test_read_tool_result_pages_a_single_long_line_by_characters():
         assert (await agent.run("go")).ok
         first = await agent.tools.execute(ToolCall("r1", "read_tool_result", {"result_id": "c1"}))
         header, body = first.content.split("\n", 1)
-        assert len(body) == 6000 and "characters 1-6000 of" in header and "char_offset=6000" in header
-        nxt = await agent.tools.execute(ToolCall("r2", "read_tool_result", {"result_id": "c1", "char_offset": 6000, "max_chars": 20000}))
+        # The default read is the most a reply may hold: max_result_chars - 300.
+        assert len(body) == 9700 and "characters 1-9700 of" in header and "char_offset=9700" in header
+        nxt = await agent.tools.execute(ToolCall("r2", "read_tool_result", {"result_id": "c1", "char_offset": 9700, "max_chars": 20000}))
         header2, body2 = nxt.content.split("\n", 1)
         # A read is capped below max_result_chars, so it is never spilled itself.
-        assert body2 == blob[6000:15700] and "char_offset=15700" in header2
+        assert body2 == blob[9700:19400] and "char_offset=19400" in header2
         assert len(nxt.content) < 10_000
 
 
@@ -1021,7 +1022,20 @@ def test_many_lines_are_read_on_after_the_head_of_the_preview():
     text = "\n".join(f"row {i}" for i in range(3000))
     memory, notice = _spill(text, max_result_chars=1_000)
     assert "Not shown: lines 21 to 2,980 of 3,000." in notice
-    assert 'read_tool_result(result_id="t1", offset=20, limit=200)' in notice
+    assert 'read_tool_result(result_id="t1", offset=20)' in notice
+    # Searching is offered before paging: a model that pages a batch of source
+    # files 200 lines at a time reads for turns and still misses the line it needs.
+    assert notice.index('pattern="<regex>"') < notice.index("offset=20)")
+
+
+def test_a_result_that_spilled_by_a_little_comes_back_whole_in_one_default_read():
+    text = "\n".join(f"line {i}: " + "x" * 40 for i in range(245))  # ~12.4k chars, just over a 12k limit; ~11.4k after the preview
+    memory, notice = _spill(text, max_result_chars=12_000)
+    assert "Tool result too large" in notice
+    reply = memory.read_evicted("t1", offset=20)
+    header, body = reply.split("\n", 1)
+    assert body == "\n".join(text.splitlines()[20:]), "one read returns everything after the preview"
+    assert "[next:" not in header and len(reply) < 12_000
 
 
 def test_pattern_finds_passages_only_the_hidden_part_holds():

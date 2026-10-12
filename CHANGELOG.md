@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Two fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw
+Anthropic SDK, LangChain deepagents, CrewAI and pi ran the same tasks again.
+
+### Changed
+
+- **A run that answers with its task list open is no longer sent back to
+  tick it.** 0.9.0 asked the model to settle the list, and on every planned
+  run the model spent two more calls: one `write_todos` and a second copy of
+  the answer (a six-step tool task took 7 calls against the raw loop's 5; a
+  two-call JSON task took 4). The run now ends with the answer and the list
+  as the model left it, which also keeps a plan a session carries into its
+  next run. The one reminder remains for a reply with no answer at all,
+  the case where work may have been dropped.
+- **Spilled tool results say "search" before "read on", and one read returns
+  more.** The notice on a result of many lines named `offset=20, limit=200`
+  as the way to continue, and a small model paged a batch of thirty source
+  files five turns long and still missed the import lines it needed. The
+  notice now offers `read_tool_result(pattern=...)` first and reading on
+  second. A read's default size is no longer 6,000 characters but the most a
+  reply may hold (just under `max_result_chars`, 11,700 with the defaults),
+  so a result that spilled by a little comes back whole in one read. The
+  `limit` default rises from 200 to 2,000 lines; `max_chars=0` means that
+  default. Explicit values behave as before.
+
+
 ## [0.9.0] - 2026-10-12
 
 Fixes for the faults that two benchmarks found on 2026-10-10, when HarnessX,
