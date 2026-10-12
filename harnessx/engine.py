@@ -617,6 +617,7 @@ async def command(agent, state, name, emit, *, record=None):
                         elif streaming and not buffered and chunk.kind in (
                             "text_delta",
                             "thinking_delta",
+                            "tool_call_delta",
                         ):
                             delivered = True
                             await event(E(chunk.kind), chunk.data)
@@ -1366,7 +1367,7 @@ async def drive(agent, state, emit, *, commit=None, control=None):
             async def command_emit(event):
                 # Deltas and "still working" notices go out as they happen; a
                 # notice held until the call finishes says nothing.
-                if event.type in (E.TEXT_DELTA, E.THINKING_DELTA, E.WAITING):
+                if event.type in (E.TEXT_DELTA, E.THINKING_DELTA, E.TOOL_CALL_DELTA, E.WAITING):
                     await persist([event])
                 else:
                     buffered_events.append(event)

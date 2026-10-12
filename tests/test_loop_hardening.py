@@ -19,6 +19,8 @@ from harnessx import (
 )
 from harnessx import engine, models
 from harnessx.errors import ConfigurationError
+from harnessx.execution import RunEventType
+from harnessx.types import ToolCallDelta
 from harnessx.engine import UNANSWERED_CALL_NOTICE, sanitize_history
 from harnessx.memory import CLEARED_TOOL_RESULT, ConversationMemory
 from harnessx.models import register_model_limits
@@ -698,3 +700,49 @@ async def test_the_plan_reminder_is_sent_once_only():
     async with agent:
         result = await agent.run("go")
     assert len(provider.calls) == 3 and result.output == "answer\n\nStep is left for you."
+
+
+def test_tool_call_delta_events_round_trip_and_validate():
+    from harnessx.execution import RunEvent, RunEventType
+    from harnessx.types import ToolCallDelta
+
+    event = RunEvent(RunEventType.TOOL_CALL_DELTA, ToolCallDelta("t1", "search", '{"q":'))
+    again = RunEvent.from_dict(event.to_dict() if hasattr(event, "to_dict") else {"type": "tool_call_delta", "data": {"id": "t1", "name": "search", "partial_json": '{"q":'}})
+    assert again.data == ToolCallDelta("t1", "search", '{"q":')
+    with pytest.raises(TypeError):
+        RunEvent(RunEventType.TOOL_CALL_DELTA, "not a delta")
+
+
+class DraftsAToolCall(Scripted):
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta("t1", "t"))
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta("t1", "t", "{}"))
+            yield StreamChunk(kind="response", data=ProviderResponse(tool_calls=[ToolCall("t1", "t", {})], stop_reason="tool_use"))
+        else:
+            yield StreamChunk(kind="text_delta", data="done")
+            yield StreamChunk(kind="response", data=ProviderResponse(text="done"))
+
+
+@pytest.mark.asyncio
+async def test_tool_call_deltas_are_held_back_when_a_middleware_buffers_the_reply():
+    from harnessx.hooks import Middleware
+    from harnessx.types import ToolCallDelta  # noqa: F401
+
+    class Rewrites(Middleware):
+        async def after_llm_call(self, response):
+            return response
+
+    for middleware, expected in (([], 2), ([Rewrites()], 0)):
+        provider = DraftsAToolCall([])
+        agent = _agent(provider)
+        agent.tools.register_tool(lambda: "ok", name="t", permission=PermissionLevel.ALLOW)
+        for m in middleware:
+            agent.middleware.add(m)
+        async with agent:
+            async with agent.run_stream("go") as stream:
+                events = [e async for e in stream]
+                assert (await stream.result()).ok
+        assert sum(e.type is RunEventType.TOOL_CALL_DELTA for e in events) == expected
+        assert "".join(e.data for e in events if e.type is RunEventType.TEXT_DELTA) in ("done", "")

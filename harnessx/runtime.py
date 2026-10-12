@@ -299,7 +299,7 @@ class AgentRuntime:
             if lost:
                 raise lost
             if not records and events and all(
-                e.type in (RunEventType.TEXT_DELTA, RunEventType.THINKING_DELTA)
+                e.type in (RunEventType.TEXT_DELTA, RunEventType.THINKING_DELTA, RunEventType.TOOL_CALL_DELTA)
                 for e in events
             ):
                 await self.backend.append_events(state, events, lease)

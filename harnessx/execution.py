@@ -11,7 +11,7 @@ import math
 import uuid
 
 from .errors import HarnessError, RunAwaitingInput, RunCancelled, RunError, RunFailed, RunLimitReached, RunRefused, RunTruncated
-from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolResult, ToolRetry
+from .types import DEFAULT_TIMEOUT_SECONDS, ReplayPolicy as ReplayPolicy, TokenUsage, ToolCall, ToolCallDelta, ToolResult, ToolRetry
 
 
 class RunStatus(str, Enum):
@@ -27,6 +27,7 @@ class RunEventType(str, Enum):
     TEXT_DELTA = "text_delta"
     TEXT_COMPLETE = "text_complete"
     THINKING_DELTA = "thinking_delta"
+    TOOL_CALL_DELTA = "tool_call_delta"  # a tool call as the model writes it: ToolCallDelta
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_COMPLETE = "tool_call_complete"
     TOOL_RESULT = "tool_result"
@@ -219,7 +220,7 @@ class RunResult:
 @dataclass
 class RunEvent:
     type: RunEventType
-    data: str | ToolCall | ToolResult | RunResult | PendingTool | AttemptReset | EventGap
+    data: str | ToolCall | ToolCallDelta | ToolResult | RunResult | PendingTool | AttemptReset | EventGap
     session_id: str = ""
     run_id: str = ""
     step_id: str = ""
@@ -233,6 +234,8 @@ class RunEvent:
             valid = isinstance(self.data, str)
         elif self.type in (RunEventType.TOOL_CALL_START, RunEventType.TOOL_CALL_COMPLETE):
             valid = isinstance(self.data, ToolCall)
+        elif self.type == RunEventType.TOOL_CALL_DELTA:
+            valid = isinstance(self.data, ToolCallDelta)
         elif self.type == RunEventType.TOOL_RESULT:
             valid = isinstance(self.data, ToolResult)
         elif self.type == RunEventType.RUN_RESULT:
@@ -261,6 +264,8 @@ class RunEvent:
             RunEventType.TOOL_CALL_COMPLETE,
         ):
             data["data"] = ToolCall(**data["data"])
+        elif data["type"] == RunEventType.TOOL_CALL_DELTA:
+            data["data"] = ToolCallDelta(**data["data"])
         elif data["type"] == RunEventType.TOOL_RESULT:
             data["data"] = ToolResult(**data["data"])
         elif data["type"] == RunEventType.RUN_RESULT:

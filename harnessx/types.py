@@ -314,14 +314,31 @@ class ProviderResponse:
         return [SimpleNamespace(**b) if set(b) <= plain else b for b in blocks]
 
 
+@dataclass(frozen=True)
+class ToolCallDelta:
+    """A piece of a tool call as the model writes it (``RunEventType.TOOL_CALL_DELTA``).
+
+    The first delta for a call has an empty ``partial_json``: it says which tool
+    the model has started calling. Fragments of the JSON arguments follow; they
+    are not valid JSON on their own. The complete call arrives with
+    ``TOOL_CALL_START`` when it is dispatched. Like text deltas, these are
+    provisional: discard them on ``ATTEMPT_RESET``.
+    """
+
+    id: str
+    name: str
+    partial_json: str = ""
+
+
 @dataclass
 class StreamChunk:
     """A streaming chunk emitted by an LLMProvider."""
 
-    # "text_delta", "thinking_delta", "response", or "progress": the provider
-    # received something that is not visible text -- a streamed tool argument, a
-    # signature, a block boundary. It carries no data; it tells the engine the
-    # stream is alive, so a long tool call is not mistaken for a stall.
+    # "text_delta", "thinking_delta", "tool_call_delta" (a ToolCallDelta),
+    # "response", or "progress": the provider received something that is not
+    # visible output -- a signature, a block boundary. It carries no data; it
+    # tells the engine the stream is alive, so a long tool call is not mistaken
+    # for a stall.
     kind: str
     data: Any = None
 

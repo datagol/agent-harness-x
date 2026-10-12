@@ -127,7 +127,7 @@ class AgentActivities:
         heart = asyncio.create_task(heartbeat_loop(agent, state)) if modern else None
 
         async def emit(event):
-            if event.type in (RunEventType.TEXT_DELTA, RunEventType.THINKING_DELTA):
+            if event.type in (RunEventType.TEXT_DELTA, RunEventType.THINKING_DELTA, RunEventType.TOOL_CALL_DELTA):
                 event.attempt_id = str(activity.info().attempt)
                 event.event_id = f"{state['run_id']}:{state['iterations']}:{activity.info().activity_id}:{activity.info().attempt}:{len(buffered)}"
                 buffered.append(None)

@@ -538,3 +538,58 @@ async def test_the_model_is_asked_to_resend_a_corrupted_tool_call(tmp_path, stre
     answered = [b for b in requests[1]["messages"][-1]["content"] if b.get("type") == "tool_result"]
     assert answered and answered[0]["tool_use_id"] == "tool_write" and answered[0].get("is_error")
     assert "not valid JSON" in json.dumps(answered[0]["content"])
+
+
+# ── tool calls stream as the model writes them ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_streams_from_the_provider_as_it_is_written():
+    from types import SimpleNamespace as NS
+
+    from harnessx.providers.anthropic import _chunks
+    from harnessx.types import ToolCallDelta
+
+    class Events:
+        def __init__(self, events):
+            self.events = events
+
+        def __aiter__(self):
+            async def gen():
+                for e in self.events:
+                    yield e
+            return gen()
+
+    events = Events([
+        NS(type="content_block_start", index=1, content_block=NS(type="tool_use", id="t1", name="search")),
+        NS(type="content_block_delta", index=1, delta=NS(type="input_json_delta", partial_json='{"q":')),
+        NS(type="input_json", partial_json='{"q":'),
+        NS(type="content_block_delta", index=1, delta=NS(type="input_json_delta", partial_json='"x"}')),
+        NS(type="content_block_stop", index=1),
+        NS(type="text", text="hi"),
+    ])
+    chunks = [c async for c in _chunks(events)]
+    assert [c.kind for c in chunks] == [
+        "tool_call_delta", "tool_call_delta", "progress", "tool_call_delta", "progress", "text_delta"]
+    assert chunks[0].data == ToolCallDelta("t1", "search")
+    assert "".join(c.data.partial_json for c in chunks if c.kind == "tool_call_delta") == '{"q":"x"}'
+
+
+@pytest.mark.asyncio
+async def test_run_stream_shows_the_tool_call_before_it_is_dispatched(tmp_path):
+    requests = []
+    responses = [tool_message(), message([{"type": "text", "text": "Created fibonacci.py."}])]
+    async with client_for(responses, requests) as client:
+        async with Agent(provider=AnthropicProvider(client=client)) as agent:
+            register_filesystem_tools(agent.tools, base_path=str(tmp_path))
+            agent.permissions.set_permission("write_file", PermissionLevel.ALLOW)
+            async with agent.run_stream("Write a Fibonacci program") as stream:
+                events = [event async for event in stream]
+                result = await stream.result()
+    assert result.status == "completed"
+    kinds = [e.type for e in events]
+    first_delta = kinds.index(RunEventType.TOOL_CALL_DELTA)
+    assert first_delta < kinds.index(RunEventType.TOOL_CALL_START)
+    deltas = [e.data for e in events if e.type is RunEventType.TOOL_CALL_DELTA]
+    assert deltas[0].name == "write_file" and deltas[0].partial_json == ""
+    assert json.loads("".join(d.partial_json for d in deltas)) == {"path": "fibonacci.py", "content": PROGRAM}

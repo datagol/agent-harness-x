@@ -75,6 +75,7 @@ from .types import (
     StreamChunk,
     TokenUsage,
     ToolCall,
+    ToolCallDelta,
     ToolDefinition,
     ToolPolicy,
     ToolResult,
@@ -91,7 +92,7 @@ __all__ = [
     "LLMProvider", "AnthropicProvider", "FallbackProvider", "Fallback", "make_provider", "register_provider",
     "ModelLimits", "register_model_limits",
     # Tools
-    "ToolRegistry", "ToolDefinition", "ToolCall", "ToolResult", "ToolNotFoundError", "PermissionLevel",
+    "ToolRegistry", "ToolDefinition", "ToolCall", "ToolCallDelta", "ToolResult", "ToolNotFoundError", "PermissionLevel",
     "ReplayPolicy", "ToolExecutionContext", "ToolApprovalRequired", "current_tool_context", "normalize_tool_registry",
     # Runs, results, streaming
     "RunEvent", "RunEventType", "RunResult", "RunStatus", "RunStream", "RunFailure", "PendingTool", "TokenUsage",

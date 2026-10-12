@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
-from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallDelta
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..models import ModelLimits
@@ -312,7 +312,9 @@ class AnthropicProvider(LLMProvider):
             async with stream_ctx as stream:
                 try:
                     async for chunk in _chunks(stream):
-                        delivered = delivered or chunk.kind == "text_delta"
+                        # A drafted tool call counts as output too: restarting the
+                        # stream would show it twice.
+                        delivered = delivered or chunk.kind in ("text_delta", "tool_call_delta")
                         yield chunk
                     final_resp = await stream.get_final_message()
                 except ValueError as exc:
@@ -412,12 +414,26 @@ async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:
         async for text in stream.text_stream:
             yield StreamChunk(kind="text_delta", data=text)
         return
+    open_calls: dict[int, tuple[str, str]] = {}  # block index -> (call id, tool name)
     async for event in stream:
         kind = getattr(event, "type", None)
         if kind == "text" and getattr(event, "text", ""):
             yield StreamChunk(kind="text_delta", data=event.text)
         elif kind == "thinking" and getattr(event, "thinking", ""):
             yield StreamChunk(kind="thinking_delta", data=event.thinking)
+        elif kind == "content_block_start" and getattr(getattr(event, "content_block", None), "type", None) == "tool_use":
+            # The model has started a tool call: say which, before its arguments.
+            block = event.content_block
+            open_calls[event.index] = (block.id, block.name)
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(block.id, block.name))
+        elif (
+            kind == "content_block_delta"
+            and getattr(getattr(event, "delta", None), "type", None) == "input_json_delta"
+            and getattr(event, "index", None) in open_calls
+            and event.delta.partial_json
+        ):
+            call_id, name = open_calls[event.index]
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(call_id, name, event.delta.partial_json))
         else:
             yield StreamChunk(kind="progress")
 
