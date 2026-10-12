@@ -126,6 +126,8 @@ class GuardrailsEngine:
         max_cost_dollars: float | None = None,
         input_cost_per_m: float | None = None,
         output_cost_per_m: float | None = None,
+        cache_read_cost_multiplier: float = 0.1,
+        cache_write_cost_multiplier: float = 1.25,
     ) -> None:
         self.usage_observer: Callable[..., None] | None = None
         self.parent_cost_check: Callable[[], None] | None = None
@@ -133,6 +135,8 @@ class GuardrailsEngine:
         self.max_cost_dollars = max_cost_dollars
         self.input_cost_per_m = input_cost_per_m if input_cost_per_m is not None else self.INPUT_COST_PER_M
         self.output_cost_per_m = output_cost_per_m if output_cost_per_m is not None else self.OUTPUT_COST_PER_M
+        self.cache_read_cost_multiplier = cache_read_cost_multiplier
+        self.cache_write_cost_multiplier = cache_write_cost_multiplier
         self._iteration_count = 0
         self._lifetime_iterations = 0
         self._total_usage = TokenUsage()
@@ -155,7 +159,16 @@ class GuardrailsEngine:
             )
 
     def cost_of(self, usage: Any) -> float:
-        return (usage.input_tokens * self.input_cost_per_m + usage.output_tokens * self.output_cost_per_m) / 1_000_000
+        """Dollars for one response's usage, pricing cached prompt tokens at their own rate.
+
+        ``input_tokens`` counts every prompt token (see TokenUsage); the cache
+        counters are the parts of it read from or written to the cache.
+        """
+        read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        written = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        uncached = max(int(usage.input_tokens or 0) - read - written, 0)
+        prompt = uncached + read * self.cache_read_cost_multiplier + written * self.cache_write_cost_multiplier
+        return (prompt * self.input_cost_per_m + (usage.output_tokens or 0) * self.output_cost_per_m) / 1_000_000
 
     def track_usage(self, usage: Any, *, cost: float | None = None) -> None:
         """Accumulate token usage from an API response."""

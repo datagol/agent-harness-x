@@ -105,6 +105,8 @@ class Agent:
         self.guardrails = GuardrailsEngine(
             max_iterations=limits.max_iterations, max_cost_dollars=limits.max_cost_dollars,
             input_cost_per_m=limits.input_cost_per_m, output_cost_per_m=limits.output_cost_per_m,
+            cache_read_cost_multiplier=limits.cache_read_cost_multiplier,
+            cache_write_cost_multiplier=limits.cache_write_cost_multiplier,
         )
         self._session_id = str(uuid.uuid4())
         self.prompt_providers: list[Any] = []

@@ -9,6 +9,17 @@ All notable changes to this project are documented here. The format follows
 Two fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw
 Anthropic SDK, LangChain deepagents, CrewAI and pi ran the same tasks again.
 
+### Fixed
+
+- **The cost estimate priced cached prompt tokens at the full input rate.**
+  `TokenUsage.input_tokens` counts every prompt token, cached or not, and
+  `cost_of` multiplied all of it by `input_cost_per_m`. On a long-context run
+  that read 120 files the estimate reached $1.75 while the wire charged
+  $0.38, and `max_cost_dollars` stopped the run. Cache reads now cost
+  `Limits.cache_read_cost_multiplier` (0.1, Anthropic's rate) and cache
+  writes `cache_write_cost_multiplier` (1.25) of the input price; set 0.5
+  and 1.0 for OpenAI. A run with no cache activity is priced as before.
+
 ### Changed
 
 - **A run that answers with its task list open is no longer sent back to

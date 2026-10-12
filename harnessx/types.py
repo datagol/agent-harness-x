@@ -403,6 +403,13 @@ class Limits:
     max_cost_dollars: float | None = None
     input_cost_per_m: float | None = None
     output_cost_per_m: float | None = None
+    # What a cached prompt token costs relative to an uncached one. Anthropic
+    # bills a cache read at a tenth and a cache write at 1.25x; without these the
+    # estimate priced a long-context run at 4.6x what the wire charged and
+    # stopped it on max_cost_dollars (2026-10-12 benchmark). OpenAI bills cached
+    # input at half and has no write premium: set 0.5 and 1.0 there.
+    cache_read_cost_multiplier: float = 0.1
+    cache_write_cost_multiplier: float = 1.25
     loop_guard: LoopGuard = field(default_factory=lambda: LoopGuard())
     # How many times one run may recover from a reply cut off at its token
     # budget -- re-asking for a truncated tool call, or continuing truncated
