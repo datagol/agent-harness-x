@@ -887,7 +887,8 @@ Optional fields:
 - `timeout_seconds`: whole-task timeout, default 300 seconds, including child model and tool calls.
 - `concurrent`: default `True`. Specialists asked for in the same turn run at
   the same time, up to `AgentConfig.max_parallel_subagents` (default 4).
-  `False` makes this one wait for the others and run alone.
+  With `False`, calls to this specialist run one at a time, taking turns with
+  other serial calls; concurrent specialists still run beside it.
 
 The SDK exposes `delegate_<name>(task: str)` to the model internally. The schema
 and description tell the orchestrator how to request a specialist. Do not also
