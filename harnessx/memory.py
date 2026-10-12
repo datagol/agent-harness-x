@@ -41,6 +41,109 @@ DEFAULT_PREVIEW_LINES = 20         # head and tail lines in preview
 CLEARED_TOOL_RESULT = "[Old tool result cleared to make room. Run the tool again if you need it.]"
 
 
+_LABEL_KEYS = ("title", "name", "id", "key", "path")
+_LINK_KEYS = ("url", "link", "href", "uri", "source")
+_TEXT_KEYS = ("content", "text", "snippet", "summary", "description", "body", "message")
+
+
+def _json_records_preview(content: str, *, budget: int) -> tuple[str, int] | None:
+    """A record-by-record preview of JSON holding a list of objects, or None.
+
+    Search APIs, database tools and MCP servers return one long line of JSON
+    whose records are the point; the first characters of it show one record's
+    opening and nothing about the rest. This lists every record that fits the
+    budget by its title or id, its URL or path, and the start of its text.
+    """
+    stripped = content.lstrip()
+    if not stripped or stripped[0] not in "[{" or len(content) > 5_000_000:
+        return None
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return None
+
+    def is_records(value: Any) -> bool:
+        return isinstance(value, list) and bool(value) and all(isinstance(item, dict) for item in value[:50])
+
+    records: list[dict[str, Any]] | None = None
+    where, others = "the top-level list", {}
+    if is_records(data):
+        records = data
+    elif isinstance(data, dict):
+        best: tuple[str, list[dict[str, Any]], int] | None = None
+        for key, value in data.items():
+            if is_records(value):
+                size = len(json.dumps(value, default=str))
+                if best is None or size > best[2]:
+                    best = (key, value, size)
+        if best is not None:
+            where, records = f'"{best[0]}"', best[1]
+        others = {
+            k: v for k, v in data.items()
+            if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip()
+        }
+    if not records:
+        return None
+    lines = [f"JSON with {len(records)} records in {where}."]
+    if others:
+        shown = ", ".join(f"{k}: {str(v)[:80]}" for k, v in list(others.items())[:3])
+        lines.append(f"Other fields: {shown}")
+    per_record = max(80, min(200, (budget - 300) // len(records) - 80))
+    for index, record in enumerate(records, 1):
+        label = next((str(record[k]) for k in _LABEL_KEYS if record.get(k) not in (None, "")), "")
+        link = next((str(record[k]) for k in _LINK_KEYS if isinstance(record.get(k), str) and record.get(k)), "")
+        body = next((record[k] for k in _TEXT_KEYS if isinstance(record.get(k), str) and record[k].strip()), None)
+        if body is None:
+            body = json.dumps(record, default=str)
+        body = " ".join(body.split())
+        heading = " | ".join(part[:120] for part in (label, link) if part) or f"record {index}"
+        entry = f"{index}. {heading}\n   {body[:per_record]}{'...' if len(body) > per_record else ''}"
+        if len("\n".join(lines)) + len(entry) > budget:
+            lines.append(f"... and {len(records) - index + 1} more records")
+            break
+        lines.append(entry)
+    return "\n".join(lines), len(records)
+
+
+def _find_passages(result_id: str, text: str, pattern: str, max_chars: int) -> str:
+    """The passages of an evicted result that match ``pattern``, with where each sits."""
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        regex = re.compile(re.escape(pattern), re.IGNORECASE)
+    matches = []
+    for match in regex.finditer(text):
+        if match.end() > match.start():
+            matches.append(match)
+        if len(matches) >= 500:
+            break
+    header = f"[{result_id}: {len(matches)}{'+' if len(matches) >= 500 else ''} matches for {pattern!r} in {len(text):,} characters]"
+    if not matches:
+        return header + "\nNo matches. Try other words, or read the result in sections."
+    one_line = "\n" not in text
+    parts: list[str] = []
+    used = len(header)
+    last_end = -1
+    context = 200
+    for shown, match in enumerate(matches):
+        if match.start() < last_end:
+            continue
+        start, end = max(0, match.start() - context), min(len(text), match.end() + context)
+        if one_line:
+            where = f"character {match.start():,} (continue with char_offset={start})"
+        else:
+            line = text.count("\n", 0, match.start())
+            where = f"line {line + 1:,} (continue with offset={line})"
+        piece = f"--- at {where}:\n" + " ".join(text[start:end].split())
+        if used + len(piece) > max_chars:
+            parts.append(f"... {len(matches) - shown} more matches; narrow the pattern or read on from a position above")
+            break
+        parts.append(piece)
+        used += len(piece)
+        last_end = end
+    return header + "\n" + "\n".join(parts)
+
+
 def _has_substance(blocks: list[dict[str, Any]]) -> bool:
     """True when an assistant turn says something: non-blank text or a tool call."""
     for block in blocks:
@@ -118,8 +221,8 @@ class ConversationMemory:
         """Tool results go in a user message with tool_result content blocks.
 
         If a result exceeds max_result_chars, the full content is saved to
-        disk and the in-context content is replaced with a head/tail preview
-        plus the file path so the agent can re-read it via read_file.
+        disk and the in-context content is replaced with a preview and a notice
+        saying what was left out and how to read it back with read_tool_result.
         """
         if not results:
             return
@@ -230,8 +333,20 @@ class ConversationMemory:
                 self._messages[index] = Message("user", content)
         return freed
 
+    def _read_window(self) -> int:
+        """The most characters one read returns: enough to make progress, never so
+        much that the read itself is spilled again (``max_result_chars``)."""
+        return max(200, min(20_000, self._max_result_chars - 300))
+
     def _evict_large_result(self, tool_use_id: str, content: str) -> str:
-        """Save full result to disk, return a preview with file path reference."""
+        """Save the full result to disk and return a notice the model can act on.
+
+        The notice says how much was shown and what was not, and gives the
+        ``read_tool_result`` call that continues where the preview stopped. A JSON
+        result holding a list of records (search hits, rows) is previewed record
+        by record, so the model sees every record's title and opening rather than
+        the first few thousand characters of the first one.
+        """
         safe_id = tool_use_id.replace("/", "_").replace("..", "_")
         filepath = os.path.join(self._eviction_dir, f"{safe_id}-{uuid.uuid4().hex}.txt")
         self._artifact_paths.add(filepath)
@@ -242,53 +357,58 @@ class ConversationMemory:
         lines = content.splitlines()
         total_lines = len(lines)
         n = self._preview_lines
+        window = self._read_window()
+        max_preview_chars = 3_000
+        call = f'read_tool_result(result_id="{tool_use_id}"'
 
-        if total_lines <= n * 2:
-            preview = content
+        records = _json_records_preview(content, budget=max_preview_chars)
+        if records is not None:
+            preview, count = records
+            hidden = f"Not shown: the full text of the {count} records ({len(content):,} characters of JSON)."
+            follow = (
+                f'{call}, pattern="<words>") finds passages; '
+                f"{call}, char_offset=0, max_chars={window}) reads the JSON from the start"
+            )
+        elif total_lines <= n * 2:
+            # Few lines, possibly one very long one (minified JSON, a CSV row):
+            # the preview is the start of the text, paged on by character.
+            preview = content[:max_preview_chars]
+            shown = len(preview)
+            if shown < len(content):
+                preview += "\n... [preview truncated]"
+                hidden = f"Not shown: characters {shown + 1:,} to {len(content):,}."
+                follow = f"{call}, char_offset={shown}, max_chars={window})"
+            else:
+                hidden, follow = "", f"{call})"
         else:
             head = "\n".join(lines[:n])
             tail = "\n".join(lines[-n:])
             omitted = total_lines - (n * 2)
-            preview = (
-                f"{head}\n"
-                f"\n... ({omitted} lines omitted) ...\n\n"
-                f"{tail}"
-            )
-
-        # Cap preview by character count to handle wide-line files (minified JSON, CSV)
-        max_preview_chars = 3_000
-        if len(preview) > max_preview_chars:
-            preview = preview[:max_preview_chars] + "\n... [preview truncated]"
+            preview = f"{head}\n\n... ({omitted} lines omitted) ...\n\n{tail}"
+            if len(preview) > max_preview_chars:
+                preview = preview[:max_preview_chars] + "\n... [preview truncated]"
+            hidden = f"Not shown: lines {n + 1:,} to {total_lines - n:,} of {total_lines:,}."
+            follow = f"{call}, offset={n}, limit=200)"
 
         logger.info(
             "Evicted tool result %s: %d chars / %d lines -> preview (%d chars). Saved to %s",
             tool_use_id, len(content), total_lines, len(preview), filepath,
         )
-
+        unit = "line" if total_lines == 1 else "lines"
+        guide = (
+            f"[{hidden + ' ' if hidden else ''}Read the rest before searching again for the same "
+            f"information: {follow}. read_file cannot open this location.]"
+        )
         return (
-            f"[Tool result too large ({total_lines} lines, {len(content)} chars). "
+            f"[Tool result too large ({total_lines:,} {unit}, {len(content):,} chars). "
             f"Full output saved to: {filepath}]\n"
-            f'[Read it in sections with read_tool_result(result_id="{tool_use_id}", offset=0, limit=200); '
-            f"read_file cannot open this location.]\n\n"
+            f"{guide}\n\n"
             f"{preview}"
         )
 
-    def read_evicted(
-        self, tool_use_id: str, offset: int = 0, limit: int = 200, *, max_chars: int = 6_000, char_offset: int = 0,
-    ) -> str:
-        """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
-
-        A section is also capped at ``max_chars`` characters, so a single very
-        long line (minified JSON, a CSV row) is paged with ``char_offset``. The
-        result is found by the tool-use id of the call that produced it, so it
-        survives session save and load, where the file moves.
-        """
+    def _evicted_path(self, tool_use_id: str) -> str:
         if not isinstance(tool_use_id, str) or not tool_use_id:
             raise ValueError("result_id must be the tool-use id of the evicted result")
-        offset = max(int(offset), 0)
-        limit = max(min(int(limit), 2_000), 1)
-        max_chars = max(min(int(max_chars), 50_000), 200)
-        char_offset = max(int(char_offset), 0)
         path = None
         for message in self._messages:
             if message.role != "user" or not isinstance(message.content, list):
@@ -301,8 +421,31 @@ class ConversationMemory:
                         path = match.group(1)
         if path is None or path not in self._artifact_paths:
             raise LookupError(f"No evicted result with id {tool_use_id!r}; only oversized results are stored")
+        return path
+
+    def read_evicted(
+        self, tool_use_id: str, offset: int = 0, limit: int = 200, *, max_chars: int = 6_000,
+        char_offset: int = 0, pattern: str = "",
+    ) -> str:
+        """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
+
+        A section is also capped at ``max_chars`` characters, so a single very
+        long line (minified JSON, a CSV row) is paged with ``char_offset``. With
+        ``pattern`` it returns the passages that match instead. Every reply stays
+        under ``max_result_chars``, so a read is never spilled itself. The
+        result is found by the tool-use id of the call that produced it, so it
+        survives session save and load, where the file moves.
+        """
+        path = self._evicted_path(tool_use_id)
+        offset = max(int(offset), 0)
+        limit = max(min(int(limit), 2_000), 1)
+        max_chars = max(min(int(max_chars), 50_000, self._read_window()), 200)
+        char_offset = max(int(char_offset), 0)
         with open(path, encoding="utf-8", errors="replace") as handle:
-            lines = handle.read().splitlines()
+            full = handle.read()
+        if pattern:
+            return _find_passages(tool_use_id, full, str(pattern), max_chars)
+        lines = full.splitlines()
         section = lines[offset:offset + limit]
         end = offset + len(section)
         text = "\n".join(section)

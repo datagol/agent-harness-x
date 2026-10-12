@@ -170,8 +170,15 @@ class Agent:
 
         async def read_tool_result(
             result_id: str, offset: int = 0, limit: int = 200, max_chars: int = 6000, char_offset: int = 0,
+            pattern: str = "",
         ) -> str:
-            """Read part of a tool result that was too large for the conversation.
+            """Read a tool result that was too large for the conversation and was cut to a preview.
+
+            The notice on such a result says what the preview left out and gives the call that
+            continues where it stopped. Read the rest before searching again for the same
+            information. A result that is one long line (JSON, CSV) is paged by character with
+            char_offset; follow the "next" hint at the top of each reply. Use pattern to find
+            passages without reading everything.
 
             Args:
                 result_id: The tool-use id named in the "[Tool result too large ...]" notice.
@@ -179,9 +186,11 @@ class Agent:
                 limit: Number of lines to return, at most 2000.
                 max_chars: Character cap for one read (default 6000); long lines are paged.
                 char_offset: Character position to continue from inside the selected lines.
+                pattern: A regular expression (case-insensitive) to find instead of reading in order.
             """
             return await asyncio.to_thread(
                 memory.read_evicted, result_id, offset, limit, max_chars=max_chars, char_offset=char_offset,
+                pattern=pattern,
             )
 
         read_tool_result.__harnessx_builtin__ = True  # type: ignore[attr-defined]
