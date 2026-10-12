@@ -459,3 +459,38 @@ waiting time changed.
   `agent.run()` on Anthropic now uses the streaming call internally so these
   deadlines apply; the result is the same.
 
+## 0.9.0: recovery, parallel specialists, planning
+
+Nothing needs changing to upgrade. Four defaults behave differently; each can
+be turned back.
+
+- **Specialists run in parallel.** When the model asks several specialists in
+  one turn, up to four run at once. Tools that are not concurrent (file
+  writes, `ask_user`, `write_todos`) still take turns across all of them, and
+  approval prompts are asked one at a time. To keep one specialist serial, or
+  all of them:
+
+  ```python
+  SubAgent(name="writer", ..., concurrent=False)
+  AgentConfig(max_parallel_subagents=1)
+  ```
+
+- **The model is asked to plan.** While the built-in `write_todos` is
+  installed, the system prompt asks the model to plan work of three or more
+  steps. On multi-step tasks it now plans, which adds a model call or two.
+  Turn it off with `AgentConfig(planning=False)`. A todo `status` must now be
+  exactly `pending`, `in_progress` or `completed`.
+- **Slow servers get more time.** The first-event deadline doubles on each
+  retry, so a dead endpoint takes up to about 300 seconds to give up (80 in
+  0.8.0). Restore the 0.8.0 behaviour with
+  `RetryPolicy(stream_first_event_growth=1.0)`.
+- **Rate limits get a deeper budget.** A 429 or 529 is retried up to 8 times
+  while the waits add up to less than 120 seconds. Restore 4 attempts with
+  `RetryPolicy(rate_limit_attempts=4)`.
+
+New errors may reach your code where 0.8.0 raised something else:
+`ContextOverflowError` instead of the SDK's `BadRequestError` when a request
+cannot be made to fit, and, rarely, `MalformedToolInputError`. Both subclass
+`HarnessError` and `ValueError`; code that caught `BadRequestError` for an
+overflow should catch `ContextOverflowError`.
+
