@@ -303,6 +303,13 @@ class Agent:
     def _build_system_prompt(self) -> str:
         """Compose static system prompt with dynamic prompt providers."""
         prompt = self.config.system_prompt or ""
+        # Static guidance first, ahead of anything dynamic, so it stays inside
+        # the cached prefix. Present only while the built-in write_todos is.
+        from .builtin.planning import planning_guidance
+
+        guidance = planning_guidance(self.tools)()
+        if guidance:
+            prompt = f"{prompt}\n\n{guidance}" if prompt else guidance
         for provider_fn in self.prompt_providers:
             try:
                 extra = provider_fn()

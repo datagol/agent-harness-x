@@ -34,6 +34,60 @@ MAX_CONTENT_CHARS = 200
 
 _MARK = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 
+# The item shape, spelled out for the model. A bare "array of objects" left it
+# to guess the keys from the description, and in the 2026-10-10 benchmark it
+# never called the tool. No additionalProperties: false, because models often
+# add an id or priority and refusing the whole list over that helps nobody.
+TODO_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string", "description": "One step, as a short imperative sentence."},
+        "status": {"type": "string", "enum": list(STATUSES)},
+    },
+    "required": ["content", "status"],
+}
+
+WRITE_TODOS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "todos": {
+            "type": "array",
+            "items": TODO_ITEM_SCHEMA,
+            "maxItems": MAX_TODOS,
+            "description": "The whole list, every time, including completed items.",
+        },
+    },
+    "required": ["todos"],
+}
+
+WRITE_TODOS_DESCRIPTION = (
+    "Record the task list, replacing it entirely.\n\n"
+    "Use this for work with several distinct steps, and keep it current as you go. "
+    "Skip it for anything you can finish in one or two steps: a task list for trivial work is noise.\n\n"
+    "Send the whole list every time, including items already completed. Keep exactly one item "
+    "in_progress while you work on it; if you send more, the first is kept and the rest go back to pending."
+)
+
+# Added to the system prompt while the built-in write_todos is installed. Static
+# text, so the cacheable prefix does not change as the list does.
+PLANNING_GUIDANCE = (
+    "Planning: when a task needs three or more distinct steps, call write_todos before starting, "
+    "with one item per step, and update it as each step finishes so exactly one item is in_progress. "
+    "Skip the list for work you can finish in one or two tool calls."
+)
+
+
+def planning_guidance(registry: ToolRegistry):
+    """A prompt provider that adds PLANNING_GUIDANCE while the built-in tool is installed."""
+
+    def provide() -> str:
+        if not registry.has_tool("write_todos"):
+            return ""
+        handler = registry.get_tool("write_todos").handler
+        return PLANNING_GUIDANCE if getattr(handler, "__harnessx_builtin__", False) else ""
+
+    return provide
+
 
 def _agent():
     """The agent running the current tool call, when there is one."""
@@ -91,19 +145,7 @@ def register_planning_tools(
         return []
 
     async def write_todos(todos: list[dict]) -> str:
-        """Record the task list, replacing it entirely.
-
-        Use this for work with several distinct steps, and keep it current as you
-        go. Skip it for anything you can finish in one or two steps: a task list
-        for trivial work is noise.
-
-        Send the whole list every time, including items already completed. Keep
-        exactly one item in_progress while you work on it; if you send more, the
-        first is kept and the rest go back to pending.
-
-        Args:
-            todos: Objects of {"content": str, "status": "pending"|"in_progress"|"completed"}.
-        """
+        """Record the task list, replacing it entirely. See WRITE_TODOS_DESCRIPTION."""
         cleaned, demoted = normalize(todos)
         agent = _agent()
         if agent is not None:
@@ -127,8 +169,14 @@ def register_planning_tools(
         # Tagged so an Agent can tell its own default apart from one the
         # application registered under the same name, and leave that one alone.
         handler.__harnessx_builtin__ = True  # type: ignore[attr-defined]
-        registry.register_tool(
-            handler, name=name, permission=permission,
-            concurrent=False, replay_policy="safe", replace=replace,
-        )
+        if name == "write_todos":
+            registry.register_with_schema(
+                name, WRITE_TODOS_DESCRIPTION, WRITE_TODOS_SCHEMA, handler, permission=permission,
+                concurrent=False, replay_policy="safe", replace=replace,
+            )
+        else:
+            registry.register_tool(
+                handler, name=name, permission=permission,
+                concurrent=False, replay_policy="safe", replace=replace,
+            )
     return names

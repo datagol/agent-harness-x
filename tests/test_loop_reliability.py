@@ -936,6 +936,77 @@ def test_an_application_tool_of_the_same_name_wins():
     assert "read_todos" in agent.tools.list_tools(), "the other default is still added"
 
 
+# ── write_todos is worth calling: a real schema and one line of guidance ────
+
+
+def test_write_todos_spells_out_its_items():
+    """A bare array of objects left the model guessing the keys; in the
+    2026-10-10 benchmark HarnessX never called the tool in 39 runs."""
+    agent, _ = _planning_agent([])
+    params = {p["name"]: p for p in agent.tools.get_tool_params()}
+    items = params["write_todos"]["input_schema"]["properties"]["todos"]["items"]
+    assert items["required"] == ["content", "status"]
+    assert items["properties"]["status"]["enum"] == ["pending", "in_progress", "completed"]
+    assert "additionalProperties" not in items, "an extra key the model adds is not worth a refusal"
+    assert "Send the whole list every time" in params["write_todos"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_todo_is_refused_in_one_line():
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": [{"content": "x"}]})], stop_reason="tool_use"),
+        ProviderResponse(text="ok"),
+    ])
+    seen = []
+    agent.hooks.on(HookEvent.TODOS_UPDATED, lambda data: seen.append(data))
+    async with agent:
+        await agent.run("plan it")
+    result = provider.calls[1]["messages"][-1]["content"][0]
+    assert result["is_error"]
+    assert "Invalid arguments for 'write_todos'" in str(result["content"])
+    assert "'status' is a required property" in str(result["content"])
+    assert agent.todos == [] and seen == []
+
+
+def test_the_prompt_mentions_planning_only_while_the_builtin_is_installed():
+    from harnessx import ToolRegistry
+    from harnessx.builtin.planning import PLANNING_GUIDANCE
+
+    on, _ = _planning_agent([])
+    assert PLANNING_GUIDANCE in on._build_system_prompt()
+
+    off = Agent(config=AgentConfig(model="m", planning=False), provider=Scripted([]))
+    assert PLANNING_GUIDANCE not in off._build_system_prompt()
+
+    registry = ToolRegistry()
+    registry.register_with_schema(
+        "write_todos", "the application's own", {"type": "object", "properties": {}},
+        lambda: "mine", permission=PermissionLevel.ALLOW,
+    )
+    theirs = Agent(config=AgentConfig(model="m"), tools=registry, provider=Scripted([]))
+    assert PLANNING_GUIDANCE not in theirs._build_system_prompt()
+
+    briefed = Agent(config=AgentConfig(model="m", system_prompt="You are terse."), provider=Scripted([]))
+    assert briefed._build_system_prompt() == f"You are terse.\n\n{PLANNING_GUIDANCE}"
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_does_not_change_as_the_list_does():
+    """The list lives at the tail; the system prompt heads the cached prefix."""
+    plan = [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "pending"}]
+    ticked = [{"content": "a", "status": "completed"}, {"content": "b", "status": "in_progress"}]
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c2", "write_todos", {"todos": ticked})], stop_reason="tool_use"),
+        ProviderResponse(text="done for now"),
+        ProviderResponse(text="b is left for later"),  # answers the unfinished-plan reminder
+    ])
+    async with agent:
+        await agent.run("plan it")
+    systems = {str(call["system"]) for call in provider.calls}
+    assert len(provider.calls) == 4 and len(systems) == 1
+
+
 # ── a tool-heavy conversation can actually be condensed ─────────────────────
 
 
