@@ -23,8 +23,11 @@ faults injected between the agent and the API.
   stream's first event doubles on each retry, up to the idle limit
   (`RetryPolicy.stream_first_event_growth=2.0`). A dead connection is still
   dropped after 20 seconds; a server that takes 25 seconds gets through on the
-  second try. With the defaults a dead endpoint now takes up to about 300
-  seconds to give up, against 80 before. `1.0` restores the old behaviour.
+  second try. The run then remembers the slowest start it has seen, and later
+  calls wait twice that from the outset, so a slow server costs one timed-out
+  call per run, not one per step. With the defaults a dead endpoint now takes
+  up to about 300 seconds to give up, against 80 before. `1.0` restores the
+  old behaviour.
 - **Specialists run in parallel.** When the model asks several specialists in
   one turn, they now run at the same time, at most
   `AgentConfig.max_parallel_subagents=4`. `SubAgent(concurrent=False)` keeps one
@@ -37,7 +40,10 @@ faults injected between the agent and the API.
 - **`write_todos` has a real schema and the prompt says when to plan.** Each
   item requires `content` and a `status` of `pending`, `in_progress` or
   `completed`. While the built-in tool is installed, the system prompt gains a
-  static two-sentence planning line. `planning=False` removes both.
+  static planning line: for three or more steps, plan first and keep the list
+  current. `planning=False` removes both. Expect the model to plan where it
+  did not before: on harness-bench's long-horizon tasks it now plans in every
+  run, which adds about two model calls per run.
 - **Spilled tool results are easier for the model to read.** The notice for a
   result too large to keep now suggests a read that starts after the preview,
   says how much is hidden, and previews JSON records by title and link.
@@ -67,6 +73,11 @@ faults injected between the agent and the API.
   tries again, then retries once if the request is far below the window, and
   only then fails with `ContextOverflowError` naming its estimate and the
   window.
+- **The task-list reminder no longer defeats the prompt cache.** It was added
+  to the newest message only, so the message before it changed every turn
+  and the whole conversation was cached again. Each copy now stays on the
+  message it was first sent with. On harness-bench's long-horizon tasks this
+  cut cache writes from about 14,400 to 5,100 tokens per run.
 - **Less per-run overhead.** Before each model call with six or more messages,
   the prompt was counted with an extra HTTP call to Anthropic: three per
   five-call run. The provider's own count of the previous request is now used,
