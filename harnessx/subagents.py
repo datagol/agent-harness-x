@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from copy import deepcopy
@@ -36,8 +37,14 @@ class SubAgent:
     skills: list[str] | None = None
     permission: PermissionLevel | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    # Whether this specialist may run beside other tool calls in the same turn,
+    # including other specialists (up to AgentConfig.max_parallel_subagents).
+    # False makes it take its turn with the parent's other serial calls.
+    concurrent: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.concurrent) is not bool:
+            raise TypeError("SubAgent.concurrent must be a bool")
         # Keep the generated provider tool name within 64 characters.
         if not isinstance(self.name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,54}", self.name):
             raise ValueError("SubAgent.name must be 1–55 letters, digits, underscores, or hyphens, starting with a letter or underscore")
@@ -83,7 +90,7 @@ def prepare_subagents(subagents: list[SubAgent] | None, tools: ToolRegistry) -> 
         prepared.append(SubAgent(
             name=spec.name, description=spec.description, config=deepcopy(spec.config),
             tools=registry, skills=deepcopy(spec.skills), permission=spec.permission,
-            timeout_seconds=spec.timeout_seconds,
+            timeout_seconds=spec.timeout_seconds, concurrent=spec.concurrent,
         ))
     return tuple(prepared)
 
@@ -96,14 +103,21 @@ def install_subagent(parent: Agent, spec: SubAgent) -> None:
 
     async def delegate(task: str) -> str:
         from .core import Agent
+        from .engine import loop_local
 
         # Load paths before constructing an agent/provider so a bad path cannot
         # leave an allocated provider behind. Each child owns its SkillManager.
         skills = SkillManager.from_paths([*paths]) if paths is not None else None
-        async with Agent(
+        # Up to max_parallel_subagents specialists run at once; the rest wait
+        # here, inside the delegation's own timeout.
+        slots = loop_local(parent, "_delegation_slots",
+                           lambda: asyncio.Semaphore(parent.config.max_parallel_subagents))
+        async with slots, Agent(
             config=deepcopy(config), tools=_copy_tools(registry), skills=skills,
             permissions=parent.permissions,
         ) as child:
+            # Serial tools stay serial across the whole tree of agents.
+            child._tree_parent = parent
             child.guardrails.usage_observer = parent.guardrails.track_usage
             child.guardrails.parent_cost_check = parent.guardrails.check_cost_limit
             try:
@@ -127,9 +141,10 @@ def install_subagent(parent: Agent, spec: SubAgent) -> None:
                 return "[The specialist finished without a reply.]"
             return result.output
 
+    delegate.__harnessx_delegation__ = True  # type: ignore[attr-defined]
     parent.tools.register_tool(
         delegate, name=f"delegate_{spec.name}",
         description=f"{spec.description}\nSend a self-contained task with all necessary context. The specialist returns its result to you.",
-        permission=spec.permission, concurrent=False, replay_policy="manual",
+        permission=spec.permission, concurrent=spec.concurrent, replay_policy="manual",
         timeout_seconds=spec.timeout_seconds,
     )

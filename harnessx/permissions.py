@@ -61,12 +61,26 @@ class PermissionManager:
             return True
         if self.approval_callback is None:
             return False
-        answer = self.approval_callback(copy.deepcopy(tool_call), copy.copy(tool_def))
-        if inspect.isawaitable(answer):
-            answer = await answer
+        # Specialists running in parallel share this manager: one question to
+        # the person at a time, and an "always" given while this call waited
+        # answers it too.
+        async with self._approval_gate():
+            if tool_call.name in self._session_grants:
+                return True
+            answer = self.approval_callback(copy.deepcopy(tool_call), copy.copy(tool_def))
+            if inspect.isawaitable(answer):
+                answer = await answer
         if type(answer) is not bool:
             raise TypeError("Approval callbacks must return bool")
         return answer
+
+    def _approval_gate(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        current = self.__dict__.get("_approval_lock")
+        if current is None or current[0] is not loop:
+            current = (loop, asyncio.Lock())
+            self.__dict__["_approval_lock"] = current
+        return current[1]
 
     def grant_session(self, tool_name: str) -> None:
         """Grant a tool for the rest of this session."""

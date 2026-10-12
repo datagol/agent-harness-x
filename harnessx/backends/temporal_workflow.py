@@ -239,7 +239,21 @@ class AgentSessionWorkflow:
                                 for t in runnable
                             ]
                         )
-                        if runnable and all(t["concurrent"] for t in runnable):
+                        if workflow.patched("harness-tool-batches-v3"):
+                            # Calls that may overlap run together and the rest
+                            # take turns, as in a direct run; a serial call no
+                            # longer holds up the whole batch.
+                            serial = [t for t in runnable if not t["concurrent"]]
+
+                            async def in_turn():
+                                for entry in serial:
+                                    await dispatch(entry)
+
+                            await asyncio.gather(
+                                *(dispatch(t) for t in runnable if t["concurrent"]),
+                                *([in_turn()] if serial else []),
+                            )
+                        elif runnable and all(t["concurrent"] for t in runnable):
                             await asyncio.gather(*(dispatch(t) for t in runnable))
                         else:
                             for entry in runnable:

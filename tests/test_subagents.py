@@ -51,13 +51,16 @@ def outcomes(agent):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("serial", [False, True], ids=["parallel", "serial"])
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_delegation_isolated_and_serial_with_cleanup(monkeypatch, streaming):
+async def test_delegation_isolated_with_cleanup(monkeypatch, streaming, serial):
     children = []
 
     def make_provider(name):
         assert name == "anthropic"  # Child does not inherit parent's OpenAI config.
-        assert all(child.closed for child in children)
+        if serial:
+            # SubAgent(concurrent=False): each specialist finishes before the next starts.
+            assert all(child.closed for child in children)
         child = Provider([ProviderResponse(text="Review finding", usage=TokenUsage(input_tokens=19))])
         children.append(child)
         return child
@@ -69,7 +72,7 @@ async def test_delegation_isolated_and_serial_with_cleanup(monkeypatch, streamin
     ])
     async with Agent(
         config=AgentConfig(provider="openai", model="fixture", system_prompt="Parent-only prompt"),
-        provider=parent_provider, subagents=[specialist()],
+        provider=parent_provider, subagents=[specialist(concurrent=not serial)],
     ) as parent:
         events = []
         if streaming:

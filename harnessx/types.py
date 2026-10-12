@@ -784,6 +784,9 @@ class AgentConfig:
     prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)  # None disables caching
     tools: ToolPolicy = field(default_factory=ToolPolicy)
     progress: ProgressPolicy = field(default_factory=ProgressPolicy)
+    # Specialists (SubAgent) that may run at the same time when the model
+    # delegates several tasks in one turn. 1 runs them one at a time.
+    max_parallel_subagents: int = 4
 
     def __init__(
         self,
@@ -800,8 +803,10 @@ class AgentConfig:
         prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
         tools: ToolPolicy | dict[str, Any] | None = None,
         progress: ProgressPolicy | dict[str, Any] | None = None,
+        max_parallel_subagents: int = 4,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.max_parallel_subagents = max_parallel_subagents
         self.planning = planning
         self.fallbacks = tuple(
             item if isinstance(item, Fallback) else Fallback(**dict(item)) for item in fallbacks
@@ -824,6 +829,8 @@ class AgentConfig:
 
         if type(self.planning) is not bool:
             raise TypeError("planning must be a bool")
+        if type(self.max_parallel_subagents) is not int or self.max_parallel_subagents < 1:
+            raise ConfigurationError("max_parallel_subagents must be a positive integer (1 runs them one at a time)")
         for item in self.fallbacks:
             if not isinstance(item, Fallback):
                 raise ConfigurationError("AgentConfig.fallbacks must contain Fallback entries")

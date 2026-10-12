@@ -1025,6 +1025,25 @@ def recovery_exhausted(reason):
             "stop_reason": reason}
 
 
+def loop_local(owner, name, factory):
+    """A primitive bound to the running loop, kept on ``owner`` (asyncio locks and
+    semaphores bind to the first loop that uses them; an agent can outlive one)."""
+    loop = asyncio.get_running_loop()
+    current = getattr(owner, name, None)
+    if current is None or current[0] is not loop:
+        current = (loop, factory())
+        setattr(owner, name, current)
+    return current[1]
+
+
+def serial_gate(agent):
+    """The lock that keeps non-concurrent tools apart across an agent and its specialists."""
+    root = agent
+    while getattr(root, "_tree_parent", None) is not None:
+        root = root._tree_parent
+    return loop_local(root, "_serial_gate", asyncio.Lock)
+
+
 async def execute_tool(agent, state, entry, emit, *, record=None):
     from .artifacts import materialize
 
@@ -1056,7 +1075,15 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         await emit_hook(agent, HookEvent.TOOL_CALL_START, tool_call=copy.deepcopy(call))
         try:
             async with asyncio.timeout(entry["timeout"]):
-                result = await agent.tools._dispatch(call, definition)
+                # A tool that may not overlap others also may not overlap itself
+                # in a specialist running in parallel: one gate per agent tree.
+                # Delegations never take it, so a parent never waits on a child
+                # that waits on the parent.
+                if not entry.get("concurrent", True) and not getattr(definition.handler, "__harnessx_delegation__", False):
+                    async with serial_gate(agent):
+                        result = await agent.tools._dispatch(call, definition)
+                else:
+                    result = await agent.tools._dispatch(call, definition)
         except TimeoutError:
             if state["durable"]:
                 # A durable run can stop and ask whether the call took effect.
@@ -1154,6 +1181,44 @@ async def drive(agent, state, emit, *, commit=None, control=None):
             str(state["iterations"]),
             str(entry["attempt"] if entry else state["attempt"]),
         )
+
+    async def run_batch(runnable):
+        """Calls that may overlap run together; the rest take turns, in model order.
+
+        A serial call used to hold up its whole batch: one write_todos beside
+        three lookups ran all four one after another. Now the serial calls form
+        one chain that runs beside the others. Tasks are created in model order,
+        so the calls that start together announce themselves in that order.
+        """
+        serial = [t for t in runnable if not t["concurrent"]]
+        if len(serial) == len(runnable):
+            for entry in runnable:
+                await run_tool(entry)
+            return
+
+        async def in_turn():
+            for entry in serial:
+                await run_tool(entry)
+
+        tasks = []
+        for entry in runnable:
+            if entry["concurrent"]:
+                tasks.append(asyncio.create_task(run_tool(entry)))
+            elif serial and entry is serial[0]:
+                tasks.append(asyncio.create_task(in_turn()))
+        try:
+            # Every call finishes and records its outcome before a failure in
+            # one of them is raised: cancelling the rest threw away work that
+            # had already happened.
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        for failure in outcomes:
+            if isinstance(failure, BaseException):
+                raise failure
 
     async def run_tool(entry):
         async with lock:
@@ -1279,24 +1344,8 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     )
                     break
                 runnable = [t for t in state["tools"] if t["status"] != "completed"]
-                if runnable and all(t["concurrent"] for t in runnable):
-                    tasks = [asyncio.create_task(run_tool(t)) for t in runnable]
-                    try:
-                        # Every call finishes and records its outcome before a
-                        # failure in one of them is raised: cancelling the rest
-                        # threw away work that had already happened.
-                        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-                    except BaseException:
-                        for task in tasks:
-                            task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                        raise
-                    for failure in outcomes:
-                        if isinstance(failure, BaseException):
-                            raise failure
-                else:
-                    for entry in runnable:
-                        await run_tool(entry)
+                if runnable:
+                    await run_batch(runnable)
                 if any(
                     t["status"] in ("approval", "uncertain") for t in state["tools"]
                 ):
