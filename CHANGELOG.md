@@ -6,6 +6,73 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Fixes for the faults that two benchmarks found on 2026-10-10, when HarnessX,
+the raw Anthropic SDK, LangChain deepagents and CrewAI ran the same tasks with
+faults injected between the agent and the API.
+
+### Changed
+
+- **Rate limits get a deeper budget, bounded by time.** Four 429s in a row
+  stopped a run, one call short of the one that would have worked. A 429 or
+  529 now gets up to `RetryPolicy.rate_limit_attempts=8` calls, as long as the
+  waits add up to less than `rate_limit_budget_seconds=120`. Server errors and
+  dropped connections keep `attempts=4`. Jitter now shortens only our own
+  backoff, never a server's `Retry-After`. A long wait shows on the run stream
+  as `WAITING` with `{"on": "retry"}`. Temporal runs use the same budget.
+- **A slow first byte no longer uses up the retries.** The 20-second wait for a
+  stream's first event doubles on each retry, up to the idle limit
+  (`RetryPolicy.stream_first_event_growth=2.0`). A dead connection is still
+  dropped after 20 seconds; a server that takes 25 seconds gets through on the
+  second try. With the defaults a dead endpoint now takes up to about 300
+  seconds to give up, against 80 before. `1.0` restores the old behaviour.
+- **Specialists run in parallel.** When the model asks several specialists in
+  one turn, they now run at the same time, at most
+  `AgentConfig.max_parallel_subagents=4`. `SubAgent(concurrent=False)` keeps one
+  serial. Tools that are not concurrent still take turns across the whole tree
+  of agents, and approval prompts are asked one at a time.
+- **One serial tool no longer holds up a whole batch.** A turn that mixed, say,
+  `write_todos` with three lookups ran all four one after another. Concurrent
+  calls now run together while the serial ones take turns in model order.
+  Results and events keep model order.
+- **`write_todos` has a real schema and the prompt says when to plan.** Each
+  item requires `content` and a `status` of `pending`, `in_progress` or
+  `completed`. While the built-in tool is installed, the system prompt gains a
+  static two-sentence planning line. `planning=False` removes both.
+- **Spilled tool results are easier for the model to read.** The notice for a
+  result too large to keep now suggests a read that starts after the preview,
+  says how much is hidden, and previews JSON records by title and link.
+  `read_tool_result` gains `pattern=` to find passages by regular expression,
+  and a read is capped so it never spills again.
+
+### Added
+
+- `RunEventType.TOOL_CALL_DELTA` with `ToolCallDelta(id, name, partial_json)`:
+  a tool call as the model writes it, on Anthropic. The first delta names the
+  tool, so a display can show it seconds before `TOOL_CALL_START`.
+- `MalformedToolInputError` and `ContextOverflowError` in `harnessx.errors`.
+- `ConversationMemory.spill_large_results(threshold_chars=2000)`.
+- `AnthropicProvider.clear_model_limits_cache()`.
+- `HookEvent.RECOVERY` reasons `malformed_tool_input`, `context_overflow_spill`
+  and `spurious_overflow`.
+
+### Fixed
+
+- **Corrupted tool-call JSON from the stream no longer fails the run.** The
+  SDK raised `ValueError: Unable to parse tool parameter JSON` and the run
+  stopped. The broken call is now answered with an error tool result, and the
+  model sends it again. If the call cannot be identified, the request is made
+  once more.
+- **"Prompt is too long" with nothing to condense** failed at once with the
+  SDK's `BadRequestError`. HarnessX now spills large tool results to disk and
+  tries again, then retries once if the request is far below the window, and
+  only then fails with `ContextOverflowError` naming its estimate and the
+  window.
+- **Less per-run overhead.** Before each model call with six or more messages,
+  the prompt was counted with an extra HTTP call to Anthropic: three per
+  five-call run. The provider's own count of the previous request is now used,
+  and the network count only runs above 60% of the room. Model limits from the
+  Models API are fetched once per process and endpoint, not once per Agent.
+
 ## [0.8.0] - 2026-10-10
 
 ### Changed
