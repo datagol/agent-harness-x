@@ -100,7 +100,9 @@ async def test_workflow_schedule_is_versioned_and_uses_effective_budget(monkeypa
     state = {"config": wire(config(retry=RetryPolicy(attempts=5))), "request": {"max_tokens": 64000}}
     await coordinator.step(state, "model")
     _, args, options = scheduled[0]
-    assert options["retry_policy"].maximum_attempts == (5 if modern else 3)
+    # Rate limits get the deeper budget (8 by default); the activity marks other
+    # failures non-retryable once `attempts` (5 here) is spent.
+    assert options["retry_policy"].maximum_attempts == (8 if modern else 3)
     expected = RetryPolicy().effective_call_timeout(64000) * 2 + 10 if modern else 310
     assert options["start_to_close_timeout"] == timedelta(seconds=expected)
     assert args.get("reliability_v2", False) == modern

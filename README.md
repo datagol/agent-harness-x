@@ -163,10 +163,11 @@ asyncio.run(main())
 | `temperature` | `None` | Sampling temperature (omitted by default for safety) |
 | `limits` | `Limits()` | Budgets: `max_iterations=50` (`0` is unlimited), `max_context_tokens=None` (the model's own window), `max_result_chars=12_000`, `max_cost_dollars=None`, `input_cost_per_m=None`, `output_cost_per_m=None`, `loop_guard=LoopGuard()`, `max_truncation_recoveries=3`, `final_answer_on_limit=True` |
 | `fallbacks` | `()` | Providers to try, in order, when the primary fails transiently: `Fallback(provider, model=None, max_tokens=None)` |
-| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts, connection loss): `attempts=4` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=60.0` caps one wait, `jitter=0.25`, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget, `stream_idle_timeout_seconds=180.0` abandons a stalled stream, `stream_first_event_timeout_seconds=20.0` abandons one that never starts (on Anthropic; +10 s per 100K tokens of request), `switch_after=1` and `cooldown_seconds=0.0` govern failover |
+| `retry` | `RetryPolicy()` | Transient model failures (429, 5xx, timeouts, connection loss): `attempts=4` (`1` disables retry), `backoff_seconds=0.5` doubled each time, `max_backoff_seconds=60.0` caps one wait, `jitter=0.25`, `call_timeout_seconds=None` sizes the per-attempt timeout to the reply budget, `stream_idle_timeout_seconds=180.0` abandons a stalled stream, `stream_first_event_timeout_seconds=20.0` abandons one that never starts (on Anthropic; +10 s per 100K tokens of request), `stream_first_event_growth=2.0` doubles that wait on each retry up to the idle limit, `rate_limit_attempts=8` calls for a 429 or 529 while the waits stay under `rate_limit_budget_seconds=120.0`, `switch_after=1` and `cooldown_seconds=0.0` govern failover |
 | `prompt_cache` | `PromptCachePolicy()` | Prompt caching of the stable prefix; `None` disables it |
 | `tools` | `ToolPolicy()` | Registry-wide tool options: `default_timeout_seconds=None` (25 s for a tool registered without its own; `run_bash`, MCP tools, subagents and sandbox file tools keep 300 s, `fetch_url` 60 s), `dedupe_calls=False`, `retry=None` (a `ToolRetry` applied to tools registered without one) |
-| `planning` | `True` | Gives the agent `write_todos` and `read_todos`; `False` removes them |
+| `planning` | `True` | Gives the agent `write_todos` and `read_todos`, plus a line in the system prompt asking it to plan work of three or more steps; `False` removes all three |
+| `max_parallel_subagents` | `4` | How many specialists one agent runs at the same time; `1` runs them one after another |
 | `progress` | `ProgressPolicy()` | `WAITING` events while a call is quiet: `first_after_seconds=10.0` (`None` turns them off), `repeat_every_seconds=15.0` |
 
 The sub-policies are frozen dataclasses; change one with `dataclasses.replace`.
@@ -786,11 +787,19 @@ async def main():
 asyncio.run(main())
 ```
 
-Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_START`,
+Event types include `TEXT_DELTA`, `TEXT_COMPLETE`, `TOOL_CALL_DELTA`, `TOOL_CALL_START`,
 `TOOL_CALL_COMPLETE`, `TOOL_RESULT`, `THINKING_DELTA`, `TURN_COMPLETE`,
 `ERROR`, `ATTEMPT_RESET`, `TODOS_UPDATED`, `WAITING`, and `RUN_RESULT`. Durable runs also emit
 approval and recovery events. Text deltas are provisional; discard an
 interrupted attempt's text when `ATTEMPT_RESET` arrives.
+
+`TOOL_CALL_DELTA` carries a `ToolCallDelta(id, name, partial_json)` while the
+model is still writing a tool call. The first one for
+a call has an empty `partial_json`: show "calling search…" there, seconds before
+`TOOL_CALL_START`, which still means the input is complete and the tool is
+about to run. Like text deltas, they are provisional. Anthropic and OpenAI
+(with Azure and OpenRouter) stream the arguments in fragments; Gemini sends a
+call whole, so it arrives as one opening delta and one with all its arguments.
 
 ### When the model is slow rather than broken
 
@@ -876,6 +885,9 @@ Optional fields:
 - `skills`: a list of skill paths, loaded separately for each task.
 - `permission`: permission to delegate; omitted means inherit the parent's manager.
 - `timeout_seconds`: whole-task timeout, default 300 seconds, including child model and tool calls.
+- `concurrent`: default `True`. Specialists asked for in the same turn run at
+  the same time, up to `AgentConfig.max_parallel_subagents` (default 4).
+  `False` makes this one wait for the others and run alone.
 
 The SDK exposes `delegate_<name>(task: str)` to the model internally. The schema
 and description tell the orchestrator how to request a specialist. Do not also
@@ -894,7 +906,10 @@ or other context it needs in the task. The child's model/provider comes from its
 explicit config; it does not inherit the parent's model or injected provider.
 
 Handler functions remain shared application objects: separate conversations do
-not isolate files, databases, closures, or arbitrary Python code. Child-owned
+not isolate files, databases, closures, or arbitrary Python code. Specialists run
+in parallel, but tools that are not `concurrent` (file writes, `ask_user`,
+`write_todos`) still take turns across the whole tree of agents, and approval
+prompts are asked one at a time. Child-owned
 providers and memory close on completion, failure, and cancellation. Skills may
 add their own tool and prompt catalog; do not also register a `Skill` tool.
 

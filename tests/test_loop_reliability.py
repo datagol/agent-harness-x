@@ -936,6 +936,103 @@ def test_an_application_tool_of_the_same_name_wins():
     assert "read_todos" in agent.tools.list_tools(), "the other default is still added"
 
 
+# ── write_todos is worth calling: a real schema and one line of guidance ────
+
+
+def test_write_todos_spells_out_its_items():
+    """A bare array of objects left the model guessing the keys; in the
+    2026-10-10 benchmark HarnessX never called the tool in 39 runs."""
+    agent, _ = _planning_agent([])
+    params = {p["name"]: p for p in agent.tools.get_tool_params()}
+    items = params["write_todos"]["input_schema"]["properties"]["todos"]["items"]
+    assert items["required"] == ["content", "status"]
+    assert items["properties"]["status"]["enum"] == ["pending", "in_progress", "completed"]
+    assert "additionalProperties" not in items, "an extra key the model adds is not worth a refusal"
+    assert "Send the whole list every time" in params["write_todos"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_todo_is_refused_in_one_line():
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": [{"content": "x"}]})], stop_reason="tool_use"),
+        ProviderResponse(text="ok"),
+    ])
+    seen = []
+    agent.hooks.on(HookEvent.TODOS_UPDATED, lambda data: seen.append(data))
+    async with agent:
+        await agent.run("plan it")
+    result = provider.calls[1]["messages"][-1]["content"][0]
+    assert result["is_error"]
+    assert "Invalid arguments for 'write_todos'" in str(result["content"])
+    assert "'status' is a required property" in str(result["content"])
+    assert agent.todos == [] and seen == []
+
+
+def test_the_prompt_mentions_planning_only_while_the_builtin_is_installed():
+    from harnessx import ToolRegistry
+    from harnessx.builtin.planning import PLANNING_GUIDANCE
+
+    on, _ = _planning_agent([])
+    assert PLANNING_GUIDANCE in on._build_system_prompt()
+
+    off = Agent(config=AgentConfig(model="m", planning=False), provider=Scripted([]))
+    assert PLANNING_GUIDANCE not in off._build_system_prompt()
+
+    registry = ToolRegistry()
+    registry.register_with_schema(
+        "write_todos", "the application's own", {"type": "object", "properties": {}},
+        lambda: "mine", permission=PermissionLevel.ALLOW,
+    )
+    theirs = Agent(config=AgentConfig(model="m"), tools=registry, provider=Scripted([]))
+    assert PLANNING_GUIDANCE not in theirs._build_system_prompt()
+
+    briefed = Agent(config=AgentConfig(model="m", system_prompt="You are terse."), provider=Scripted([]))
+    assert briefed._build_system_prompt() == f"You are terse.\n\n{PLANNING_GUIDANCE}"
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_does_not_change_as_the_list_does():
+    """The list lives at the tail; the system prompt heads the cached prefix."""
+    plan = [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "pending"}]
+    ticked = [{"content": "a", "status": "completed"}, {"content": "b", "status": "in_progress"}]
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c2", "write_todos", {"todos": ticked})], stop_reason="tool_use"),
+        ProviderResponse(text="done for now"),
+        ProviderResponse(text="b is left for later"),  # answers the unfinished-plan reminder
+    ])
+    async with agent:
+        await agent.run("plan it")
+    systems = {str(call["system"]) for call in provider.calls}
+    assert len(provider.calls) == 4 and len(systems) == 1
+
+
+@pytest.mark.asyncio
+async def test_each_request_extends_the_last_one_while_a_list_is_kept():
+    """The reminder went onto the newest message only, so the message before it
+    changed on every turn and the whole conversation was written to the prompt
+    cache again: cache writes nearly tripled in the 2026-10-12 benchmark once
+    the model planned. Each copy now stays where it was first sent."""
+    plan = [{"content": "a", "status": "in_progress"}, {"content": "b", "status": "pending"}]
+    ticked = [{"content": "a", "status": "completed"}, {"content": "b", "status": "in_progress"}]
+    agent, provider = _planning_agent([
+        ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c2", "read_todos", {})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c3", "write_todos", {"todos": ticked})], stop_reason="tool_use"),
+        ProviderResponse(tool_calls=[ToolCall("c4", "read_todos", {})], stop_reason="tool_use"),
+        ProviderResponse(text="done for now"),
+        ProviderResponse(text="b is left for later"),
+    ])
+    async with agent:
+        await agent.run("plan it")
+    requests = [call["messages"] for call in provider.calls]
+    for earlier, later in zip(requests[1:], requests[2:]):
+        assert later[: len(earlier)] == earlier, "an earlier message changed between requests"
+    newest = str(requests[-1][-1]["content"])
+    assert "1/2 complete" in newest, "the newest message carries the current list"
+    assert "0/2 complete" in str(requests[-1]), "earlier copies stay where they were sent"
+
+
 # ── a tool-heavy conversation can actually be condensed ─────────────────────
 
 
@@ -1176,3 +1273,27 @@ def test_loop_guard_is_exported_like_every_other_config_type():
 
     assert harnessx.LoopGuard is LoopGuard
     assert "LoopGuard" in harnessx.__all__
+
+
+def test_spill_large_results_moves_only_large_results_and_is_idempotent(tmp_path):
+    from harnessx.memory import ConversationMemory
+
+    from harnessx.types import ToolResult
+
+    memory = ConversationMemory()
+    memory.add_user_message("go")
+    memory.add_assistant_message([
+        {"type": "tool_use", "id": "a", "name": "t", "input": {}},
+        {"type": "tool_use", "id": "b", "name": "t", "input": {}},
+    ])
+    memory.add_tool_results([
+        ToolResult(tool_call_id="a", content="small"),
+        ToolResult(tool_call_id="b", content="y" * 10_000),  # under the 12,000 kept on arrival
+    ])
+    freed = memory.spill_large_results()
+    assert freed > 6_000
+    blocks = memory.get_messages()[-1]["content"]
+    assert blocks[0]["content"] == "small"
+    assert "Full output saved to:" in blocks[1]["content"]
+    assert memory.spill_large_results() == 0, "already on disk"
+    assert "y" * 100 in memory.read_evicted("b", max_chars=200), "still readable"

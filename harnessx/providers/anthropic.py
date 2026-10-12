@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import json
+
 import inspect
 from copy import deepcopy
 from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
-from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallDelta
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
-from ..models import ModelLimits
+from ..models import ModelLimits, lookup_model_limits
 from ..types import ToolChoice
-from .base import normalize_tool_choice, LLMProvider
+from .base import INVALID_ARGUMENTS, normalize_tool_choice, LLMProvider
 
 
 def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -175,6 +177,7 @@ class AnthropicProvider(LLMProvider):
         # The engine owns retries (RetryPolicy); the SDK's own would compound them invisibly.
         self.client = client or AsyncAnthropic(max_retries=0)
         self._limits: dict[str, ModelLimits | None] = {}
+        self._asking: dict[str, Any] = {}  # model -> Models API lookup running beside the first calls
 
     async def model_limits(self, model: str) -> ModelLimits | None:
         """Ask the Models API: it reports ``max_input_tokens`` and ``max_tokens``
@@ -183,31 +186,80 @@ class AnthropicProvider(LLMProvider):
         Asked once per model. Any failure -- an older API, a proxy that does not
         serve ``/v1/models``, a client double in tests -- is remembered as "no
         answer", and the built-in table is used instead.
+
+        For a model the built-in table knows, the question no longer holds up
+        the first call: it took 260-320 ms, every run in a fresh process, and
+        was all of the framework overhead the benchmarks measured. The table
+        answers until the API does; later calls use the API's figures. A model
+        the table does not know still waits for the answer.
         """
         if model in self._limits:
             return self._limits[model]
-        found: ModelLimits | None = None
-        try:
-            import asyncio
+        # An answer from the API holds for the process: a new Agent (a new
+        # provider) per task used to pay this round trip on every run. Keyed by
+        # endpoint, so a gateway that serves other limits is asked on its own.
+        base_url = getattr(self.client, "base_url", None)
+        shared_key = (str(base_url), model) if base_url is not None else None
+        if shared_key is not None and shared_key in _MODEL_LIMITS:
+            self._limits[model] = _MODEL_LIMITS[shared_key]
+            return self._limits[model]
+        import asyncio
 
-            info = await asyncio.wait_for(self.client.models.retrieve(model), timeout=10)
-            window, output = getattr(info, "max_input_tokens", None), getattr(info, "max_tokens", None)
-            if type(window) is int and type(output) is int and window > 0 and output > 0:
-                found = ModelLimits(window, output)
-        except Exception:
-            found = None
+        asking = self._asking.get(model)
+        if asking is not None and asking.get_loop() is not asyncio.get_running_loop():
+            asking = None  # started on a loop that has since closed (a sync wrapper's)
+        if asking is None:
+            asking = self._asking[model] = asyncio.ensure_future(self._ask_models_api(model))
+        if not asking.done() and lookup_model_limits(model) is not None:
+            return None  # the table answers this call
+        found = await asking
+        self._asking.pop(model, None)
         self._limits[model] = found
+        if found is not None and shared_key is not None:
+            _MODEL_LIMITS[shared_key] = found
         return found
+
+    async def _ask_models_api(self, model: str) -> ModelLimits | None:
+        import asyncio
+
+        try:
+            info = await asyncio.wait_for(self.client.models.retrieve(model), timeout=10)
+        except Exception:
+            return None
+        window, output = getattr(info, "max_input_tokens", None), getattr(info, "max_tokens", None)
+        if type(window) is int and type(output) is int and window > 0 and output > 0:
+            return ModelLimits(window, output)
+        return None
+
+    async def aclose(self) -> None:
+        for asking in self._asking.values():
+            asking.cancel()
+        self._asking.clear()
+        await super().aclose()
+
+    @staticmethod
+    def clear_model_limits_cache() -> None:
+        """Forget the limits the Models API reported, for every endpoint in this process."""
+        _MODEL_LIMITS.clear()
 
     async def _create_via_stream(self, kwargs: dict[str, Any]) -> Any:
         """The SDK refuses a non-streaming call that could run past ten minutes;
         stream it and return the assembled message instead."""
         stream_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
+        arguments: dict[str, str] = {}
         async with self.client.messages.stream(**stream_kwargs) as stream:
-            response = await stream.get_final_message()
+            try:
+                if hasattr(stream, "__aiter__"):  # read the events to keep the raw arguments
+                    async for _ in _chunks(stream, arguments):
+                        pass
+                response = await stream.get_final_message()
+            except ValueError as exc:
+                if not _malformed_tool_json(exc):
+                    raise
+                response = _salvage_malformed(stream, exc)
         if not getattr(response, "stop_reason", None):
             raise IncompleteStreamError("Anthropic stream ended before the message was complete")
-        return response
+        return _reject_cut_off_arguments(response, arguments)
 
     async def _create(self, kwargs: dict[str, Any]) -> Any:
         try:
@@ -303,12 +355,20 @@ class AnthropicProvider(LLMProvider):
                 raise
 
         delivered = False
+        arguments: dict[str, str] = {}  # call id -> the argument text as streamed
         try:
             async with stream_ctx as stream:
-                async for chunk in _chunks(stream):
-                    delivered = delivered or chunk.kind == "text_delta"
-                    yield chunk
-                final_resp = await stream.get_final_message()
+                try:
+                    async for chunk in _chunks(stream, arguments):
+                        # A drafted tool call counts as output too: restarting the
+                        # stream would show it twice.
+                        delivered = delivered or chunk.kind in ("text_delta", "tool_call_delta")
+                        yield chunk
+                    final_resp = await stream.get_final_message()
+                except ValueError as exc:
+                    if not _malformed_tool_json(exc):
+                        raise
+                    final_resp = _salvage_malformed(stream, exc)
         except Exception as exc:
             if not delivered and self.eager_tool_streaming and tools and _rejected_eager_streaming(exc):
                 self.eager_tool_streaming = False
@@ -321,8 +381,9 @@ class AnthropicProvider(LLMProvider):
             # Only before any output: a rejected marker fails at stream open, and
             # restarting a stream that has delivered text would repeat it.
             if not delivered and filtered_kwargs != uncached and _rejected_cache_control(exc):
+                arguments.clear()
                 async with self.client.messages.stream(**uncached) as stream:
-                    async for chunk in _chunks(stream):
+                    async for chunk in _chunks(stream, arguments):
                         yield chunk
                     final_resp = await stream.get_final_message()
             else:
@@ -331,6 +392,7 @@ class AnthropicProvider(LLMProvider):
             # The stream closed before message_delta carried a stop reason: what
             # was assembled is a fragment, and may hold a half-written tool call.
             raise IncompleteStreamError("Anthropic stream ended before the message was complete")
+        final_resp = _reject_cut_off_arguments(final_resp, arguments)
         yield StreamChunk(kind="response", data=_from_anthropic_response(final_resp))
 
     async def count_tokens(
@@ -353,23 +415,109 @@ class AnthropicProvider(LLMProvider):
             return len(str(messages)) // 3
 
 
-async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:
+# Model limits the Models API reported, per (endpoint, model), for the process.
+_MODEL_LIMITS: dict[tuple[str, str], ModelLimits] = {}
+
+_MALFORMED_TOOL_JSON = "Unable to parse tool parameter JSON"
+
+
+def _malformed_tool_json(exc: BaseException) -> bool:
+    """The SDK could not parse a streamed tool argument (eager input streaming
+    hands that check to the client)."""
+    return isinstance(exc, ValueError) and _MALFORMED_TOOL_JSON in str(exc)
+
+
+def _salvage_malformed(stream: Any, exc: BaseException) -> Any:
+    """The reply so far, with the unreadable tool call marked for the engine to answer.
+
+    The SDK raises while accumulating the stream, so the rest of the reply never
+    arrives; what it assembled up to the broken argument is kept. The broken
+    call keeps its id and name and gets an INVALID_ARGUMENTS input, which the
+    engine answers with an error result asking the model to send it again.
+    Without an identifiable call there is nothing to answer, so the typed error
+    lets the engine ask for the whole reply again.
+    """
+    from ..errors import MalformedToolInputError
+
+    try:
+        snapshot = stream.current_message_snapshot
+    except Exception:
+        snapshot = None
+    blocks = list(getattr(snapshot, "content", None) or [])
+    broken = next((b for b in reversed(blocks) if getattr(b, "type", None) == "tool_use"), None)
+    if broken is None or not getattr(broken, "id", "") or not getattr(broken, "name", ""):
+        raise MalformedToolInputError(str(exc).split(". JSON:")[0]) from exc
+    detail = str(exc.__cause__ or exc).split(". JSON:")[0]
+    broken.input = {
+        INVALID_ARGUMENTS: f"the arguments are not valid JSON ({detail}); the partial input was discarded"
+    }
+    # The stream never reached message_delta, so it carries no stop reason.
+    snapshot.stop_reason = "tool_use"
+    return snapshot
+
+
+def _reject_cut_off_arguments(resp: Any, arguments: dict[str, str]) -> Any:
+    """``resp`` with every tool call whose streamed arguments are not complete
+    JSON marked INVALID_ARGUMENTS, for the engine to answer.
+
+    The SDK parses tool arguments leniently, so JSON cut off part way --
+    ``{"path": "a.py", "content": "def f(`` -- comes back as a dict holding
+    whatever arrived, and the tool would run with half its input. The text as
+    streamed is checked strictly instead. A reply that ran out of tokens is
+    left alone: the engine has its own recovery for a call cut short that way.
+    """
+    if not arguments or getattr(resp, "stop_reason", None) == "max_tokens":
+        return resp
+    for block in getattr(resp, "content", None) or []:
+        raw = arguments.get(getattr(block, "id", None) or "", "")
+        if getattr(block, "type", None) != "tool_use" or not raw.strip():
+            continue
+        try:
+            json.loads(raw)
+        except ValueError as exc:
+            block.input = {
+                INVALID_ARGUMENTS: f"the arguments are not complete JSON ({exc.msg} at character {exc.pos}"
+                f" of {len(raw)}); they were discarded"
+            }
+    return resp
+
+
+async def _chunks(stream: Any, arguments: dict[str, str] | None = None) -> AsyncIterator[StreamChunk]:
     """Every event the stream delivers, as text, thinking, or a sign of progress.
 
     Reading only ``text_stream`` hid everything else: a model writing a long
     tool argument -- a whole report into a file -- streams for minutes without
     a single text event, which looked exactly like a stalled connection.
+
+    ``arguments``, when given, collects each tool call's argument text as it
+    streamed, by call id, for a strict check once the reply is complete.
     """
     if not hasattr(stream, "__aiter__"):  # a client without event iteration
         async for text in stream.text_stream:
             yield StreamChunk(kind="text_delta", data=text)
         return
+    open_calls: dict[int, tuple[str, str]] = {}  # block index -> (call id, tool name)
     async for event in stream:
         kind = getattr(event, "type", None)
         if kind == "text" and getattr(event, "text", ""):
             yield StreamChunk(kind="text_delta", data=event.text)
         elif kind == "thinking" and getattr(event, "thinking", ""):
             yield StreamChunk(kind="thinking_delta", data=event.thinking)
+        elif kind == "content_block_start" and getattr(getattr(event, "content_block", None), "type", None) == "tool_use":
+            # The model has started a tool call: say which, before its arguments.
+            block = event.content_block
+            open_calls[event.index] = (block.id, block.name)
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(block.id, block.name))
+        elif (
+            kind == "content_block_delta"
+            and getattr(getattr(event, "delta", None), "type", None) == "input_json_delta"
+            and getattr(event, "index", None) in open_calls
+            and event.delta.partial_json
+        ):
+            call_id, name = open_calls[event.index]
+            if arguments is not None:
+                arguments[call_id] = arguments.get(call_id, "") + event.delta.partial_json
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(call_id, name, event.delta.partial_json))
         else:
             yield StreamChunk(kind="progress")
 

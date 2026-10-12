@@ -96,7 +96,13 @@ class RecoveryData(TypedDict):
       call was repeated within the limit it named.
     * ``context_overflow`` -- the request did not fit the context window; the
       history was condensed and the call repeated.
+    * ``context_overflow_spill`` -- the request did not fit and the history was
+      too short to condense; large tool results went to disk and the call was repeated.
+    * ``spurious_overflow`` -- a request far below the window was refused as too
+      long; it was tried once more.
     * ``paused_turn`` -- the server paused a long turn; it was sent back to resume.
+    * ``malformed_tool_input`` -- a streamed tool argument could not be read and
+      the call could not be identified; the reply was asked for again, once.
     * ``iteration_limit`` -- the run reached ``max_iterations``; the model was
       asked for a final answer without tools instead of the run failing.
     * ``unfinished_plan`` -- the model was finishing with its task list still

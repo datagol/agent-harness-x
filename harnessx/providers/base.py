@@ -16,7 +16,7 @@ from ..models import DEFAULT_OUTPUT_CAP, ModelLimits, default_reply_budget, look
 from ..types import ProviderResponse, StreamChunk, ToolChoice
 from ..types import PromptCacheHint
 from .registry import BUILTIN_PROVIDERS, provider_factory, registered_providers
-from .retry import is_transient, retry_after_seconds, sdk_connection_failure
+from .retry import is_rate_limited, is_transient, retry_after_seconds, sdk_connection_failure
 
 
 # The reply budget for a model no table knows. Kept under its old name for
@@ -158,6 +158,14 @@ class LLMProvider(ABC):
         other 4xx as final; override to classify vendor-specific errors.
         """
         return is_transient(exc) or sdk_connection_failure(exc)
+
+    def is_rate_limited(self, exc: BaseException) -> bool:
+        """Whether the failure is a throttle or an overload (429, 529).
+
+        These earn ``RetryPolicy.rate_limit_attempts`` rather than the shorter
+        ``attempts`` budget. Override for vendor-specific throttling errors.
+        """
+        return is_rate_limited(exc)
 
     def retry_after(self, exc: BaseException) -> float | None:
         """Seconds the server asked us to wait before retrying, when it said.

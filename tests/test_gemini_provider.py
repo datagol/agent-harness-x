@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -321,11 +322,17 @@ class TestGeminiStream(unittest.TestCase):
         self.assertIn("progress", [c.kind for c in chunks])
         chunks = [c for c in chunks if c.kind != "progress"]
         kinds = [c.kind for c in chunks]
-        self.assertEqual(kinds, ["thinking_delta", "text_delta", "text_delta", "response"])
+        self.assertEqual(kinds, ["thinking_delta", "text_delta", "text_delta",
+                                 "tool_call_delta", "tool_call_delta", "response"])
         self.assertEqual(chunks[1].data, "Hello ")
         self.assertEqual(chunks[2].data, "world")
+        # A Gemini call arrives whole: one delta names it, one carries its arguments.
+        opening, arguments = chunks[3].data, chunks[4].data
+        self.assertEqual((opening.name, opening.partial_json), ("get_weather", ""))
+        self.assertEqual(json.loads(arguments.partial_json), {"city": "Rome"})
 
         final = chunks[-1].data
+        self.assertEqual(final.tool_calls[0].id, opening.id, "the deltas name the call that runs")
         self.assertEqual(final.text, "Hello world")
         self.assertEqual(final.stop_reason, StopReason.TOOL_USE)
         self.assertEqual(final.tool_calls[0].name, "get_weather")

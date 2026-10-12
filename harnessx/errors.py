@@ -48,6 +48,34 @@ class IncompleteStreamError(HarnessError, ConnectionError):
     """
 
 
+class ContextOverflowError(HarnessError, ValueError):
+    """The request did not fit the model's context window, and nothing left in
+    the history could be condensed or spilled to make it fit.
+
+    Carries the provider's own message, plus the estimated request size and the
+    window it was measured against when those are known.
+    """
+
+    def __init__(self, message: str, *, estimated_tokens: int | None = None, context_window: int | None = None) -> None:
+        super().__init__(message)
+        self.estimated_tokens = estimated_tokens
+        self.context_window = context_window
+
+
+class MalformedToolInputError(HarnessError, ValueError):
+    """A streamed tool call's arguments could not be read as JSON, and the call
+    could not be identified to answer it with an error result.
+
+    The engine asks for the reply again once (a recovery, not a retry attempt)
+    and fails with this error if the second reply is unreadable too.
+    """
+
+    def __init__(self, message: str, *, name: str | None = None, raw_json: str = "") -> None:
+        super().__init__(message)
+        self.name = name
+        self.raw_json = raw_json
+
+
 class TransientToolError(HarnessError):
     """Raised by a tool handler to say the call failed for a reason that may clear on its own
     (throttling, a flaky upstream, a lost connection) and did not take effect.

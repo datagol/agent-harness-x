@@ -18,6 +18,9 @@ from harnessx import (
     RunLimitReached, RunRefused, StreamChunk, SubAgent, TokenUsage, ToolCall,
 )
 from harnessx import engine, models
+from harnessx.errors import ConfigurationError
+from harnessx.execution import RunEventType
+from harnessx.types import ToolCallDelta
 from harnessx.engine import UNANSWERED_CALL_NOTICE, sanitize_history
 from harnessx.memory import CLEARED_TOOL_RESULT, ConversationMemory
 from harnessx.models import register_model_limits
@@ -264,6 +267,91 @@ async def test_a_stream_that_never_starts_is_retried_well_before_the_idle_limit(
     assert result.ok and result.output == "Hello" and len(provider.calls) == 2
 
 
+class SlowStart(Scripted):
+    """Healthy but slow: every call takes ``delay`` seconds before its first event."""
+
+    first_event_promptly = True
+
+    def __init__(self, *, delay):
+        super().__init__([])
+        self.delay = delay
+
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        await asyncio.sleep(self.delay)
+        yield StreamChunk(kind="progress")
+        yield StreamChunk(kind="text_delta", data="Hello")
+        yield StreamChunk(kind="response", data=ProviderResponse(text="Hello"))
+
+    async def create(self, **kwargs):
+        raise AssertionError("a provider that streams is streamed, even for agent.run()")
+
+
+def test_the_first_event_deadline_grows_per_attempt_and_never_passes_the_idle_limit():
+    policy = RetryPolicy()
+    assert [policy.first_event_timeout(0, attempt=n) for n in (1, 2, 3, 4)] == [20.0, 40.0, 80.0, 160.0]
+    assert RetryPolicy(stream_idle_timeout_seconds=50).first_event_timeout(0, attempt=4) == 50
+    assert RetryPolicy(stream_first_event_growth=1.0).first_event_timeout(0, attempt=4) == 20.0
+    assert policy.first_event_timeout(0) == 20.0, "the first attempt is unchanged"
+    for bad in (0.5, 0, True, "2"):
+        with pytest.raises(ConfigurationError):
+            RetryPolicy(stream_first_event_growth=bad)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_server_gets_through_on_a_later_attempt():
+    """Benchmark fault: every call takes 25 s before its first byte, against a
+    20 s deadline. Scaled down: 0.15 s against roughly 0.07 s."""
+    provider = SlowStart(delay=0.15)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=10.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 5)
+    assert result.ok and result.output == "Hello" and len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_run_remembers_a_slow_server_and_waits_long_enough_next_time():
+    """Growth alone made every step pay one timed-out call before the longer
+    deadline: 20 s lost per model call in the benchmark. Once a reply has taken
+    a while to start, later calls in the run wait twice that from the outset."""
+
+    class SlowTools(SlowStart):
+        async def stream(self, **kwargs):
+            self.calls.append(kwargs)
+            await asyncio.sleep(self.delay)
+            yield StreamChunk(kind="progress")
+            if len(self.calls) <= 2:
+                call = ToolCall("c1", "probe", {})
+                yield StreamChunk(kind="response", data=ProviderResponse(tool_calls=[call], stop_reason="tool_use"))
+            else:
+                yield StreamChunk(kind="response", data=ProviderResponse(text="Hello"))
+
+    provider = SlowTools(delay=0.4)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=10.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    agent.tools.register_tool(lambda: "ok", name="probe", permission=PermissionLevel.ALLOW)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 10)
+    assert result.ok and result.output == "Hello"
+    assert len(provider.calls) == 3, "one timeout in the first step, none in the second"
+
+
+@pytest.mark.asyncio
+async def test_without_growth_a_slow_server_exhausts_the_retry_budget():
+    """The 0.8.0 behaviour, kept reachable with growth 1.0: the same deadline every time."""
+    provider = SlowStart(delay=0.15)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=1.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 5)
+    assert result.failed and result.error["type"] == "IncompleteStreamError"
+    assert len(provider.calls) == retry.attempts
+
+
 @pytest.mark.asyncio
 async def test_a_quiet_start_is_tolerated_where_it_may_be_a_model_thinking():
     """OpenAI's and Gemini's reasoning models say nothing until they answer:
@@ -328,6 +416,42 @@ async def test_an_openai_stream_with_no_finish_reason_and_a_tool_call_is_not_tru
     with pytest.raises(IncompleteStreamError):
         async for _ in provider.stream(model="gpt-4o", messages=[], system=None, tools=[], max_tokens=100):
             pass
+
+
+@pytest.mark.asyncio
+async def test_an_openai_tool_call_streams_as_it_is_written():
+    """Only Anthropic emitted TOOL_CALL_DELTA; OpenAI (and Azure and OpenRouter,
+    which share its stream) said nothing but progress until the call was done."""
+    import json
+
+    from harnessx.providers.openai import OpenAIProvider
+
+    def chunk(finish=None, **delta):
+        return SimpleNamespace(usage=None, choices=[SimpleNamespace(
+            finish_reason=finish, delta=SimpleNamespace(**{"content": None, "tool_calls": None, "refusal": None, **delta}))])
+
+    def call(index, id=None, name=None, arguments=None):
+        return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
+
+    async def chunks():
+        yield chunk(tool_calls=[call(0, "c1", "search", "")])
+        yield chunk(tool_calls=[call(0, arguments='{"q": ')])
+        yield chunk(tool_calls=[call(0, arguments='"x"}')])
+        yield chunk(tool_calls=[call(1, None, "lookup", '{"id": 7}')])  # no id from the API
+        yield chunk(finish="tool_calls")
+
+    async def create(**kwargs):
+        return chunks()
+
+    provider = OpenAIProvider(client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    out = [c async for c in provider.stream(model="gpt-4o", messages=[], system=None, tools=[], max_tokens=100)]
+    deltas = [c.data for c in out if c.kind == "tool_call_delta"]
+    final = out[-1].data
+    first = [d for d in deltas if d.id == "c1"]
+    assert first[0] == ToolCallDelta("c1", "search") and json.loads("".join(d.partial_json for d in first)) == {"q": "x"}
+    second = [d for d in deltas if d.name == "lookup"]
+    assert second[0].partial_json == "" and second[1].partial_json == '{"id": 7}'
+    assert [c.id for c in final.tool_calls] == ["c1", second[0].id], "the deltas name the call that runs"
 
 
 # ── the step limit ───────────────────────────────────────────────────────────
@@ -640,3 +764,49 @@ async def test_the_plan_reminder_is_sent_once_only():
     async with agent:
         result = await agent.run("go")
     assert len(provider.calls) == 3 and result.output == "answer\n\nStep is left for you."
+
+
+def test_tool_call_delta_events_round_trip_and_validate():
+    from harnessx.execution import RunEvent, RunEventType
+    from harnessx.types import ToolCallDelta
+
+    event = RunEvent(RunEventType.TOOL_CALL_DELTA, ToolCallDelta("t1", "search", '{"q":'))
+    again = RunEvent.from_dict(event.to_dict() if hasattr(event, "to_dict") else {"type": "tool_call_delta", "data": {"id": "t1", "name": "search", "partial_json": '{"q":'}})
+    assert again.data == ToolCallDelta("t1", "search", '{"q":')
+    with pytest.raises(TypeError):
+        RunEvent(RunEventType.TOOL_CALL_DELTA, "not a delta")
+
+
+class DraftsAToolCall(Scripted):
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta("t1", "t"))
+            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta("t1", "t", "{}"))
+            yield StreamChunk(kind="response", data=ProviderResponse(tool_calls=[ToolCall("t1", "t", {})], stop_reason="tool_use"))
+        else:
+            yield StreamChunk(kind="text_delta", data="done")
+            yield StreamChunk(kind="response", data=ProviderResponse(text="done"))
+
+
+@pytest.mark.asyncio
+async def test_tool_call_deltas_are_held_back_when_a_middleware_buffers_the_reply():
+    from harnessx.hooks import Middleware
+    from harnessx.types import ToolCallDelta  # noqa: F401
+
+    class Rewrites(Middleware):
+        async def after_llm_call(self, response):
+            return response
+
+    for middleware, expected in (([], 2), ([Rewrites()], 0)):
+        provider = DraftsAToolCall([])
+        agent = _agent(provider)
+        agent.tools.register_tool(lambda: "ok", name="t", permission=PermissionLevel.ALLOW)
+        for m in middleware:
+            agent.middleware.add(m)
+        async with agent:
+            async with agent.run_stream("go") as stream:
+                events = [e async for e in stream]
+                assert (await stream.result()).ok
+        assert sum(e.type is RunEventType.TOOL_CALL_DELTA for e in events) == expected
+        assert "".join(e.data for e in events if e.type is RunEventType.TEXT_DELTA) in ("done", "")

@@ -20,7 +20,7 @@ invalidate the prompt cache for the whole conversation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from harnessx.types import PermissionLevel
 from ._registration import select_tools
@@ -33,6 +33,58 @@ MAX_TODOS = 50
 MAX_CONTENT_CHARS = 200
 
 _MARK = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+
+# The item shape, spelled out for the model. A bare "array of objects" left it
+# to guess the keys from the description, and in the 2026-10-10 benchmark it
+# never called the tool. No additionalProperties: false, because models often
+# add an id or priority and refusing the whole list over that helps nobody.
+TODO_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string", "description": "One step, as a short imperative sentence."},
+        "status": {"type": "string", "enum": list(STATUSES)},
+    },
+    "required": ["content", "status"],
+}
+
+WRITE_TODOS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "todos": {
+            "type": "array",
+            "items": TODO_ITEM_SCHEMA,
+            "maxItems": MAX_TODOS,
+            "description": "The whole list, every time, including completed items.",
+        },
+    },
+    "required": ["todos"],
+}
+
+WRITE_TODOS_DESCRIPTION = (
+    "Plan multi-step work and track progress: the list of steps, replaced whole on every call.\n\n"
+    "Call it before starting any task with three or more steps, then again as each step finishes. "
+    "Send the whole list every time, including items already completed. Keep exactly one item "
+    "in_progress while you work on it; if you send more, the first is kept and the rest go back to pending."
+)
+
+# Added to the system prompt while the built-in write_todos is installed. Static
+# text, so the cacheable prefix does not change as the list does.
+PLANNING_GUIDANCE = (
+    "Planning: when a task needs three or more steps, call write_todos before you start, with one "
+    "item per step, and update it as each step finishes so exactly one item is in_progress."
+)
+
+
+def planning_guidance(registry: ToolRegistry):
+    """A prompt provider that adds PLANNING_GUIDANCE while the built-in tool is installed."""
+
+    def provide() -> str:
+        if not registry.has_tool("write_todos"):
+            return ""
+        handler = registry.get_tool("write_todos").handler
+        return PLANNING_GUIDANCE if getattr(handler, "__harnessx_builtin__", False) else ""
+
+    return provide
 
 
 def _agent():
@@ -91,19 +143,7 @@ def register_planning_tools(
         return []
 
     async def write_todos(todos: list[dict]) -> str:
-        """Record the task list, replacing it entirely.
-
-        Use this for work with several distinct steps, and keep it current as you
-        go. Skip it for anything you can finish in one or two steps: a task list
-        for trivial work is noise.
-
-        Send the whole list every time, including items already completed. Keep
-        exactly one item in_progress while you work on it; if you send more, the
-        first is kept and the rest go back to pending.
-
-        Args:
-            todos: Objects of {"content": str, "status": "pending"|"in_progress"|"completed"}.
-        """
+        """Record the task list, replacing it entirely. See WRITE_TODOS_DESCRIPTION."""
         cleaned, demoted = normalize(todos)
         agent = _agent()
         if agent is not None:
@@ -121,14 +161,20 @@ def register_planning_tools(
         agent = _agent()
         return render(getattr(agent, "todos", []) or []) or "The task list is empty."
 
-    handlers = {"write_todos": write_todos, "read_todos": read_todos}
+    handlers: dict[str, Callable[..., Any]] = {"write_todos": write_todos, "read_todos": read_todos}
     for name in names:
         handler = handlers[name]
         # Tagged so an Agent can tell its own default apart from one the
         # application registered under the same name, and leave that one alone.
         handler.__harnessx_builtin__ = True  # type: ignore[attr-defined]
-        registry.register_tool(
-            handler, name=name, permission=permission,
-            concurrent=False, replay_policy="safe", replace=replace,
-        )
+        if name == "write_todos":
+            registry.register_with_schema(
+                name, WRITE_TODOS_DESCRIPTION, WRITE_TODOS_SCHEMA, handler, permission=permission,
+                concurrent=False, replay_policy="safe", replace=replace,
+            )
+        else:
+            registry.register_tool(
+                handler, name=name, permission=permission,
+                concurrent=False, replay_policy="safe", replace=replace,
+            )
     return names

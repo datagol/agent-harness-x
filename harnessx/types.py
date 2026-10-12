@@ -314,14 +314,31 @@ class ProviderResponse:
         return [SimpleNamespace(**b) if set(b) <= plain else b for b in blocks]
 
 
+@dataclass(frozen=True)
+class ToolCallDelta:
+    """A piece of a tool call as the model writes it (``RunEventType.TOOL_CALL_DELTA``).
+
+    The first delta for a call has an empty ``partial_json``: it says which tool
+    the model has started calling. Fragments of the JSON arguments follow; they
+    are not valid JSON on their own. The complete call arrives with
+    ``TOOL_CALL_START`` when it is dispatched. Like text deltas, these are
+    provisional: discard them on ``ATTEMPT_RESET``.
+    """
+
+    id: str
+    name: str
+    partial_json: str = ""
+
+
 @dataclass
 class StreamChunk:
     """A streaming chunk emitted by an LLMProvider."""
 
-    # "text_delta", "thinking_delta", "response", or "progress": the provider
-    # received something that is not visible text -- a streamed tool argument, a
-    # signature, a block boundary. It carries no data; it tells the engine the
-    # stream is alive, so a long tool call is not mistaken for a stall.
+    # "text_delta", "thinking_delta", "tool_call_delta" (a ToolCallDelta),
+    # "response", or "progress": the provider received something that is not
+    # visible output -- a signature, a block boundary. It carries no data; it
+    # tells the engine the stream is alive, so a long tool call is not mistaken
+    # for a stall.
     kind: str
     data: Any = None
 
@@ -447,6 +464,19 @@ class RetryPolicy:
     # reasoning models are silent until they answer (OpenAI, Gemini) wait the
     # idle limit instead. None turns the check off.
     stream_first_event_timeout_seconds: float | None = 20.0
+    # Each retry waits longer for that first event, doubling by default. A dead
+    # connection is still abandoned at the first deadline, while a server that
+    # is slow rather than stuck (a long prompt, an overloaded region) gets
+    # through on a later attempt instead of meeting the same deadline every
+    # time. 1.0 keeps one deadline for every attempt; never past the idle limit.
+    stream_first_event_growth: float = 2.0
+    # A rate limit (429) or an overload (529) clears on its own, usually within
+    # a minute, so it gets a deeper budget than a 5xx: up to rate_limit_attempts
+    # calls, as long as the time slept between them stays under
+    # rate_limit_budget_seconds. The first `attempts` calls are governed by
+    # `attempts` alone, as before. None removes the time cap.
+    rate_limit_attempts: int = 8
+    rate_limit_budget_seconds: float | None = 120.0
     # Failover, when AgentConfig.fallbacks names other providers. Transient
     # failures one provider may collect before the chain moves to the next, and
     # how long a provider stays out of rotation after being passed over.
@@ -467,22 +497,52 @@ class RetryPolicy:
             _positive(self.stream_idle_timeout_seconds, "stream_idle_timeout_seconds")
         if self.stream_first_event_timeout_seconds is not None:
             _positive(self.stream_first_event_timeout_seconds, "stream_first_event_timeout_seconds")
+        if (
+            isinstance(self.stream_first_event_growth, bool)
+            or not isinstance(self.stream_first_event_growth, (int, float))
+            or self.stream_first_event_growth < 1
+        ):
+            raise ConfigurationError("stream_first_event_growth must be a number of at least 1")
         if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
             raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
             raise ConfigurationError("switch_after must be a positive integer")
         _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
+        if type(self.rate_limit_attempts) is not int or self.rate_limit_attempts < 1:
+            raise ConfigurationError("rate_limit_attempts must be a positive integer")
+        if self.rate_limit_budget_seconds is not None:
+            _positive(self.rate_limit_budget_seconds, "rate_limit_budget_seconds")
 
-    def first_event_timeout(self, request_tokens: int) -> float | None:
+    def attempts_for(self, *, rate_limited: bool) -> int:
+        """The total calls allowed for one step: deeper for a rate limit, never fewer than ``attempts``."""
+        return max(self.attempts, self.rate_limit_attempts) if rate_limited else self.attempts
+
+    def spent(self, attempt: int, *, rate_limited: bool, waited: float = 0.0, next_wait: float = 0.0) -> bool:
+        """Whether ``attempt`` (1-based, just failed) was the last one allowed.
+
+        ``waited`` is the time already slept between this step's attempts and
+        ``next_wait`` the sleep before the next one. Attempts beyond
+        ``attempts`` are granted only to a rate limit, and only while the total
+        sleep stays within ``rate_limit_budget_seconds``.
+        """
+        if attempt >= self.attempts_for(rate_limited=rate_limited):
+            return True
+        if rate_limited and attempt >= self.attempts and self.rate_limit_budget_seconds is not None:
+            return waited + next_wait > self.rate_limit_budget_seconds
+        return False
+
+    def first_event_timeout(self, request_tokens: int, attempt: int = 1) -> float | None:
         """How long to wait for a reply's first event, for a request of ``request_tokens``.
 
-        Never longer than the idle limit: past that the stream counts as
-        stalled anyway.
+        ``attempt`` is the 1-based model call for this step: each retry waits
+        ``stream_first_event_growth`` times longer than the one before. Never
+        longer than the idle limit: past that the stream counts as stalled anyway.
         """
         first = self.stream_first_event_timeout_seconds
         if first is None:
             return self.stream_idle_timeout_seconds
         first += 10.0 * max(0, request_tokens) / 100_000
+        first *= float(self.stream_first_event_growth) ** max(0, int(attempt) - 1)
         idle = self.stream_idle_timeout_seconds
         return first if idle is None else min(first, idle)
 
@@ -495,18 +555,19 @@ class RetryPolicy:
     def wait_for(self, attempt: int, retry_after: float | None = None, *, rand: Any = None) -> float:
         """Seconds to wait after ``attempt`` (1-based) failed.
 
-        Exponential backoff from ``backoff_seconds``, raised to the server's
-        ``retry_after`` when it sent one, spread by ``jitter``, and capped at
-        ``max_backoff_seconds``.
+        Exponential backoff from ``backoff_seconds``, spread downward by
+        ``jitter``, raised to the server's ``retry_after`` when it sent one, and
+        capped at ``max_backoff_seconds``. The spread applies to the backoff
+        only: a server that asked for three seconds gets at least three.
         """
-        wait = _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt, retry_after)
-        if not self.jitter or wait <= 0:
-            return wait
-        import random
+        backoff = _backoff(self.backoff_seconds, self.max_backoff_seconds, attempt)
+        if self.jitter and backoff > 0:
+            import random
 
-        draw = (rand or random.random)()
-        # Spread downward only: never wait longer than the cap or the server asked.
-        return max(0.0, wait * (1 - self.jitter * draw))
+            draw = (rand or random.random)()
+            backoff = max(0.0, backoff * (1 - self.jitter * draw))
+        wait = backoff if retry_after is None else max(backoff, float(retry_after))
+        return min(wait, self.max_backoff_seconds)
 
 
 def _backoff(base: float | None, cap: float, attempt: int, retry_after: float | None = None) -> float:
@@ -740,6 +801,9 @@ class AgentConfig:
     prompt_cache: PromptCachePolicy | None = field(default_factory=PromptCachePolicy)  # None disables caching
     tools: ToolPolicy = field(default_factory=ToolPolicy)
     progress: ProgressPolicy = field(default_factory=ProgressPolicy)
+    # Specialists (SubAgent) that may run at the same time when the model
+    # delegates several tasks in one turn. 1 runs them one at a time.
+    max_parallel_subagents: int = 4
 
     def __init__(
         self,
@@ -756,8 +820,10 @@ class AgentConfig:
         prompt_cache: PromptCachePolicy | dict[str, Any] | None = _OMITTED,
         tools: ToolPolicy | dict[str, Any] | None = None,
         progress: ProgressPolicy | dict[str, Any] | None = None,
+        max_parallel_subagents: int = 4,
     ) -> None:
         self.model, self.provider, self.max_tokens = model, provider, max_tokens
+        self.max_parallel_subagents = max_parallel_subagents
         self.planning = planning
         self.fallbacks = tuple(
             item if isinstance(item, Fallback) else Fallback(**dict(item)) for item in fallbacks
@@ -780,6 +846,8 @@ class AgentConfig:
 
         if type(self.planning) is not bool:
             raise TypeError("planning must be a bool")
+        if type(self.max_parallel_subagents) is not int or self.max_parallel_subagents < 1:
+            raise ConfigurationError("max_parallel_subagents must be a positive integer (1 runs them one at a time)")
         for item in self.fallbacks:
             if not isinstance(item, Fallback):
                 raise ConfigurationError("AgentConfig.fallbacks must contain Fallback entries")

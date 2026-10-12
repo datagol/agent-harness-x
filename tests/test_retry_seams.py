@@ -179,6 +179,106 @@ async def test_model_retry_emits_the_hook_and_honors_the_servers_retry_after():
     assert served == ["scripted"]
 
 
+def test_rate_limits_and_overloads_are_told_apart_from_server_errors():
+    from harnessx.providers.retry import is_rate_limited
+
+    assert is_rate_limited(_Boom(429)) and is_rate_limited(_Boom(529))
+    assert not is_rate_limited(_Boom(500)) and not is_rate_limited(_Boom(503))
+    assert not is_rate_limited(_Boom(400))
+    quota = _Boom(429)
+    quota.args = ("You exceeded your current quota",)
+    assert not is_rate_limited(quota), "a quota 429 is permanent, not a throttle"
+    assert is_rate_limited(Exception("Overloaded, try again"))
+
+
+def test_jitter_never_shortens_a_servers_retry_after():
+    policy = RetryPolicy(backoff_seconds=1, max_backoff_seconds=60, jitter=0.25)
+    assert policy.wait_for(1, retry_after=3, rand=lambda: 1.0) == 3.0
+    assert policy.wait_for(3, retry_after=1, rand=lambda: 1.0) == 3.0, "jitter spreads the backoff, 4 * 0.75"
+
+
+def test_the_rate_limit_budget_counts_calls_and_time():
+    policy = RetryPolicy()
+    assert policy.attempts_for(rate_limited=False) == 4 and policy.attempts_for(rate_limited=True) == 8
+    assert not policy.spent(3, rate_limited=False) and policy.spent(4, rate_limited=False)
+    assert not policy.spent(4, rate_limited=True, waited=10, next_wait=5)
+    assert policy.spent(4, rate_limited=True, waited=118, next_wait=5), "past the 120 s budget"
+    assert policy.spent(8, rate_limited=True)
+    assert not RetryPolicy(rate_limit_budget_seconds=None).spent(7, rate_limited=True, waited=1e6, next_wait=60)
+    assert RetryPolicy(attempts=10).attempts_for(rate_limited=True) == 10, "never fewer than attempts"
+    with pytest.raises(ConfigurationError):
+        RetryPolicy(rate_limit_attempts=0)
+    with pytest.raises(ConfigurationError):
+        RetryPolicy(rate_limit_budget_seconds=0)
+
+
+@pytest.mark.asyncio
+async def test_four_rate_limits_then_success_is_recovered():
+    """Benchmark fault: four 429s in a row, then the call goes through."""
+    provider = Scripted([_Boom(429)] * 4 + [ProviderResponse(text="ok")])
+    seen: list[dict[str, Any]] = []
+    agent = Agent(config=AgentConfig(model="m", retry=RetryPolicy(backoff_seconds=0)), provider=provider)
+    agent.hooks.on(HookEvent.RETRY, lambda ctx: seen.append(dict(ctx.data)))
+    async with agent:
+        result = await agent.run("hi")
+    assert result.ok and result.output == "ok" and len(provider.calls) == 5
+    assert [r["attempt"] for r in seen] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_with_the_old_budget_four_rate_limits_fail_one_call_short():
+    provider = Scripted([_Boom(429)] * 4 + [ProviderResponse(text="ok")])
+    retry = RetryPolicy(backoff_seconds=0, rate_limit_attempts=4)
+    async with Agent(config=AgentConfig(model="m", retry=retry), provider=provider) as agent:
+        result = await agent.run("hi")
+    assert result.failed and len(provider.calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_server_errors_keep_the_four_call_budget():
+    provider = Scripted([_Boom(503)] * 8 + [ProviderResponse(text="never")])
+    async with Agent(config=AgentConfig(model="m", retry=RetryPolicy(backoff_seconds=0)), provider=provider) as agent:
+        result = await agent.run("hi")
+    assert result.failed and len(provider.calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_rate_limit_budget_is_bounded_in_time():
+    def limited():
+        return [_Boom(429, headers={"retry-after": "1"}) for _ in range(8)] + [ProviderResponse(text="ok")]
+
+    tight = RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.02, jitter=0, rate_limit_budget_seconds=0.07)
+    provider = Scripted(limited())
+    async with Agent(config=AgentConfig(model="m", retry=tight), provider=provider) as agent:
+        result = await agent.run("hi")
+    assert result.failed and len(provider.calls) == 4, "three sleeps fit the budget; the fourth would not"
+
+    open_ended = RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.001, jitter=0, rate_limit_budget_seconds=None)
+    provider = Scripted(limited())
+    async with Agent(config=AgentConfig(model="m", retry=open_ended), provider=provider) as agent:
+        result = await agent.run("hi")
+    assert result.failed and len(provider.calls) == 8, "no time cap: the call budget alone"
+
+
+@pytest.mark.asyncio
+async def test_a_long_retry_sleep_shows_as_waiting_on_the_run_stream():
+    from harnessx import ProgressPolicy, RunEventType
+
+    provider = Scripted([_Boom(429, headers={"retry-after": "1"}), ProviderResponse(text="ok")])
+    config = AgentConfig(
+        model="m",
+        retry=RetryPolicy(backoff_seconds=0, max_backoff_seconds=0.08, jitter=0),
+        progress=ProgressPolicy(first_after_seconds=0.02, repeat_every_seconds=0.02),
+    )
+    async with Agent(config=config, provider=provider) as agent:
+        async with agent.run_stream("hi") as stream:
+            events = [event async for event in stream]
+            result = await stream.result()
+    assert result.ok
+    waits = [e.data for e in events if e.type is RunEventType.WAITING]
+    assert waits and all(w["on"] == "retry" for w in waits)
+
+
 @pytest.mark.asyncio
 async def test_a_provider_can_reclassify_failures():
     class Picky(Scripted):

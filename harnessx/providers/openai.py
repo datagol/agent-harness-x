@@ -15,7 +15,7 @@ except ImportError as e:
         "Install with: pip install 'harnessx[openai]'"
     ) from e
 
-from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallDelta
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..types import ToolChoice
@@ -169,26 +169,38 @@ class OpenAIProvider(LLMProvider):
                 if getattr(delta, "tool_calls", None):
                     for tc in delta.tool_calls:
                         idx = tc.index
+                        fragment = tc.function.arguments if tc.function and tc.function.arguments else ""
                         if idx not in tool_call_chunks:
                             tool_call_chunks[idx] = {
                                 "id": tc.id or "",
                                 "name": tc.function.name if tc.function and tc.function.name else "",
-                                "arguments": tc.function.arguments if tc.function and tc.function.arguments else "",
+                                "arguments": fragment,
+                                # The id the deltas carry; the call keeps it when
+                                # the API sends none (see below).
+                                "delta_id": tc.id or _synthetic_call_id(),
                             }
+                            entry = tool_call_chunks[idx]
+                            # The model has started a tool call: say which, then its arguments.
+                            yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(entry["delta_id"], entry["name"]))
                         else:
+                            entry = tool_call_chunks[idx]
                             if tc.id:
-                                tool_call_chunks[idx]["id"] += tc.id
+                                entry["id"] += tc.id
                             if tc.function and tc.function.name:
-                                tool_call_chunks[idx]["name"] += tc.function.name
-                            if tc.function and tc.function.arguments:
-                                tool_call_chunks[idx]["arguments"] += tc.function.arguments
+                                entry["name"] += tc.function.name
+                            entry["arguments"] += fragment
+                        if fragment:
+                            yield StreamChunk(
+                                kind="tool_call_delta",
+                                data=ToolCallDelta(entry["delta_id"], entry["name"], fragment),
+                            )
 
         tool_calls: list[ToolCall] = []
         for idx in sorted(tool_call_chunks.keys()):
             tc_data = tool_call_chunks[idx]
             tool_calls.append(
                 ToolCall(
-                    id=tc_data["id"] or _synthetic_call_id(),
+                    id=tc_data["id"] or tc_data["delta_id"],
                     name=tc_data["name"],
                     input=parse_tool_arguments(tc_data["arguments"]),
                 )

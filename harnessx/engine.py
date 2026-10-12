@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import uuid
@@ -24,7 +25,7 @@ from .execution import (
     transition,
     wire,
 )
-from .errors import TransientToolError
+from .errors import ContextOverflowError, MalformedToolInputError, TransientToolError
 from .permissions import MaxIterationsError
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
@@ -38,7 +39,7 @@ from .models import (
     resolve_model_limits,
 )
 from .providers.base import INVALID_ARGUMENTS, native_continuation, streams
-from .providers.retry import is_context_overflow, is_transient, retry_after_seconds
+from .providers.retry import is_context_overflow, is_rate_limited, is_transient, retry_after_seconds
 from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .tools import retry_wanted
 from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult, ToolRetry
@@ -178,19 +179,49 @@ async def stream_with_notices(iterator, policy, event, *, on, idle=None, first=N
                 pass
 
 
-def first_event_deadline(agent, request) -> float | None:
+def measured_size(agent, state) -> dict:
+    """The provider's own count of the last request plus its reply, for a memory
+    that can use it (``needs_condensing(measured=...)``); empty otherwise."""
+    usage = (state.get("response") or {}).get("usage") or {}
+    measured = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+    if not measured:
+        return {}
+    try:
+        accepts = "measured" in inspect.signature(agent.memory.needs_condensing).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"measured": measured} if accepts else {}
+
+
+def estimate_request_tokens(request) -> int:
+    """A rough size of a request in tokens (four characters a token): enough to scale a deadline."""
+    size = len(json.dumps([request.get("system"), request.get("messages"), request.get("tools")], default=str))
+    return size // 4
+
+
+def first_event_deadline(agent, request, attempt: int = 1, slowest_seen: float | None = None) -> float | None:
     """How long this call may wait for its first event (see stream_with_notices).
 
     The short deadline applies only to providers that send an event as soon
     as the model starts; for the rest a quiet start may be a model thinking,
-    so the first event gets the idle limit like any other gap.
+    so the first event gets the idle limit like any other gap. ``attempt`` is
+    the 1-based call for this step; later attempts wait longer.
+
+    ``slowest_seen`` is the longest a reply in this run took to start. A server
+    that took 25 seconds once will likely do it again, so every later call gets
+    ``stream_first_event_growth`` times that, instead of timing out at 20
+    seconds and spending a retry each step to find out.
     """
     retry = agent.config.retry
     if not getattr(agent.provider, "first_event_promptly", False):
         return retry.stream_idle_timeout_seconds
-    # A rough size (four characters a token) is enough to scale a deadline.
-    size = len(json.dumps([request.get("system"), request.get("messages"), request.get("tools")], default=str))
-    return retry.first_event_timeout(size // 4)
+    deadline = retry.first_event_timeout(estimate_request_tokens(request), attempt)
+    growth = float(retry.stream_first_event_growth)
+    if deadline is None or not slowest_seen or growth <= 1.0:
+        return deadline
+    learned = float(slowest_seen) * growth
+    idle = retry.stream_idle_timeout_seconds
+    return max(deadline, learned if idle is None else min(learned, idle))
 
 
 async def model_limits(agent):
@@ -439,6 +470,7 @@ async def command(agent, state, name, emit, *, record=None):
             agent.provider, agent.config.model, system, tools,
             max_context_tokens=context_window(agent, limits),
             reply_tokens=reply_tokens,
+            **measured_size(agent, state),
         ):
             # attempt resets here as it does for the model call: the count left
             # over from the previous model call would otherwise make the driver
@@ -461,10 +493,16 @@ async def command(agent, state, name, emit, *, record=None):
         )
         if state.get("provider_continuation") and messages != agent.memory.get_messages():
             raise ValueError("Request middleware cannot change a pending provider continuation")
-        messages = (messages if state.get("provider_continuation")
-                    else sanitize_history(with_task_reminder(agent, messages)))
+        reminders = state.get("task_reminders") or {}
+        if reminders.get("condensations") != state.get("condensations", 0):
+            reminders = {}  # the history was rewritten; earlier copies no longer line up
+        if not state.get("provider_continuation"):
+            messages, reminders = with_task_reminder(agent, messages, reminders)
+            messages = sanitize_history(messages)
+        reminders = {**reminders, "condensations": state.get("condensations", 0)}
         return {
             **await snapshot(agent),
+            "task_reminders": reminders,
             **({"final_answer": True} if final_answer else {}),
             "iterations": agent.guardrails.iteration_count,
             "request": wire(
@@ -530,7 +568,7 @@ async def command(agent, state, name, emit, *, record=None):
                     **({"force": True} if state.get("compact_forced") else {}),
                 )
         if state.get("compact_forced") and len(str(agent.memory.get_messages())) >= before_size:
-            raise ValueError("Context overflow: no safe compaction reduced the request")
+            raise ContextOverflowError("Context overflow: no safe compaction reduced the request")
         await emit_hook(
             agent, HookEvent.CONTEXT_CONDENSED,
             messages_dropped=len(dropped), summary_chars=len(summary),
@@ -595,23 +633,31 @@ async def command(agent, state, name, emit, *, record=None):
         # same request would cure.
         progress = getattr(agent.config, "progress", None)
         delivered = False
+        first_event_after: float | None = None
 
         async def call_provider():
-            nonlocal delivered
+            nonlocal delivered, first_event_after
             response = None
+            started = asyncio.get_running_loop().time()
             budget_for_timeout = getattr(agent.provider, "call_budget", lambda budget: budget)(request.get("max_tokens"))
             async with asyncio.timeout(agent.config.retry.effective_call_timeout(budget_for_timeout)):
                 if use_stream:
                     async for chunk in stream_with_notices(
                         agent.provider.stream(**request), progress, event, on="model",
                         idle=agent.config.retry.stream_idle_timeout_seconds,
-                        first=first_event_deadline(agent, request),
+                        first=first_event_deadline(
+                            agent, request, max(1, int(state.get("attempt") or 1)),
+                            state.get("slowest_first_event"),
+                        ),
                     ):
+                        if first_event_after is None:
+                            first_event_after = asyncio.get_running_loop().time() - started
                         if chunk.kind == "response":
                             response = chunk.data
                         elif streaming and not buffered and chunk.kind in (
                             "text_delta",
                             "thinking_delta",
+                            "tool_call_delta",
                         ):
                             delivered = True
                             await event(E(chunk.kind), chunk.data)
@@ -629,6 +675,21 @@ async def command(agent, state, name, emit, *, record=None):
         try:
             response = await call_provider()
         except Exception as exc:
+            if isinstance(exc, MalformedToolInputError) and not state.get("malformed_recovered"):
+                # A tool argument the provider could not read, in a reply it could
+                # not salvage: ask for the reply again, once. Not a retry attempt:
+                # the request was fine, the reply was not.
+                if delivered:
+                    await event(E.ATTEMPT_RESET, {"attempt": state.get("attempt") or 1})
+                logger.info("a streamed tool argument was unreadable; asking for the reply again")
+                await emit_hook(
+                    agent, HookEvent.RECOVERY, reason="malformed_tool_input", attempt=1,
+                    reply_budget=request.get("max_tokens"),
+                )
+                return {
+                    **await snapshot(agent), "recovery": "malformed_tool_input",
+                    "malformed_recovered": True, "attempt": 0,
+                }
             # Both refusals arrive before any output; once text has reached the
             # caller, re-asking would show it twice, so the driver decides.
             if delivered:
@@ -645,23 +706,58 @@ async def command(agent, state, name, emit, *, record=None):
                 set_reply_budget(agent, limit)
                 await emit_hook(agent, HookEvent.RECOVERY, reason="reply_limit", attempt=1, reply_budget=limit)
                 response = await call_provider()
-            elif is_context_overflow(exc) and overflow_recoverable(agent, state):
+            elif is_context_overflow(exc):
                 window = context_window_from_error(exc)
                 if window:
                     learn_model_limits(target_model, provider=target_provider, context_window=window)
-                attempt = state.get("overflow_recoveries", 0) + 1
-                logger.info("request overflowed the context window; condensing (recovery %d)", attempt)
-                await emit_hook(
-                    agent, HookEvent.RECOVERY, reason="context_overflow", attempt=attempt,
-                    reply_budget=request.get("max_tokens"),
-                )
-                # No model reply to record: condense, then prepare the call again.
-                # attempt resets because nothing was delivered and condensing is
-                # not a retry of this call.
-                return {
-                    **await snapshot(agent), "recovery": "context_overflow",
-                    "overflow_recoveries": attempt, "attempt": 0, "compact_forced": True,
-                }
+                recoveries = state.get("overflow_recoveries", 0)
+                if overflow_recoverable(agent, state):
+                    attempt = recoveries + 1
+                    logger.info("request overflowed the context window; condensing (recovery %d)", attempt)
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="context_overflow", attempt=attempt,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    # No model reply to record: condense, then prepare the call again.
+                    # attempt resets because nothing was delivered and condensing is
+                    # not a retry of this call.
+                    return {
+                        **await snapshot(agent), "recovery": "context_overflow",
+                        "overflow_recoveries": attempt, "attempt": 0, "compact_forced": True,
+                    }
+                # Too short a history to condense. Large tool results can still go
+                # to disk, the same eviction an oversized result gets on arrival.
+                spill = getattr(agent.memory, "spill_large_results", None)
+                if (
+                    recoveries < MAX_OVERFLOW_RECOVERIES and not state.get("provider_continuation")
+                    and callable(spill) and spill() > 0
+                ):
+                    logger.info("request overflowed the context window; spilled large tool results")
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="context_overflow_spill", attempt=recoveries + 1,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    return {
+                        **await snapshot(agent), "recovery": "context_overflow_spill",
+                        "overflow_recoveries": recoveries + 1, "attempt": 0,
+                    }
+                limits = await model_limits(agent)
+                window_size = context_window(agent, limits)
+                estimated = estimate_request_tokens(request)
+                if not state.get("overflow_retried") and window_size and estimated * 4 < window_size:
+                    # Far below the window by any count: a refusal that is not
+                    # about this request. Worth one more call per run.
+                    logger.info("a %d-token request was refused as too long; trying once more", estimated)
+                    await emit_hook(
+                        agent, HookEvent.RECOVERY, reason="spurious_overflow", attempt=1,
+                        reply_budget=request.get("max_tokens"),
+                    )
+                    return {**await snapshot(agent), "recovery": "spurious_overflow", "overflow_retried": True, "attempt": 0}
+                raise ContextOverflowError(
+                    f"Context overflow: {exc} (about {estimated} tokens estimated against a "
+                    f"{window_size}-token window; nothing left to condense)",
+                    estimated_tokens=estimated, context_window=window_size,
+                ) from exc
             else:
                 raise
         agent.guardrails.track_usage(response.usage)
@@ -721,6 +817,11 @@ async def command(agent, state, name, emit, *, record=None):
                 }
             ),
             "provider_continuation": native_continuation(canonical),
+            # A readable reply re-arms the one re-ask an unreadable one gets.
+            "malformed_recovered": False,
+            "slowest_first_event": max(
+                float(state.get("slowest_first_event") or 0.0), first_event_after or 0.0,
+            ) or None,
         }
 
     if name == "prepare_tools":
@@ -745,7 +846,7 @@ async def command(agent, state, name, emit, *, record=None):
                     raise ValueError(
                         f"Invalid arguments for {call.name!r}: "
                         f"{unreadable or 'the arguments are not a JSON object'}. "
-                        "Call the tool again with a complete JSON object."
+                        "Call the tool again, sending the complete JSON object."
                     )
                 definition, corrected = agent.tools.resolve_tool(call.name)
                 if corrected != call.name:
@@ -968,6 +1069,25 @@ def recovery_exhausted(reason):
             "stop_reason": reason}
 
 
+def loop_local(owner, name, factory):
+    """A primitive bound to the running loop, kept on ``owner`` (asyncio locks and
+    semaphores bind to the first loop that uses them; an agent can outlive one)."""
+    loop = asyncio.get_running_loop()
+    current = getattr(owner, name, None)
+    if current is None or current[0] is not loop:
+        current = (loop, factory())
+        setattr(owner, name, current)
+    return current[1]
+
+
+def serial_gate(agent):
+    """The lock that keeps non-concurrent tools apart across an agent and its specialists."""
+    root = agent
+    while getattr(root, "_tree_parent", None) is not None:
+        root = root._tree_parent
+    return loop_local(root, "_serial_gate", asyncio.Lock)
+
+
 async def execute_tool(agent, state, entry, emit, *, record=None):
     from .artifacts import materialize
 
@@ -999,7 +1119,15 @@ async def execute_tool(agent, state, entry, emit, *, record=None):
         await emit_hook(agent, HookEvent.TOOL_CALL_START, tool_call=copy.deepcopy(call))
         try:
             async with asyncio.timeout(entry["timeout"]):
-                result = await agent.tools._dispatch(call, definition)
+                # A tool that may not overlap others also may not overlap itself
+                # in a specialist running in parallel: one gate per agent tree.
+                # Delegations never take it, so a parent never waits on a child
+                # that waits on the parent.
+                if not entry.get("concurrent", True) and not getattr(definition.handler, "__harnessx_delegation__", False):
+                    async with serial_gate(agent):
+                        result = await agent.tools._dispatch(call, definition)
+                else:
+                    result = await agent.tools._dispatch(call, definition)
         except TimeoutError:
             if state["durable"]:
                 # A durable run can stop and ask whether the call took effect.
@@ -1097,6 +1225,44 @@ async def drive(agent, state, emit, *, commit=None, control=None):
             str(state["iterations"]),
             str(entry["attempt"] if entry else state["attempt"]),
         )
+
+    async def run_batch(runnable):
+        """Calls that may overlap run together; the rest take turns, in model order.
+
+        A serial call used to hold up its whole batch: one write_todos beside
+        three lookups ran all four one after another. Now the serial calls form
+        one chain that runs beside the others. Tasks are created in model order,
+        so the calls that start together announce themselves in that order.
+        """
+        serial = [t for t in runnable if not t["concurrent"]]
+        if len(serial) == len(runnable):
+            for entry in runnable:
+                await run_tool(entry)
+            return
+
+        async def in_turn():
+            for entry in serial:
+                await run_tool(entry)
+
+        tasks = []
+        for entry in runnable:
+            if entry["concurrent"]:
+                tasks.append(asyncio.create_task(run_tool(entry)))
+            elif serial and entry is serial[0]:
+                tasks.append(asyncio.create_task(in_turn()))
+        try:
+            # Every call finishes and records its outcome before a failure in
+            # one of them is raised: cancelling the rest threw away work that
+            # had already happened.
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        for failure in outcomes:
+            if isinstance(failure, BaseException):
+                raise failure
 
     async def run_tool(entry):
         async with lock:
@@ -1222,24 +1388,8 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     )
                     break
                 runnable = [t for t in state["tools"] if t["status"] != "completed"]
-                if runnable and all(t["concurrent"] for t in runnable):
-                    tasks = [asyncio.create_task(run_tool(t)) for t in runnable]
-                    try:
-                        # Every call finishes and records its outcome before a
-                        # failure in one of them is raised: cancelling the rest
-                        # threw away work that had already happened.
-                        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-                    except BaseException:
-                        for task in tasks:
-                            task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                        raise
-                    for failure in outcomes:
-                        if isinstance(failure, BaseException):
-                            raise failure
-                else:
-                    for entry in runnable:
-                        await run_tool(entry)
+                if runnable:
+                    await run_batch(runnable)
                 if any(
                     t["status"] in ("approval", "uncertain") for t in state["tools"]
                 ):
@@ -1250,6 +1400,9 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                 if state["attempt"]:
                     state["usage_incomplete"] = True
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
+                else:
+                    # A fresh step: no time slept on retries yet.
+                    state["retry_waited"] = 0.0
                 state["attempt"] += 1
                 await persist()
             buffered_events = []
@@ -1257,7 +1410,7 @@ async def drive(agent, state, emit, *, commit=None, control=None):
             async def command_emit(event):
                 # Deltas and "still working" notices go out as they happen; a
                 # notice held until the call finishes says nothing.
-                if event.type in (E.TEXT_DELTA, E.THINKING_DELTA, E.WAITING):
+                if event.type in (E.TEXT_DELTA, E.THINKING_DELTA, E.TOOL_CALL_DELTA, E.WAITING):
                     await persist([event])
                 else:
                     buffered_events.append(event)
@@ -1274,7 +1427,12 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    spent = not retryable(agent, exc) or state["attempt"] >= retry.attempts
+                    limited = rate_limited(agent, exc)
+                    wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
+                    waited = float(state.get("retry_waited") or 0.0)
+                    spent = not retryable(agent, exc) or retry.spent(
+                        state["attempt"], rate_limited=limited, waited=waited, next_wait=wait,
+                    )
                     if name == "compact" and spent and not state.get("condense_without_model"):
                         # A failed summary must not fail the run. Condense at the
                         # character level instead: lossy, but it always works.
@@ -1291,7 +1449,6 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                         continue
                     if name not in ("model", "compact") or spent:
                         raise
-                    wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
                     await emit_hook(
                         agent, HookEvent.RETRY, kind="model", name=agent.config.model,
                         attempt=state["attempt"], next_attempt=state["attempt"] + 1,
@@ -1305,10 +1462,19 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     # committed, so put memory back to it.
                     agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
+                    state["retry_waited"] = waited + wait
                     state["attempt"] += 1
                     await persist()
                     if wait:
-                        await asyncio.sleep(wait)
+                        # A long Retry-After shows on the run stream as WAITING
+                        # (on="retry") rather than as silence.
+                        async def retry_notice(kind, data):
+                            await persist([ev(kind, data)])
+
+                        await await_with_notices(
+                            asyncio.sleep(wait), getattr(agent.config, "progress", None),
+                            retry_notice, on="retry",
+                        )
             outcome = await capture(agent, outcome)
             before = state.get("messages")
             state = transition(state, name, outcome)
@@ -1533,41 +1699,63 @@ def _as_blocks(content) -> list[dict]:
     return [b for b in content or [] if isinstance(b, dict)]
 
 
-def with_task_reminder(agent, messages: list[dict]) -> list[dict]:
-    """Append the current task list, when there is one.
+def _attach_reminder(message: dict, reminder: str) -> dict | None:
+    """``message`` with ``reminder`` appended, or None when it cannot carry text."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return {**message, "content": f"{content}\n\n{reminder}"}
+    if isinstance(content, list):
+        return {**message, "content": [*content, {"type": "text", "text": reminder}]}
+    return None
+
+
+def with_task_reminder(agent, messages: list[dict], sent: dict | None = None) -> tuple[list[dict], dict]:
+    """Append the current task list, when there is one, and keep earlier copies.
 
     At the tail rather than in the system prompt: the system prompt heads the
     cacheable prefix, so rewriting it every time a task is ticked off would
-    invalidate the prompt cache for the whole conversation. Appending leaves the
-    prefix untouched.
+    invalidate the prompt cache for the whole conversation.
 
     Rebuilt from the agent each turn, so the model always reads the current list
-    rather than whichever copy survived condensing.
+    rather than whichever copy survived condensing. Each copy also stays on the
+    message it was first sent with: dropping it from that message on the next
+    turn changed an earlier message, so every turn re-wrote the whole
+    conversation to the cache. ``sent`` records those copies (message index to
+    text, plus the condensation count they belong to) and the updated record
+    is returned for the run state.
     """
+    sent = dict(sent or {})
+    copies = {int(k): v for k, v in (sent.get("at") or {}).items() if int(k) < len(messages)}
     todos = getattr(agent, "todos", None)
-    if not todos:
-        return messages
-    from .builtin.planning import render
+    reminder = ""
+    if todos:
+        from .builtin.planning import render
 
-    reminder = render(todos)
-    if not reminder:
-        return messages
-    # Merge into the last message when it is already user-role, rather than
-    # appending a second one. A tool-result message is user-role too, so
-    # appending produced two consecutive user turns on every agentic turn.
-    # Anthropic tolerates that; other providers are stricter, and a declared
-    # fallback can be any of them.
-    if messages and messages[-1].get("role") == "user":
-        last = messages[-1]
-        content = last.get("content")
-        if isinstance(content, str):
-            merged = {**last, "content": f"{content}\n\n{reminder}"}
-        elif isinstance(content, list):
-            merged = {**last, "content": [*content, {"type": "text", "text": reminder}]}
+        reminder = render(todos)
+    out = list(messages)
+    for index, text in sorted(copies.items()):
+        if index == len(out) - 1:
+            continue  # the newest message takes the current list below
+        attached = _attach_reminder(out[index], text) if out[index].get("role") == "user" else None
+        if attached is None:
+            copies.pop(index)
         else:
-            return [*messages, {"role": "user", "content": reminder}]
-        return [*messages[:-1], merged]
-    return [*messages, {"role": "user", "content": reminder}]
+            out[index] = attached
+    last = len(out) - 1
+    copies.pop(last, None)
+    if reminder:
+        # Merge into the last message when it is already user-role, rather than
+        # appending a second one. A tool-result message is user-role too, so
+        # appending produced two consecutive user turns on every agentic turn.
+        # Anthropic tolerates that; other providers are stricter, and a declared
+        # fallback can be any of them.
+        attached = _attach_reminder(out[last], reminder) if out and out[last].get("role") == "user" else None
+        if attached is not None:
+            out[last] = attached
+            copies[last] = reminder
+        else:
+            out.append({"role": "user", "content": reminder})
+    return out, {**sent, "at": {str(k): v for k, v in copies.items()}}
 
 
 def watch_for_repetition(agent, state) -> tuple[list[str], str | None]:
@@ -1623,6 +1811,17 @@ def retryable(agent, exc):
         except Exception:
             pass
     return is_transient(exc)
+
+
+def rate_limited(agent, exc):
+    """Whether a model failure is a throttle or overload, asked of the agent's provider."""
+    classify = getattr(agent.provider, "is_rate_limited", None)
+    if callable(classify):
+        try:
+            return bool(classify(exc))
+        except Exception:
+            pass
+    return is_rate_limited(exc)
 
 
 def retry_after(agent, exc):
