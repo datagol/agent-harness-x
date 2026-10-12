@@ -178,19 +178,24 @@ async def stream_with_notices(iterator, policy, event, *, on, idle=None, first=N
                 pass
 
 
-def first_event_deadline(agent, request) -> float | None:
+def estimate_request_tokens(request) -> int:
+    """A rough size of a request in tokens (four characters a token): enough to scale a deadline."""
+    size = len(json.dumps([request.get("system"), request.get("messages"), request.get("tools")], default=str))
+    return size // 4
+
+
+def first_event_deadline(agent, request, attempt: int = 1) -> float | None:
     """How long this call may wait for its first event (see stream_with_notices).
 
     The short deadline applies only to providers that send an event as soon
     as the model starts; for the rest a quiet start may be a model thinking,
-    so the first event gets the idle limit like any other gap.
+    so the first event gets the idle limit like any other gap. ``attempt`` is
+    the 1-based call for this step; later attempts wait longer.
     """
     retry = agent.config.retry
     if not getattr(agent.provider, "first_event_promptly", False):
         return retry.stream_idle_timeout_seconds
-    # A rough size (four characters a token) is enough to scale a deadline.
-    size = len(json.dumps([request.get("system"), request.get("messages"), request.get("tools")], default=str))
-    return retry.first_event_timeout(size // 4)
+    return retry.first_event_timeout(estimate_request_tokens(request), attempt)
 
 
 async def model_limits(agent):
@@ -605,7 +610,7 @@ async def command(agent, state, name, emit, *, record=None):
                     async for chunk in stream_with_notices(
                         agent.provider.stream(**request), progress, event, on="model",
                         idle=agent.config.retry.stream_idle_timeout_seconds,
-                        first=first_event_deadline(agent, request),
+                        first=first_event_deadline(agent, request, max(1, int(state.get("attempt") or 1))),
                     ):
                         if chunk.kind == "response":
                             response = chunk.data

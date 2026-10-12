@@ -228,6 +228,7 @@ def test_agent_config_is_nested_and_sub_policies_are_frozen():
     assert shape["retry"] == {
         "attempts": 1, "backoff_seconds": 0, "call_timeout_seconds": None, "max_backoff_seconds": 60.0,
         "stream_idle_timeout_seconds": 180.0, "stream_first_event_timeout_seconds": 20.0,
+        "stream_first_event_growth": 2.0,
         "switch_after": 1, "cooldown_seconds": 0.0, "jitter": 0.25,
     }
     assert shape["tools"] == {"default_timeout_seconds": 9, "dedupe_calls": True, "retry": None}

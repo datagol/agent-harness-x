@@ -18,6 +18,7 @@ from harnessx import (
     RunLimitReached, RunRefused, StreamChunk, SubAgent, TokenUsage, ToolCall,
 )
 from harnessx import engine, models
+from harnessx.errors import ConfigurationError
 from harnessx.engine import UNANSWERED_CALL_NOTICE, sanitize_history
 from harnessx.memory import CLEARED_TOOL_RESULT, ConversationMemory
 from harnessx.models import register_model_limits
@@ -262,6 +263,63 @@ async def test_a_stream_that_never_starts_is_retried_well_before_the_idle_limit(
         else:
             result = await asyncio.wait_for(agent.run("go"), 5)
     assert result.ok and result.output == "Hello" and len(provider.calls) == 2
+
+
+class SlowStart(Scripted):
+    """Healthy but slow: every call takes ``delay`` seconds before its first event."""
+
+    first_event_promptly = True
+
+    def __init__(self, *, delay):
+        super().__init__([])
+        self.delay = delay
+
+    async def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        await asyncio.sleep(self.delay)
+        yield StreamChunk(kind="progress")
+        yield StreamChunk(kind="text_delta", data="Hello")
+        yield StreamChunk(kind="response", data=ProviderResponse(text="Hello"))
+
+    async def create(self, **kwargs):
+        raise AssertionError("a provider that streams is streamed, even for agent.run()")
+
+
+def test_the_first_event_deadline_grows_per_attempt_and_never_passes_the_idle_limit():
+    policy = RetryPolicy()
+    assert [policy.first_event_timeout(0, attempt=n) for n in (1, 2, 3, 4)] == [20.0, 40.0, 80.0, 160.0]
+    assert RetryPolicy(stream_idle_timeout_seconds=50).first_event_timeout(0, attempt=4) == 50
+    assert RetryPolicy(stream_first_event_growth=1.0).first_event_timeout(0, attempt=4) == 20.0
+    assert policy.first_event_timeout(0) == 20.0, "the first attempt is unchanged"
+    for bad in (0.5, 0, True, "2"):
+        with pytest.raises(ConfigurationError):
+            RetryPolicy(stream_first_event_growth=bad)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_server_gets_through_on_a_later_attempt():
+    """Benchmark fault: every call takes 25 s before its first byte, against a
+    20 s deadline. Scaled down: 0.15 s against roughly 0.07 s."""
+    provider = SlowStart(delay=0.15)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=10.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 5)
+    assert result.ok and result.output == "Hello" and len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_without_growth_a_slow_server_exhausts_the_retry_budget():
+    """The 0.8.0 behaviour, kept reachable with growth 1.0: the same deadline every time."""
+    provider = SlowStart(delay=0.15)
+    retry = RetryPolicy(stream_first_event_timeout_seconds=0.02, stream_first_event_growth=1.0,
+                        stream_idle_timeout_seconds=10, backoff_seconds=0)
+    agent = _agent(provider, retry=retry)
+    async with agent:
+        result = await asyncio.wait_for(agent.run("go"), 5)
+    assert result.failed and result.error["type"] == "IncompleteStreamError"
+    assert len(provider.calls) == retry.attempts
 
 
 @pytest.mark.asyncio

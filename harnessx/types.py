@@ -447,6 +447,12 @@ class RetryPolicy:
     # reasoning models are silent until they answer (OpenAI, Gemini) wait the
     # idle limit instead. None turns the check off.
     stream_first_event_timeout_seconds: float | None = 20.0
+    # Each retry waits longer for that first event, doubling by default. A dead
+    # connection is still abandoned at the first deadline, while a server that
+    # is slow rather than stuck (a long prompt, an overloaded region) gets
+    # through on a later attempt instead of meeting the same deadline every
+    # time. 1.0 keeps one deadline for every attempt; never past the idle limit.
+    stream_first_event_growth: float = 2.0
     # Failover, when AgentConfig.fallbacks names other providers. Transient
     # failures one provider may collect before the chain moves to the next, and
     # how long a provider stays out of rotation after being passed over.
@@ -467,22 +473,30 @@ class RetryPolicy:
             _positive(self.stream_idle_timeout_seconds, "stream_idle_timeout_seconds")
         if self.stream_first_event_timeout_seconds is not None:
             _positive(self.stream_first_event_timeout_seconds, "stream_first_event_timeout_seconds")
+        if (
+            isinstance(self.stream_first_event_growth, bool)
+            or not isinstance(self.stream_first_event_growth, (int, float))
+            or self.stream_first_event_growth < 1
+        ):
+            raise ConfigurationError("stream_first_event_growth must be a number of at least 1")
         if isinstance(self.jitter, bool) or not 0 <= self.jitter <= 1:
             raise ConfigurationError("jitter must be between 0 and 1")
         if type(self.switch_after) is not int or self.switch_after < 1:
             raise ConfigurationError("switch_after must be a positive integer")
         _nonnegative_or_none(self.cooldown_seconds, "cooldown_seconds")
 
-    def first_event_timeout(self, request_tokens: int) -> float | None:
+    def first_event_timeout(self, request_tokens: int, attempt: int = 1) -> float | None:
         """How long to wait for a reply's first event, for a request of ``request_tokens``.
 
-        Never longer than the idle limit: past that the stream counts as
-        stalled anyway.
+        ``attempt`` is the 1-based model call for this step: each retry waits
+        ``stream_first_event_growth`` times longer than the one before. Never
+        longer than the idle limit: past that the stream counts as stalled anyway.
         """
         first = self.stream_first_event_timeout_seconds
         if first is None:
             return self.stream_idle_timeout_seconds
         first += 10.0 * max(0, request_tokens) / 100_000
+        first *= float(self.stream_first_event_growth) ** max(0, int(attempt) - 1)
         idle = self.stream_idle_timeout_seconds
         return first if idle is None else min(first, idle)
 

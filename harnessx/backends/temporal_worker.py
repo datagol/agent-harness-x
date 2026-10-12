@@ -164,8 +164,15 @@ class AgentActivities:
                         )
                     except Exception:
                         pass
+                # Temporal retries the activity with the same state, so the
+                # attempt it is on comes from the activity: the first-event
+                # deadline grows with it as it does in a direct run.
+                command_state = (
+                    {**state, "attempt": max(int(state.get("attempt") or 1), activity.info().attempt)}
+                    if args["command"] == "model" and isinstance(state, dict) else state
+                )
                 try:
-                    outcome = await command(agent, state, args["command"], emit)
+                    outcome = await command(agent, command_state, args["command"], emit)
                 except Exception as exc:
                     spent = not retryable(agent, exc) or activity.info().attempt >= agent.config.retry.attempts
                     if modern and args["command"] == "compact" and spent:
