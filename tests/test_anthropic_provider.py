@@ -540,6 +540,75 @@ async def test_the_model_is_asked_to_resend_a_corrupted_tool_call(tmp_path, stre
     assert "not valid JSON" in json.dumps(answered[0]["content"])
 
 
+CUT_OFF = '{"path": "fibonacci.py", "content": "def fibonacci(n):\\n    a, b'
+
+
+@pytest.mark.asyncio
+async def test_tool_arguments_cut_off_part_way_are_not_run():
+    """The SDK parses streamed arguments leniently: JSON cut off part way came
+    back as a dict holding whatever arrived, and the tool ran with half its
+    input (a file written with half its content). It is now refused like any
+    unreadable argument."""
+    from harnessx.providers.base import INVALID_ARGUMENTS
+
+    for streaming in (True, False):
+        requests = []
+        async with client_with_streams([corrupted_sse(tool_message(), CUT_OFF)], requests) as client:
+            provider = AnthropicProvider(client=client)
+            request = dict(
+                model="claude-sonnet-4-6", messages=[{"role": "user", "content": "go"}], system=None,
+                tools=[{"name": "write_file", "description": "Write.", "input_schema": {"type": "object"}}],
+                max_tokens=1000,
+            )
+            if streaming:
+                response = [c async for c in provider.stream(**request)][-1].data
+            else:
+                response = await provider._create_via_stream(dict(request, messages=request["messages"]))
+                from harnessx.providers.anthropic import _from_anthropic_response
+                response = _from_anthropic_response(response)
+        [call] = response.tool_calls
+        assert "not complete JSON" in call.input[INVALID_ARGUMENTS], (streaming, call.input)
+
+
+@pytest.mark.asyncio
+async def test_the_model_resends_a_tool_call_whose_arguments_were_cut_off(tmp_path):
+    requests = []
+    streams = [
+        corrupted_sse(tool_message(), CUT_OFF),
+        sse_message(tool_message()),
+        sse_message(message([{"type": "text", "text": "Created fibonacci.py."}])),
+    ]
+    async with client_with_streams(streams, requests) as client:
+        async with Agent(provider=AnthropicProvider(client=client)) as agent:
+            register_filesystem_tools(agent.tools, base_path=str(tmp_path))
+            agent.permissions.set_permission("write_file", PermissionLevel.ALLOW)
+            result = await agent.run("Write a Fibonacci program")
+    assert result.status == "completed", result.error
+    assert len(requests) == 3
+    assert (tmp_path / "fibonacci.py").read_text() == PROGRAM, "never the half-written file"
+    answered = [b for b in requests[1]["messages"][-1]["content"] if b.get("type") == "tool_result"]
+    assert answered[0].get("is_error") and "not complete JSON" in json.dumps(answered[0]["content"])
+
+
+def test_a_complete_or_empty_argument_and_a_token_limit_cut_are_left_alone():
+    from types import SimpleNamespace as NS
+
+    from harnessx.providers.anthropic import _reject_cut_off_arguments
+
+    def reply(stop):
+        return NS(stop_reason=stop, content=[
+            NS(type="tool_use", id="a", input={"x": 1}),
+            NS(type="tool_use", id="b", input={}),
+            NS(type="tool_use", id="c", input={"x": "1"}),
+        ])
+
+    done = _reject_cut_off_arguments(reply("tool_use"), {"a": '{"x": 1}', "b": "", "c": '{"x": "1'})
+    assert done.content[0].input == {"x": 1} and done.content[1].input == {}
+    assert list(done.content[2].input) != ["x"]
+    cut = _reject_cut_off_arguments(reply("max_tokens"), {"c": '{"x": "1'})
+    assert cut.content[2].input == {"x": "1"}, "the engine's truncation recovery handles that case"
+
+
 # ── tool calls stream as the model writes them ───────────────────────────────
 
 

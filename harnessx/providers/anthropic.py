@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import inspect
 from copy import deepcopy
 from typing import Any, AsyncIterator
@@ -218,8 +220,12 @@ class AnthropicProvider(LLMProvider):
         """The SDK refuses a non-streaming call that could run past ten minutes;
         stream it and return the assembled message instead."""
         stream_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
+        arguments: dict[str, str] = {}
         async with self.client.messages.stream(**stream_kwargs) as stream:
             try:
+                if hasattr(stream, "__aiter__"):  # read the events to keep the raw arguments
+                    async for _ in _chunks(stream, arguments):
+                        pass
                 response = await stream.get_final_message()
             except ValueError as exc:
                 if not _malformed_tool_json(exc):
@@ -227,7 +233,7 @@ class AnthropicProvider(LLMProvider):
                 response = _salvage_malformed(stream, exc)
         if not getattr(response, "stop_reason", None):
             raise IncompleteStreamError("Anthropic stream ended before the message was complete")
-        return response
+        return _reject_cut_off_arguments(response, arguments)
 
     async def _create(self, kwargs: dict[str, Any]) -> Any:
         try:
@@ -323,10 +329,11 @@ class AnthropicProvider(LLMProvider):
                 raise
 
         delivered = False
+        arguments: dict[str, str] = {}  # call id -> the argument text as streamed
         try:
             async with stream_ctx as stream:
                 try:
-                    async for chunk in _chunks(stream):
+                    async for chunk in _chunks(stream, arguments):
                         # A drafted tool call counts as output too: restarting the
                         # stream would show it twice.
                         delivered = delivered or chunk.kind in ("text_delta", "tool_call_delta")
@@ -348,8 +355,9 @@ class AnthropicProvider(LLMProvider):
             # Only before any output: a rejected marker fails at stream open, and
             # restarting a stream that has delivered text would repeat it.
             if not delivered and filtered_kwargs != uncached and _rejected_cache_control(exc):
+                arguments.clear()
                 async with self.client.messages.stream(**uncached) as stream:
-                    async for chunk in _chunks(stream):
+                    async for chunk in _chunks(stream, arguments):
                         yield chunk
                     final_resp = await stream.get_final_message()
             else:
@@ -358,6 +366,7 @@ class AnthropicProvider(LLMProvider):
             # The stream closed before message_delta carried a stop reason: what
             # was assembled is a fragment, and may hold a half-written tool call.
             raise IncompleteStreamError("Anthropic stream ended before the message was complete")
+        final_resp = _reject_cut_off_arguments(final_resp, arguments)
         yield StreamChunk(kind="response", data=_from_anthropic_response(final_resp))
 
     async def count_tokens(
@@ -421,12 +430,41 @@ def _salvage_malformed(stream: Any, exc: BaseException) -> Any:
     return snapshot
 
 
-async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:
+def _reject_cut_off_arguments(resp: Any, arguments: dict[str, str]) -> Any:
+    """``resp`` with every tool call whose streamed arguments are not complete
+    JSON marked INVALID_ARGUMENTS, for the engine to answer.
+
+    The SDK parses tool arguments leniently, so JSON cut off part way --
+    ``{"path": "a.py", "content": "def f(`` -- comes back as a dict holding
+    whatever arrived, and the tool would run with half its input. The text as
+    streamed is checked strictly instead. A reply that ran out of tokens is
+    left alone: the engine has its own recovery for a call cut short that way.
+    """
+    if not arguments or getattr(resp, "stop_reason", None) == "max_tokens":
+        return resp
+    for block in getattr(resp, "content", None) or []:
+        raw = arguments.get(getattr(block, "id", None) or "", "")
+        if getattr(block, "type", None) != "tool_use" or not raw.strip():
+            continue
+        try:
+            json.loads(raw)
+        except ValueError as exc:
+            block.input = {
+                INVALID_ARGUMENTS: f"the arguments are not complete JSON ({exc.msg} at character {exc.pos}"
+                f" of {len(raw)}); they were discarded"
+            }
+    return resp
+
+
+async def _chunks(stream: Any, arguments: dict[str, str] | None = None) -> AsyncIterator[StreamChunk]:
     """Every event the stream delivers, as text, thinking, or a sign of progress.
 
     Reading only ``text_stream`` hid everything else: a model writing a long
     tool argument -- a whole report into a file -- streams for minutes without
     a single text event, which looked exactly like a stalled connection.
+
+    ``arguments``, when given, collects each tool call's argument text as it
+    streamed, by call id, for a strict check once the reply is complete.
     """
     if not hasattr(stream, "__aiter__"):  # a client without event iteration
         async for text in stream.text_stream:
@@ -451,6 +489,8 @@ async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:
             and event.delta.partial_json
         ):
             call_id, name = open_calls[event.index]
+            if arguments is not None:
+                arguments[call_id] = arguments.get(call_id, "") + event.delta.partial_json
             yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(call_id, name, event.delta.partial_json))
         else:
             yield StreamChunk(kind="progress")
