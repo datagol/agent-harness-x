@@ -497,21 +497,36 @@ class ConversationMemory:
         tools: list[dict[str, Any]],
         max_context_tokens: int = 150_000,
         reply_tokens: int = 0,
+        *,
+        measured: int | None = None,
     ) -> bool:
         """Whether the next request would not fit, so history must be condensed.
 
         Separate from doing it, because a real summary costs a model call and
         the engine wants that as its own loop phase: journaled, retried and
         observable like any other call.
+
+        ``measured`` is the size the provider reported for the previous request
+        plus its reply. With it, a request that is clearly within the window is
+        not counted again: counting is a network call on Anthropic, and it was
+        most of HarnessX's per-run overhead. Near the window it is still counted.
         """
         # What the count said, for the engine to fit the reply into what is
         # left of the window. None when it was not counted or could not be.
         self.last_prompt_tokens = None
         if len(self._messages) < 6:
             return False
+        budget = max(1, max_context_tokens - max(0, reply_tokens))
+        if measured is not None and measured > 0:
+            # What was added since: the newest message (tool results, usually),
+            # at four characters a token. The reply itself is in `measured`.
+            added = len(json.dumps(self._messages[-1].to_dict(), default=str)) // 4
+            estimate = measured + added
+            if estimate < budget * 0.6:
+                self.last_prompt_tokens = estimate
+                return False
         token_count = await self._count(provider, model, system, tools)
         self.last_prompt_tokens = token_count
-        budget = max(1, max_context_tokens - max(0, reply_tokens))
         if token_count is not None and token_count < budget * 0.8:
             return False
         return self._find_safe_trim_boundary(min_keep=4) > 0

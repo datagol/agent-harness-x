@@ -186,6 +186,14 @@ class AnthropicProvider(LLMProvider):
         """
         if model in self._limits:
             return self._limits[model]
+        # An answer from the API holds for the process: a new Agent (a new
+        # provider) per task used to pay this round trip on every run. Keyed by
+        # endpoint, so a gateway that serves other limits is asked on its own.
+        base_url = getattr(self.client, "base_url", None)
+        shared_key = (str(base_url), model) if base_url is not None else None
+        if shared_key is not None and shared_key in _MODEL_LIMITS:
+            self._limits[model] = _MODEL_LIMITS[shared_key]
+            return self._limits[model]
         found: ModelLimits | None = None
         try:
             import asyncio
@@ -197,7 +205,14 @@ class AnthropicProvider(LLMProvider):
         except Exception:
             found = None
         self._limits[model] = found
+        if found is not None and shared_key is not None:
+            _MODEL_LIMITS[shared_key] = found
         return found
+
+    @staticmethod
+    def clear_model_limits_cache() -> None:
+        """Forget the limits the Models API reported, for every endpoint in this process."""
+        _MODEL_LIMITS.clear()
 
     async def _create_via_stream(self, kwargs: dict[str, Any]) -> Any:
         """The SDK refuses a non-streaming call that could run past ten minutes;
@@ -364,6 +379,9 @@ class AnthropicProvider(LLMProvider):
         except Exception:
             return len(str(messages)) // 3
 
+
+# Model limits the Models API reported, per (endpoint, model), for the process.
+_MODEL_LIMITS: dict[tuple[str, str], ModelLimits] = {}
 
 _MALFORMED_TOOL_JSON = "Unable to parse tool parameter JSON"
 

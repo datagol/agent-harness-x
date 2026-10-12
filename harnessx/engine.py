@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import uuid
@@ -176,6 +177,20 @@ async def stream_with_notices(iterator, policy, event, *, on, idle=None, first=N
                 await closer()
             except Exception:
                 pass
+
+
+def measured_size(agent, state) -> dict:
+    """The provider's own count of the last request plus its reply, for a memory
+    that can use it (``needs_condensing(measured=...)``); empty otherwise."""
+    usage = (state.get("response") or {}).get("usage") or {}
+    measured = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+    if not measured:
+        return {}
+    try:
+        accepts = "measured" in inspect.signature(agent.memory.needs_condensing).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"measured": measured} if accepts else {}
 
 
 def estimate_request_tokens(request) -> int:
@@ -444,6 +459,7 @@ async def command(agent, state, name, emit, *, record=None):
             agent.provider, agent.config.model, system, tools,
             max_context_tokens=context_window(agent, limits),
             reply_tokens=reply_tokens,
+            **measured_size(agent, state),
         ):
             # attempt resets here as it does for the model call: the count left
             # over from the previous model call would otherwise make the driver
