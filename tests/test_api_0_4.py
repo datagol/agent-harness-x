@@ -994,8 +994,9 @@ def _spill(content, max_result_chars=30_000):
 
 def test_a_json_result_is_previewed_record_by_record():
     """A search tool's one line of JSON: every record is named in the preview,
-    where 0.8.0 showed the first 3,000 characters of the first record only."""
-    memory, notice = _spill(_search_blob())
+    where 0.8.0 showed the first 3,000 characters of the first record only.
+    (A limit this small, so the records cannot simply be trimmed to fit.)"""
+    memory, notice = _spill(_search_blob(), max_result_chars=3_500)
     assert all(f"Source {i} | https://example.com/{i}" in notice for i in range(8))
     assert "Not shown: the full text of the 8 records" in notice
     assert 'read_tool_result(result_id="t1", pattern=' in notice and "read_file cannot open" in notice
@@ -1039,13 +1040,59 @@ def test_a_result_that_spilled_by_a_little_comes_back_whole_in_one_default_read(
 
 
 def test_pattern_finds_passages_only_the_hidden_part_holds():
-    memory, notice = _spill(_search_blob())
+    memory, notice = _spill(_search_blob(), max_result_chars=3_500)
     assert "marker-6" not in notice
     found = memory.read_evicted("t1", pattern="marker-6")
     assert found.startswith('[t1: 1 matches for \'marker-6\'') and "marker-6" in found
     assert "continue with char_offset=" in found
     assert "No matches" in memory.read_evicted("t1", pattern="absent-phrase")
     assert "[t1: 0 matches" in memory.read_evicted("t1", pattern="(unbalanced"), "a bad regex is searched literally"
+
+
+def test_records_a_little_over_the_limit_are_trimmed_to_fit_not_hidden():
+    """A 34,884-character search result against a 30,000 limit became a preview
+    of 9% of it, and the model cited seven sources from their titles alone
+    (2026-10-12). Trimming every record's text evenly keeps all of them."""
+    from harnessx.memory import _FITTED
+
+    blob = _search_blob()  # 8 records, ~49,000 characters
+    memory, notice = _spill(blob)
+    assert notice.startswith(_FITTED) and len(notice) <= 30_000
+    header, guide, body = notice.split("\n", 2)
+    data = json.loads(body.strip())
+    assert [r["title"] for r in data["results"]] == [f"Source {i}" for i in range(8)]
+    assert all(r["content"].startswith(f"Opening of source {i}.") for i, r in enumerate(data["results"]))
+    assert all("more characters]" in r["content"] for r in data["results"])
+    assert data["query"] == "US economy 2026", "the fields beside the records are kept"
+    # The whole result is still there for a record cut short.
+    assert "marker-6" not in notice
+    assert "marker-6" in memory.read_evicted("t1", pattern="marker-6")
+
+
+def test_too_many_records_to_trim_still_get_a_preview_that_asks_to_be_read():
+    memory, notice = _spill(_search_blob(records=200, size=600), max_result_chars=12_000)
+    assert notice.startswith("[Tool result too large")
+    assert "The preview below is about" in notice and "before you rely on it or cite it" in notice
+
+
+def test_a_record_preview_skips_the_page_navigation_it_opens_with():
+    nav = "## What We Do ### GLOBAL BANKING & MARKETS ### ASSET & WEALTH MANAGEMENT ### "
+    blob = json.dumps({"results": [
+        {"title": f"Bank {i}", "url": f"https://bank.example/{i}",
+         "content": nav + f"Our economists expect growth of {i}.5% in 2026 as investment holds up. " + "x " * 3000}
+        for i in range(8)
+    ]})
+    memory, notice = _spill(blob, max_result_chars=3_500)
+    assert "Our economists expect growth of 3.5%" in notice
+    assert "GLOBAL BANKING" not in notice
+
+
+def test_a_trimmed_result_can_still_be_spilled_when_the_window_overflows():
+    memory, notice = _spill(_search_blob())
+    assert memory.spill_large_results() > 20_000
+    spilled = memory.get_messages()[-1]["content"][0]["content"]
+    assert spilled.startswith("[Tool result too large (1 line, ")
+    assert f"{len(_search_blob()):,} chars" in spilled.split("\n", 1)[0], "the preview is of the whole result"
 
 
 @pytest.mark.asyncio
@@ -1067,5 +1114,5 @@ async def test_a_read_asked_for_in_full_is_not_spilled_again():
         assert (await agent.run("go")).ok
         results = [b for m in agent.memory.get_messages() if isinstance(m["content"], list)
                    for b in m["content"] if b.get("type") == "tool_result"]
-    assert "Tool result too large" in results[0]["content"]
-    assert "Tool result too large" not in results[1]["content"] and results[1]["content"].startswith("[c1: lines 1-1 of 1]")
+    assert results[0]["content"].startswith("[Tool result trimmed to fit")
+    assert "Tool result" not in results[1]["content"] and results[1]["content"].startswith("[c1: lines 1-1 of 1]")

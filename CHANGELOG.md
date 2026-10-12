@@ -6,8 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Two fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw
-Anthropic SDK, LangChain deepagents, CrewAI and pi ran the same tasks again.
+Fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw Anthropic
+SDK, LangChain deepagents, CrewAI and pi ran the same tasks again, and from a
+research run that cited sources it had only seen the titles of.
 
 ### Fixed
 
@@ -45,6 +46,25 @@ Anthropic SDK, LangChain deepagents, CrewAI and pi ran the same tasks again.
   so a result that spilled by a little comes back whole in one read. The
   `limit` default rises from 200 to 2,000 lines; `max_chars=0` means that
   default. Explicit values behave as before.
+- **A list of records a little over the limit is trimmed to fit, not hidden.**
+  A search returned 34,884 characters against a 30,000 limit, so the model
+  got a one-line preview of each of its seven articles, 9% of the result. It
+  marked the step done, never called `read_tool_result`, and cited sources
+  from their titles. Now, when a JSON list of records is over
+  `max_result_chars`, every record's text is cut to the same length until the
+  whole thing fits. On that result, six of the seven articles arrive whole
+  and the model sees 86%. Text that was cut ends with "[... N more
+  characters]", and the full result is still saved for `read_tool_result`.
+  A result that cannot fit even with each record cut to 300 characters is
+  saved and previewed as before.
+- **The preview notice asks to be read.** It said "read the rest before
+  searching again", so a model that had no reason to search again never did.
+  It now says what share of the result the preview shows and asks the model
+  to read what it needs before relying on it or citing it.
+- **A record's preview line skips the page's navigation.** A search hit's
+  text often opens with a site menu ("What We Do ### Global Banking &
+  Markets"), which filled the whole preview line. Headings and short menu
+  fragments are skipped, so the line starts at the first real sentence.
 
 
 ## [0.9.0] - 2026-10-12
