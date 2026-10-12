@@ -78,6 +78,7 @@ _OVERFLOW_MARKERS = (
     "too many tokens",
     "prompt is too long",
     "reduce the length",
+    "context overflow",
 )
 
 
@@ -116,6 +117,27 @@ def is_transient(exc: BaseException) -> bool:
     if _transport_failure(exc):
         return True
     return is_transient_text(str(exc))
+
+
+_RATE_LIMIT_STATUSES = (429, 529)
+_RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "too many requests", "overloaded", "resource_exhausted")
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """True for a throttle (429) or an overload (529): the same request is welcome a little later.
+
+    These clear on their own, usually within a minute, so they earn a deeper
+    retry budget than a 5xx (``RetryPolicy.rate_limit_attempts``). A quota or
+    billing 429 is permanent and an overflow is deterministic; neither counts.
+    """
+    if is_permanent(exc) or is_context_overflow(exc):
+        return False
+    for attr in ("code", "status_code", "http_status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value in _RATE_LIMIT_STATUSES
+    text = str(exc).lower()
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
 # Transport errors raised by httpx (and httpx2) when a connection drops part way:

@@ -115,7 +115,9 @@ class AgentSessionWorkflow:
                     budget = min(8000, budget or 8000)
                 # A model command can immediately heal one refused budget.
                 timeout = retry.effective_call_timeout(budget) * (2 if name == "model" else 1)
-                policy = RetryPolicy(maximum_attempts=retry.attempts,
+                # Rate limits get the deeper budget; the activity marks other
+                # failures non-retryable once `attempts` is spent.
+                policy = RetryPolicy(maximum_attempts=retry.attempts_for(rate_limited=True),
                     initial_interval=timedelta(seconds=max(0.001, retry.backoff_seconds)),
                     maximum_interval=timedelta(seconds=max(0.001, retry.max_backoff_seconds)))
             extra["reliability_v2"] = True

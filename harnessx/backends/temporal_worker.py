@@ -18,6 +18,7 @@ from ..engine import (
     new_state,
     restore,
     snapshot,
+    rate_limited,
     retryable,
     retry_after,
     sync_accounting,
@@ -174,7 +175,9 @@ class AgentActivities:
                 try:
                     outcome = await command(agent, command_state, args["command"], emit)
                 except Exception as exc:
-                    spent = not retryable(agent, exc) or activity.info().attempt >= agent.config.retry.attempts
+                    spent = not retryable(agent, exc) or activity.info().attempt >= agent.config.retry.attempts_for(
+                        rate_limited=rate_limited(agent, exc)
+                    )
                     if modern and args["command"] == "compact" and spent:
                         agent.guardrails.usage_incomplete = True
                         agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
@@ -198,10 +201,16 @@ class AgentActivities:
                 checkpoint = {"accounting": accounting, "provider_state": provider_state(agent)}
                 activity.heartbeat(checkpoint)
                 retry = agent.config.retry
-                delay = retry.wait_for(activity.info().attempt, retry_after(agent, exc))
+                attempt = activity.info().attempt
+                delay = retry.wait_for(attempt, retry_after(agent, exc))
+                # The time already slept is estimated from the backoff schedule
+                # (Temporal holds the real one); it bounds the extra attempts a
+                # rate limit gets, as in a direct run.
+                waited = sum(retry.wait_for(n, rand=lambda: 0.0) for n in range(1, attempt))
+                spent = retry.spent(attempt, rate_limited=rate_limited(agent, exc), waited=waited, next_wait=delay)
                 raise ApplicationError(
                     str(exc), checkpoint, type=type(exc).__name__,
-                    non_retryable=isinstance(exc, asyncio.CancelledError) or not retryable(agent, exc),
+                    non_retryable=isinstance(exc, asyncio.CancelledError) or not retryable(agent, exc) or spent,
                     next_retry_delay=timedelta(seconds=max(0.001, delay)),
                 ) from None
             if not retryable(agent, exc):

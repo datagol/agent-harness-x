@@ -247,8 +247,8 @@ class RunEvent:
         if self.type == RunEventType.ATTEMPT_RESET and isinstance(self.data, dict) and type(self.data.get("attempt")) is not int:
             raise ValueError("Attempt reset requires an integer attempt")
         if self.type == RunEventType.WAITING and isinstance(self.data, dict):
-            if self.data.get("on") not in ("model", "tool"):
-                raise ValueError("Waiting events say what is being waited on: 'model' or 'tool'")
+            if self.data.get("on") not in ("model", "tool", "retry"):
+                raise ValueError("Waiting events say what is being waited on: 'model', 'tool' or 'retry'")
             if not isinstance(self.data.get("seconds"), (int, float)):
                 raise ValueError("Waiting events require elapsed seconds")
 

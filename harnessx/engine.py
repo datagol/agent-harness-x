@@ -38,7 +38,7 @@ from .models import (
     resolve_model_limits,
 )
 from .providers.base import INVALID_ARGUMENTS, native_continuation, streams
-from .providers.retry import is_context_overflow, is_transient, retry_after_seconds
+from .providers.retry import is_context_overflow, is_rate_limited, is_transient, retry_after_seconds
 from .prompt_cache import accepts_cache, build_hint, hint_from_wire
 from .tools import retry_wanted
 from .types import DEFAULT_TIMEOUT_SECONDS, PermissionLevel, ProviderResponse, TokenUsage, ToolCall, ToolResult, ToolRetry
@@ -1255,6 +1255,9 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                 if state["attempt"]:
                     state["usage_incomplete"] = True
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
+                else:
+                    # A fresh step: no time slept on retries yet.
+                    state["retry_waited"] = 0.0
                 state["attempt"] += 1
                 await persist()
             buffered_events = []
@@ -1279,7 +1282,12 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                             "type": type(exc).__name__, "message": str(exc),
                         })
                     retry = agent.config.retry
-                    spent = not retryable(agent, exc) or state["attempt"] >= retry.attempts
+                    limited = rate_limited(agent, exc)
+                    wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
+                    waited = float(state.get("retry_waited") or 0.0)
+                    spent = not retryable(agent, exc) or retry.spent(
+                        state["attempt"], rate_limited=limited, waited=waited, next_wait=wait,
+                    )
                     if name == "compact" and spent and not state.get("condense_without_model"):
                         # A failed summary must not fail the run. Condense at the
                         # character level instead: lossy, but it always works.
@@ -1296,7 +1304,6 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                         continue
                     if name not in ("model", "compact") or spent:
                         raise
-                    wait = retry.wait_for(state["attempt"], retry_after(agent, exc))
                     await emit_hook(
                         agent, HookEvent.RETRY, kind="model", name=agent.config.model,
                         attempt=state["attempt"], next_attempt=state["attempt"] + 1,
@@ -1310,10 +1317,19 @@ async def drive(agent, state, emit, *, commit=None, control=None):
                     # committed, so put memory back to it.
                     agent.memory.set_messages(copy.deepcopy(state.get("messages", [])))
                     await persist([ev(E.ATTEMPT_RESET, {"attempt": state["attempt"]})])
+                    state["retry_waited"] = waited + wait
                     state["attempt"] += 1
                     await persist()
                     if wait:
-                        await asyncio.sleep(wait)
+                        # A long Retry-After shows on the run stream as WAITING
+                        # (on="retry") rather than as silence.
+                        async def retry_notice(kind, data):
+                            await persist([ev(kind, data)])
+
+                        await await_with_notices(
+                            asyncio.sleep(wait), getattr(agent.config, "progress", None),
+                            retry_notice, on="retry",
+                        )
             outcome = await capture(agent, outcome)
             before = state.get("messages")
             state = transition(state, name, outcome)
@@ -1628,6 +1644,17 @@ def retryable(agent, exc):
         except Exception:
             pass
     return is_transient(exc)
+
+
+def rate_limited(agent, exc):
+    """Whether a model failure is a throttle or overload, asked of the agent's provider."""
+    classify = getattr(agent.provider, "is_rate_limited", None)
+    if callable(classify):
+        try:
+            return bool(classify(exc))
+        except Exception:
+            pass
+    return is_rate_limited(exc)
 
 
 def retry_after(agent, exc):
