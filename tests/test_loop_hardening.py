@@ -418,6 +418,42 @@ async def test_an_openai_stream_with_no_finish_reason_and_a_tool_call_is_not_tru
             pass
 
 
+@pytest.mark.asyncio
+async def test_an_openai_tool_call_streams_as_it_is_written():
+    """Only Anthropic emitted TOOL_CALL_DELTA; OpenAI (and Azure and OpenRouter,
+    which share its stream) said nothing but progress until the call was done."""
+    import json
+
+    from harnessx.providers.openai import OpenAIProvider
+
+    def chunk(finish=None, **delta):
+        return SimpleNamespace(usage=None, choices=[SimpleNamespace(
+            finish_reason=finish, delta=SimpleNamespace(**{"content": None, "tool_calls": None, "refusal": None, **delta}))])
+
+    def call(index, id=None, name=None, arguments=None):
+        return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
+
+    async def chunks():
+        yield chunk(tool_calls=[call(0, "c1", "search", "")])
+        yield chunk(tool_calls=[call(0, arguments='{"q": ')])
+        yield chunk(tool_calls=[call(0, arguments='"x"}')])
+        yield chunk(tool_calls=[call(1, None, "lookup", '{"id": 7}')])  # no id from the API
+        yield chunk(finish="tool_calls")
+
+    async def create(**kwargs):
+        return chunks()
+
+    provider = OpenAIProvider(client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    out = [c async for c in provider.stream(model="gpt-4o", messages=[], system=None, tools=[], max_tokens=100)]
+    deltas = [c.data for c in out if c.kind == "tool_call_delta"]
+    final = out[-1].data
+    first = [d for d in deltas if d.id == "c1"]
+    assert first[0] == ToolCallDelta("c1", "search") and json.loads("".join(d.partial_json for d in first)) == {"q": "x"}
+    second = [d for d in deltas if d.name == "lookup"]
+    assert second[0].partial_json == "" and second[1].partial_json == '{"id": 7}'
+    assert [c.id for c in final.tool_calls] == ["c1", second[0].id], "the deltas name the call that runs"
+
+
 # ── the step limit ───────────────────────────────────────────────────────────
 
 

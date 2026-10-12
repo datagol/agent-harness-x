@@ -61,7 +61,7 @@ except ImportError as e:
         "Install with: pip install 'harnessx[gemini]'"
     ) from e
 
-from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall
+from ..types import ProviderResponse, StopReason, StreamChunk, TokenUsage, ToolCall, ToolCallDelta
 from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..types import ToolChoice
@@ -314,6 +314,7 @@ class GeminiProvider(LLMProvider):
             )
 
         all_parts: list[Any] = []
+        call_ids: dict[int, str] = {}  # position in all_parts -> the id its deltas carried
         finish_reason = None
         usage_metadata = None
         blocked = False
@@ -333,6 +334,20 @@ class GeminiProvider(LLMProvider):
                 content = getattr(candidates[0], "content", None)
                 for part in list(getattr(content, "parts", None) or []):
                     all_parts.append(part)
+                    call = getattr(part, "function_call", None)
+                    if call is not None:
+                        # Gemini sends a call whole, so it streams as one opening
+                        # delta and one carrying all of its arguments.
+                        call_id = getattr(call, "id", None) or f"call_{uuid.uuid4().hex[:12]}"
+                        call_ids[len(all_parts) - 1] = call_id
+                        name = getattr(call, "name", "") or ""
+                        yield StreamChunk(kind="tool_call_delta", data=ToolCallDelta(call_id, name))
+                        args = dict(getattr(call, "args", None) or {})
+                        if args:
+                            yield StreamChunk(
+                                kind="tool_call_delta",
+                                data=ToolCallDelta(call_id, name, json.dumps(args, default=str)),
+                            )
                     text = getattr(part, "text", None)
                     if text and getattr(part, "thought", False):
                         # Thinking summaries are not user-visible text.
@@ -347,7 +362,7 @@ class GeminiProvider(LLMProvider):
 
         yield StreamChunk(
             kind="response",
-            data=_from_gemini_parts(all_parts, finish_reason, usage_metadata),
+            data=_from_gemini_parts(all_parts, finish_reason, usage_metadata, call_ids=call_ids),
         )
 
     async def count_tokens(
@@ -501,6 +516,7 @@ def _from_gemini_parts(
     finish_reason: Any,
     usage_metadata: Any,
     raw: Any = None,
+    call_ids: dict[int, str] | None = None,
 ) -> ProviderResponse:
     """Normalize Gemini response parts into canonical ProviderResponse.
 
@@ -512,7 +528,7 @@ def _from_gemini_parts(
     tool_calls: list[ToolCall] = []
     blocks: list[dict[str, Any]] = []
 
-    for part in parts:
+    for position, part in enumerate(parts):
         text = getattr(part, "text", None)
         if getattr(part, "thought", False):
             if text:
@@ -524,7 +540,7 @@ def _from_gemini_parts(
         call = getattr(part, "function_call", None)
         if call is not None:
             tc = ToolCall(
-                id=getattr(call, "id", None) or f"call_{uuid.uuid4().hex[:12]}",
+                id=getattr(call, "id", None) or (call_ids or {}).get(position) or f"call_{uuid.uuid4().hex[:12]}",
                 name=getattr(call, "name", "") or "",
                 input=dict(getattr(call, "args", None) or {}),
             )

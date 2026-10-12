@@ -53,8 +53,10 @@ faults injected between the agent and the API.
 ### Added
 
 - `RunEventType.TOOL_CALL_DELTA` with `ToolCallDelta(id, name, partial_json)`:
-  a tool call as the model writes it, on Anthropic. The first delta names the
-  tool, so a display can show it seconds before `TOOL_CALL_START`.
+  a tool call as the model writes it, on Anthropic, OpenAI, Azure, OpenRouter
+  and Gemini. The first delta names the tool, so a display can show it seconds
+  before `TOOL_CALL_START`. Gemini sends a call whole, so its arguments arrive
+  in one delta.
 - `MalformedToolInputError` and `ContextOverflowError` in `harnessx.errors`.
 - `ConversationMemory.spill_large_results(threshold_chars=2000)`.
 - `AnthropicProvider.clear_model_limits_cache()`.
@@ -68,6 +70,11 @@ faults injected between the agent and the API.
   stopped. The broken call is now answered with an error tool result, and the
   model sends it again. If the call cannot be identified, the request is made
   once more.
+- **Tool arguments cut off part way are no longer run.** The SDK parsed
+  streamed arguments leniently, so JSON that stopped part way ran the tool
+  with half its input. The argument text is now parsed strictly once the
+  reply is complete, and a call that does not parse is answered with an error
+  so the model sends it again.
 - **"Prompt is too long" with nothing to condense** failed at once with the
   SDK's `BadRequestError`. HarnessX now spills large tool results to disk and
   tries again, then retries once if the request is far below the window, and

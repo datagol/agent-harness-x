@@ -794,10 +794,12 @@ approval and recovery events. Text deltas are provisional; discard an
 interrupted attempt's text when `ATTEMPT_RESET` arrives.
 
 `TOOL_CALL_DELTA` carries a `ToolCallDelta(id, name, partial_json)` while the
-model is still writing a tool call (Anthropic only, for now). The first one for
+model is still writing a tool call. The first one for
 a call has an empty `partial_json`: show "calling search…" there, seconds before
 `TOOL_CALL_START`, which still means the input is complete and the tool is
-about to run. Like text deltas, they are provisional.
+about to run. Like text deltas, they are provisional. Anthropic and OpenAI
+(with Azure and OpenRouter) stream the arguments in fragments; Gemini sends a
+call whole, so it arrives as one opening delta and one with all its arguments.
 
 ### When the model is slow rather than broken
 
