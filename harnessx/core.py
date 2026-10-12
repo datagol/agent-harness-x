@@ -111,6 +111,9 @@ class Agent:
         # The task list the planning tools maintain. Snapshotted with the run, so
         # it survives a durable resume; empty unless the bundle is loaded.
         self.todos: list[dict[str, str]] = []
+        # The agent that delegated to this one, so serial tools take turns
+        # across the whole tree of specialists. None for a top-level agent.
+        self._tree_parent: Agent | None = None
         self.session_metadata: dict[str, Any] = {}
 
         if skills is not None:

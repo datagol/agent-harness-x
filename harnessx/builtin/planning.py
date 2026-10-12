@@ -20,7 +20,7 @@ invalidate the prompt cache for the whole conversation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from harnessx.types import PermissionLevel
 from ._registration import select_tools
@@ -163,7 +163,7 @@ def register_planning_tools(
         agent = _agent()
         return render(getattr(agent, "todos", []) or []) or "The task list is empty."
 
-    handlers = {"write_todos": write_todos, "read_todos": read_todos}
+    handlers: dict[str, Callable[..., Any]] = {"write_todos": write_todos, "read_todos": read_todos}
     for name in names:
         handler = handlers[name]
         # Tagged so an Agent can tell its own default apart from one the

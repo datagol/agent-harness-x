@@ -315,7 +315,7 @@ class ConversationMemory:
             if message.role != "user" or not isinstance(message.content, list):
                 continue
             changed = False
-            content = []
+            content: list[Any] = []
             for block in message.content:
                 body = block.get("content") if isinstance(block, dict) else None
                 if (
@@ -326,8 +326,9 @@ class ConversationMemory:
                     preview = self._evict_large_result(str(block.get("tool_use_id", "")), body)
                     if len(preview) < len(body):
                         freed += len(body) - len(preview)
-                        block = {**block, "content": preview}
+                        content.append({**block, "content": preview})
                         changed = True
+                        continue
                 content.append(block)
             if changed:
                 self._messages[index] = Message("user", content)
