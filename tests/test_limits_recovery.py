@@ -481,3 +481,32 @@ def test_a_fallback_member_keeps_the_budget_within_its_own_model():
     member = _Member(Scripted([]))
     member.model = "gpt-4o"
     assert member.request({"max_tokens": 32_000})["max_tokens"] == 16_384
+
+
+# ── an unreadable tool argument the provider could not salvage ───────────────
+
+
+@pytest.mark.asyncio
+async def test_an_unidentifiable_malformed_tool_call_is_asked_for_once_more():
+    from harnessx.errors import MalformedToolInputError
+
+    provider = Scripted([MalformedToolInputError("Unable to parse tool parameter JSON"), ProviderResponse(text="ok")])
+    agent = _agent(provider)
+    recoveries, retries = [], []
+    agent.hooks.on(HookEvent.RECOVERY, lambda ctx: recoveries.append(ctx.data["reason"]))
+    agent.hooks.on(HookEvent.RETRY, lambda ctx: retries.append(ctx.data))
+    async with agent:
+        result = await agent.run("go")
+    assert result.ok and result.output == "ok" and len(provider.calls) == 2
+    assert recoveries == ["malformed_tool_input"] and retries == [], "a recovery, not a retry attempt"
+
+
+@pytest.mark.asyncio
+async def test_a_second_unreadable_reply_in_a_row_fails_with_the_typed_error():
+    from harnessx.errors import MalformedToolInputError
+
+    provider = Scripted([MalformedToolInputError("Unable to parse tool parameter JSON")] * 2)
+    agent = _agent(provider)
+    async with agent:
+        result = await agent.run("go")
+    assert result.failed and result.error["type"] == "MalformedToolInputError" and len(provider.calls) == 2

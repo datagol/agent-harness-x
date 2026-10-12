@@ -97,6 +97,8 @@ class RecoveryData(TypedDict):
     * ``context_overflow`` -- the request did not fit the context window; the
       history was condensed and the call repeated.
     * ``paused_turn`` -- the server paused a long turn; it was sent back to resume.
+    * ``malformed_tool_input`` -- a streamed tool argument could not be read and
+      the call could not be identified; the reply was asked for again, once.
     * ``iteration_limit`` -- the run reached ``max_iterations``; the model was
       asked for a final answer without tools instead of the run failing.
     * ``unfinished_plan`` -- the model was finishing with its task list still

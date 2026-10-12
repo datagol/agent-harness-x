@@ -462,3 +462,79 @@ async def test_an_endpoint_that_refuses_the_field_gets_requests_without_it(strea
             assert response.text == "ok"
     assert len(bodies) == 3, "refused once, then never sent again"
     assert provider.eager_tool_streaming is False
+
+
+# ── a corrupted streamed tool argument is answered, not fatal ────────────────
+
+
+def corrupted_sse(body, garbage='{"path": "fibonacci.py", "content": @@'):
+    """The SSE of ``body`` with the first tool call's arguments replaced by text
+    that is not JSON at all, as a broken stream or proxy can deliver it."""
+    text = sse_message(body)
+    good = json.dumps(json.dumps(body["content"][1]["input"]))[1:-1]
+    bad = json.dumps(garbage)[1:-1]
+    assert good in text
+    return text.replace(good, bad, 1)
+
+
+def client_with_streams(streams, requests):
+    def handle(request):
+        body = json.loads(request.content)
+        if request.url.path.endswith("/count_tokens"):
+            return httpx.Response(200, json={"input_tokens": 8})
+        requests.append(body)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=streams[len(requests) - 1])
+
+    return AsyncAnthropic(api_key="test-key", base_url="https://anthropic.invalid", max_retries=0,
+                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+
+
+@pytest.mark.asyncio
+async def test_a_corrupted_tool_argument_stream_is_salvaged_by_the_provider():
+    from harnessx.providers.base import INVALID_ARGUMENTS
+
+    requests = []
+    async with client_with_streams([corrupted_sse(tool_message())], requests) as client:
+        provider = AnthropicProvider(client=client)
+        chunks = [c async for c in provider.stream(
+            model="claude-sonnet-4-6", messages=[{"role": "user", "content": "go"}], system=None,
+            tools=[{"name": "write_file", "description": "Write.", "input_schema": {"type": "object"}}],
+            max_tokens=1000,
+        )]
+    response = chunks[-1].data
+    assert chunks[-1].kind == "response" and str(response.stop_reason) in ("tool_use", "StopReason.TOOL_USE")
+    [call] = response.tool_calls
+    assert call.id == "tool_write" and call.name == "write_file"
+    assert "not valid JSON" in call.input[INVALID_ARGUMENTS]
+    assert response.text == "I'll write a Fibonacci program."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["run", "run_stream"])
+async def test_the_model_is_asked_to_resend_a_corrupted_tool_call(tmp_path, streaming):
+    """Benchmark fault: the streamed tool arguments arrive as invalid JSON. On
+    0.8.0 the run failed at once with ValueError; now the model gets an error
+    result for that call and sends it again."""
+    requests = []
+    streams = [
+        corrupted_sse(tool_message()),
+        sse_message(tool_message()),
+        sse_message(message([{"type": "text", "text": "Created fibonacci.py."}])),
+    ]
+    async with client_with_streams(streams, requests) as client:
+        async with Agent(provider=AnthropicProvider(client=client)) as agent:
+            register_filesystem_tools(agent.tools, base_path=str(tmp_path))
+            agent.permissions.set_permission("write_file", PermissionLevel.ALLOW)
+            if streaming:
+                async with agent.run_stream("Write a Fibonacci program") as stream:
+                    events = [event async for event in stream]
+                    result = await stream.result()
+                assert not any(e.type is RunEventType.ERROR for e in events)
+            else:
+                result = await agent.run("Write a Fibonacci program")
+    assert result.status == "completed", result.error
+    assert len(requests) == 3
+    assert (tmp_path / "fibonacci.py").read_text() == PROGRAM
+    answered = [b for b in requests[1]["messages"][-1]["content"] if b.get("type") == "tool_result"]
+    assert answered and answered[0]["tool_use_id"] == "tool_write" and answered[0].get("is_error")
+    assert "not valid JSON" in json.dumps(answered[0]["content"])

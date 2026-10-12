@@ -24,7 +24,7 @@ from .execution import (
     transition,
     wire,
 )
-from .errors import TransientToolError
+from .errors import MalformedToolInputError, TransientToolError
 from .permissions import MaxIterationsError
 from .extensions.base import ExtensionContext, complete_extensions
 from .hooks import HookContext, HookEvent, Middleware
@@ -634,6 +634,21 @@ async def command(agent, state, name, emit, *, record=None):
         try:
             response = await call_provider()
         except Exception as exc:
+            if isinstance(exc, MalformedToolInputError) and not state.get("malformed_recovered"):
+                # A tool argument the provider could not read, in a reply it could
+                # not salvage: ask for the reply again, once. Not a retry attempt:
+                # the request was fine, the reply was not.
+                if delivered:
+                    await event(E.ATTEMPT_RESET, {"attempt": state.get("attempt") or 1})
+                logger.info("a streamed tool argument was unreadable; asking for the reply again")
+                await emit_hook(
+                    agent, HookEvent.RECOVERY, reason="malformed_tool_input", attempt=1,
+                    reply_budget=request.get("max_tokens"),
+                )
+                return {
+                    **await snapshot(agent), "recovery": "malformed_tool_input",
+                    "malformed_recovered": True, "attempt": 0,
+                }
             # Both refusals arrive before any output; once text has reached the
             # caller, re-asking would show it twice, so the driver decides.
             if delivered:
@@ -726,6 +741,8 @@ async def command(agent, state, name, emit, *, record=None):
                 }
             ),
             "provider_continuation": native_continuation(canonical),
+            # A readable reply re-arms the one re-ask an unreadable one gets.
+            "malformed_recovered": False,
         }
 
     if name == "prepare_tools":
@@ -750,7 +767,7 @@ async def command(agent, state, name, emit, *, record=None):
                     raise ValueError(
                         f"Invalid arguments for {call.name!r}: "
                         f"{unreadable or 'the arguments are not a JSON object'}. "
-                        "Call the tool again with a complete JSON object."
+                        "Call the tool again, sending the complete JSON object."
                     )
                 definition, corrected = agent.tools.resolve_tool(call.name)
                 if corrected != call.name:

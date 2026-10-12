@@ -13,7 +13,7 @@ from ..types import PromptCacheHint
 from ..errors import IncompleteStreamError
 from ..models import ModelLimits
 from ..types import ToolChoice
-from .base import normalize_tool_choice, LLMProvider
+from .base import INVALID_ARGUMENTS, normalize_tool_choice, LLMProvider
 
 
 def _filter_kwargs(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -204,7 +204,12 @@ class AnthropicProvider(LLMProvider):
         stream it and return the assembled message instead."""
         stream_kwargs = _filter_kwargs(self.client.messages.stream, kwargs)
         async with self.client.messages.stream(**stream_kwargs) as stream:
-            response = await stream.get_final_message()
+            try:
+                response = await stream.get_final_message()
+            except ValueError as exc:
+                if not _malformed_tool_json(exc):
+                    raise
+                response = _salvage_malformed(stream, exc)
         if not getattr(response, "stop_reason", None):
             raise IncompleteStreamError("Anthropic stream ended before the message was complete")
         return response
@@ -305,10 +310,15 @@ class AnthropicProvider(LLMProvider):
         delivered = False
         try:
             async with stream_ctx as stream:
-                async for chunk in _chunks(stream):
-                    delivered = delivered or chunk.kind == "text_delta"
-                    yield chunk
-                final_resp = await stream.get_final_message()
+                try:
+                    async for chunk in _chunks(stream):
+                        delivered = delivered or chunk.kind == "text_delta"
+                        yield chunk
+                    final_resp = await stream.get_final_message()
+                except ValueError as exc:
+                    if not _malformed_tool_json(exc):
+                        raise
+                    final_resp = _salvage_malformed(stream, exc)
         except Exception as exc:
             if not delivered and self.eager_tool_streaming and tools and _rejected_eager_streaming(exc):
                 self.eager_tool_streaming = False
@@ -351,6 +361,44 @@ class AnthropicProvider(LLMProvider):
             return int(resp.input_tokens)
         except Exception:
             return len(str(messages)) // 3
+
+
+_MALFORMED_TOOL_JSON = "Unable to parse tool parameter JSON"
+
+
+def _malformed_tool_json(exc: BaseException) -> bool:
+    """The SDK could not parse a streamed tool argument (eager input streaming
+    hands that check to the client)."""
+    return isinstance(exc, ValueError) and _MALFORMED_TOOL_JSON in str(exc)
+
+
+def _salvage_malformed(stream: Any, exc: BaseException) -> Any:
+    """The reply so far, with the unreadable tool call marked for the engine to answer.
+
+    The SDK raises while accumulating the stream, so the rest of the reply never
+    arrives; what it assembled up to the broken argument is kept. The broken
+    call keeps its id and name and gets an INVALID_ARGUMENTS input, which the
+    engine answers with an error result asking the model to send it again.
+    Without an identifiable call there is nothing to answer, so the typed error
+    lets the engine ask for the whole reply again.
+    """
+    from ..errors import MalformedToolInputError
+
+    try:
+        snapshot = stream.current_message_snapshot
+    except Exception:
+        snapshot = None
+    blocks = list(getattr(snapshot, "content", None) or [])
+    broken = next((b for b in reversed(blocks) if getattr(b, "type", None) == "tool_use"), None)
+    if broken is None or not getattr(broken, "id", "") or not getattr(broken, "name", ""):
+        raise MalformedToolInputError(str(exc).split(". JSON:")[0]) from exc
+    detail = str(exc.__cause__ or exc).split(". JSON:")[0]
+    broken.input = {
+        INVALID_ARGUMENTS: f"the arguments are not valid JSON ({detail}); the partial input was discarded"
+    }
+    # The stream never reached message_delta, so it carries no stop reason.
+    snapshot.stop_reason = "tool_use"
+    return snapshot
 
 
 async def _chunks(stream: Any) -> AsyncIterator[StreamChunk]:

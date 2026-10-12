@@ -48,6 +48,20 @@ class IncompleteStreamError(HarnessError, ConnectionError):
     """
 
 
+class MalformedToolInputError(HarnessError, ValueError):
+    """A streamed tool call's arguments could not be read as JSON, and the call
+    could not be identified to answer it with an error result.
+
+    The engine asks for the reply again once (a recovery, not a retry attempt)
+    and fails with this error if the second reply is unreadable too.
+    """
+
+    def __init__(self, message: str, *, name: str | None = None, raw_json: str = "") -> None:
+        super().__init__(message)
+        self.name = name
+        self.raw_json = raw_json
+
+
 class TransientToolError(HarnessError):
     """Raised by a tool handler to say the call failed for a reason that may clear on its own
     (throttling, a flaky upstream, a lost connection) and did not take effect.
