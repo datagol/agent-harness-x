@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-12
+
 Fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw Anthropic
 SDK, LangChain deepagents, CrewAI and pi ran the same tasks again, and from a
 research run that cited sources it had only seen the titles of.
@@ -868,7 +870,8 @@ never published; this release supersedes it.
 Last release as `datagol-agent-harness`. Gemini and OpenRouter providers, MIT
 license, flexible tool registration.
 
-[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/datagol/agent-harness-x/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/datagol/agent-harness-x/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/datagol/agent-harness-x/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/datagol/agent-harness-x/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/datagol/agent-harness-x/compare/v0.7.3...v0.7.4
