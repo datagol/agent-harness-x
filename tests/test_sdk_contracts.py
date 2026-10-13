@@ -75,6 +75,13 @@ def test_budget_and_context_configuration_is_wired():
     assert agent.guardrails.max_cost_dollars == 2
     agent.guardrails.track_usage(TokenUsage(input_tokens=1_000_000, output_tokens=1_000_000))
     assert agent.guardrails.estimated_cost == 7
+    # Cached prompt tokens are part of input_tokens and cost a tenth to read, 1.25x to write.
+    agent.guardrails.track_usage(TokenUsage(input_tokens=1_000_000, cache_read_input_tokens=900_000, cache_creation_input_tokens=100_000))
+    assert agent.guardrails.estimated_cost == pytest.approx(7 + 3 * (0.9 * 0.1 + 0.1 * 1.25))
+    other = Agent(provider=Provider(), config=AgentConfig(limits=Limits(
+        input_cost_per_m=1, output_cost_per_m=1, cache_read_cost_multiplier=0.5, cache_write_cost_multiplier=1.0)))
+    other.guardrails.track_usage(TokenUsage(input_tokens=1_000_000, cache_read_input_tokens=1_000_000))
+    assert other.guardrails.estimated_cost == pytest.approx(0.5)
     with pytest.raises(ValueError):
         RuntimeConfig(max_session_duration_seconds=-1)
     with pytest.raises(TypeError):  # removed in 0.4; the runtime checkpoints at every phase boundary

@@ -735,21 +735,39 @@ async def test_still_working_notices_go_out_while_the_model_is_silent():
 
 
 @pytest.mark.asyncio
-async def test_finishing_with_an_open_plan_gets_one_reminder_and_keeps_the_answer():
-    plan = [{"content": "Write the report", "status": "in_progress"}]
+async def test_answering_with_an_open_plan_ends_the_run_without_another_model_call():
+    """0.9.0 asked the model to settle the list: one write_todos call and a
+    second copy of the answer, on every planned run (2026-10-12 benchmark)."""
+    plan = [{"content": "Write the report", "status": "in_progress"}, {"content": "Send it", "status": "pending"}]
     provider = Scripted([
         ProviderResponse(tool_calls=[ToolCall("p1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
         ProviderResponse(text="# The report"),
-        ProviderResponse(tool_calls=[ToolCall("p2", "write_todos", {"todos": [{**plan[0], "status": "completed"}]})],
-                         stop_reason="tool_use"),
+    ])
+    agent = Agent(config=AgentConfig(model="m"), provider=provider)
+    hooked: list[dict] = []
+    agent.hooks.on(HookEvent.TODOS_UPDATED, lambda ctx: hooked.append(dict(ctx.data)))
+    async with agent:
+        result = await agent.run("write it")
+    assert result.ok and result.output == "# The report"
+    assert len(provider.calls) == 2, "no reminder turn, no sign-off turn"
+    assert agent.todos == plan, "the list is left as the model wrote it; the next run may carry it on"
+    assert len(hooked) == 1, "nothing is announced that the model did not change"
+
+
+@pytest.mark.asyncio
+async def test_ending_silently_with_an_open_plan_gets_one_reminder():
+    plan = [{"content": "Step", "status": "pending"}]
+    provider = Scripted([
+        ProviderResponse(tool_calls=[ToolCall("p1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
         ProviderResponse(text=""),
+        ProviderResponse(text="Step is left for you."),
     ])
     agent = Agent(config=AgentConfig(model="m"), provider=provider)
     async with agent:
-        result = await agent.run("write it")
-    assert result.ok and result.output == "# The report", "the answer survives; an empty sign-off adds nothing"
+        result = await agent.run("go")
+    assert len(provider.calls) == 3 and result.output == "Step is left for you."
     assert "task list still has unfinished items" in str(provider.calls[2]["messages"][-1])
-    assert agent.todos[0]["status"] == "completed" and len(provider.calls) == 4
+    assert agent.todos[0]["status"] == "pending", "the model said what is left; the run does not pretend it is done"
 
 
 @pytest.mark.asyncio
@@ -757,13 +775,16 @@ async def test_the_plan_reminder_is_sent_once_only():
     plan = [{"content": "Step", "status": "pending"}]
     provider = Scripted([
         ProviderResponse(tool_calls=[ToolCall("p1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
-        ProviderResponse(text="answer"),
-        ProviderResponse(text="Step is left for you."),
+        ProviderResponse(text=""),
+        ProviderResponse(text=""),
+        ProviderResponse(text="done"),
     ])
     agent = Agent(config=AgentConfig(model="m"), provider=provider)
     async with agent:
         result = await agent.run("go")
-    assert len(provider.calls) == 3 and result.output == "answer\n\nStep is left for you."
+    final = provider.calls[-1]["messages"]
+    reminders = sum("task list still has unfinished items" in str(m) for m in final)
+    assert reminders == 1 and result.output == "done"
 
 
 def test_tool_call_delta_events_round_trip_and_validate():

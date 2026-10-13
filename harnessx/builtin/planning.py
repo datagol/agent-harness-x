@@ -64,14 +64,20 @@ WRITE_TODOS_DESCRIPTION = (
     "Plan multi-step work and track progress: the list of steps, replaced whole on every call.\n\n"
     "Call it before starting any task with three or more steps, then again as each step finishes. "
     "Send the whole list every time, including items already completed. Keep exactly one item "
-    "in_progress while you work on it; if you send more, the first is kept and the rest go back to pending."
+    "in_progress while you work on it; if you send more, the first is kept and the rest go back to pending. "
+    "Update the list in the same turn as the tool calls that do the work; when the work is done, "
+    "give your answer rather than a final update."
 )
 
 # Added to the system prompt while the built-in write_todos is installed. Static
-# text, so the cacheable prefix does not change as the list does.
+# text, so the cacheable prefix does not change as the list does. The last
+# sentence is there because, told only to "update it as each step finishes",
+# Sonnet spent a turn of its own ticking the list before answering on a third
+# of the 2026-10-12 benchmark's tool tasks.
 PLANNING_GUIDANCE = (
     "Planning: when a task needs three or more steps, call write_todos before you start, with one "
-    "item per step, and update it as each step finishes so exactly one item is in_progress."
+    "item per step, and update it alongside the tool calls that do the work so exactly one item is "
+    "in_progress. When the work is done, answer; the list needs no closing update."
 )
 
 

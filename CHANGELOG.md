@@ -6,6 +6,67 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw Anthropic
+SDK, LangChain deepagents, CrewAI and pi ran the same tasks again, and from a
+research run that cited sources it had only seen the titles of.
+
+### Fixed
+
+- **The cost estimate priced cached prompt tokens at the full input rate.**
+  `TokenUsage.input_tokens` counts every prompt token, cached or not, and
+  `cost_of` multiplied all of it by `input_cost_per_m`. On a long-context run
+  that read 120 files the estimate reached $1.75 while the wire charged
+  $0.38, and `max_cost_dollars` stopped the run. Cache reads now cost
+  `Limits.cache_read_cost_multiplier` (0.1, Anthropic's rate) and cache
+  writes `cache_write_cost_multiplier` (1.25) of the input price; set 0.5
+  and 1.0 for OpenAI. A run with no cache activity is priced as before.
+
+### Changed
+
+- **A run that answers with its task list open is no longer sent back to
+  tick it.** 0.9.0 asked the model to settle the list, and on every planned
+  run the model spent two more calls: one `write_todos` and a second copy of
+  the answer (a six-step tool task took 7 calls against the raw loop's 5; a
+  two-call JSON task took 4). The run now ends with the answer and the list
+  as the model left it, which also keeps a plan a session carries into its
+  next run. The one reminder remains for a reply with no answer at all,
+  the case where work may have been dropped.
+- **The planning guidance says when not to update the list.** Told to
+  "update it as each step finishes", the model spent a turn of its own on a
+  closing `write_todos` before answering in a third of the tool tasks. The
+  guidance and the tool description now say to update the list alongside the
+  tool calls that do the work and to answer, not update, when the work is done.
+- **Spilled tool results say "search" before "read on", and one read returns
+  more.** The notice on a result of many lines named `offset=20, limit=200`
+  as the way to continue, and a small model paged a batch of thirty source
+  files five turns long and still missed the import lines it needed. The
+  notice now offers `read_tool_result(pattern=...)` first and reading on
+  second. A read's default size is no longer 6,000 characters but the most a
+  reply may hold (just under `max_result_chars`, 11,700 with the defaults),
+  so a result that spilled by a little comes back whole in one read. The
+  `limit` default rises from 200 to 2,000 lines; `max_chars=0` means that
+  default. Explicit values behave as before.
+- **A list of records a little over the limit is trimmed to fit, not hidden.**
+  A search returned 34,884 characters against a 30,000 limit, so the model
+  got a one-line preview of each of its seven articles, 9% of the result. It
+  marked the step done, never called `read_tool_result`, and cited sources
+  from their titles. Now, when a JSON list of records is over
+  `max_result_chars`, every record's text is cut to the same length until the
+  whole thing fits. On that result, six of the seven articles arrive whole
+  and the model sees 86%. Text that was cut ends with "[... N more
+  characters]", and the full result is still saved for `read_tool_result`.
+  A result that cannot fit even with each record cut to 300 characters is
+  saved and previewed as before.
+- **The preview notice asks to be read.** It said "read the rest before
+  searching again", so a model that had no reason to search again never did.
+  It now says what share of the result the preview shows and asks the model
+  to read what it needs before relying on it or citing it.
+- **A record's preview line skips the page's navigation.** A search hit's
+  text often opens with a site menu ("What We Do ### Global Banking &
+  Markets"), which filled the whole preview line. Headings and short menu
+  fragments are skipped, so the line starts at the first real sentence.
+
+
 ## [0.9.0] - 2026-10-12
 
 Fixes for the faults that two benchmarks found on 2026-10-10, when HarnessX,

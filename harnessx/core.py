@@ -105,6 +105,8 @@ class Agent:
         self.guardrails = GuardrailsEngine(
             max_iterations=limits.max_iterations, max_cost_dollars=limits.max_cost_dollars,
             input_cost_per_m=limits.input_cost_per_m, output_cost_per_m=limits.output_cost_per_m,
+            cache_read_cost_multiplier=limits.cache_read_cost_multiplier,
+            cache_write_cost_multiplier=limits.cache_write_cost_multiplier,
         )
         self._session_id = str(uuid.uuid4())
         self.prompt_providers: list[Any] = []
@@ -172,24 +174,24 @@ class Agent:
         memory = self.memory
 
         async def read_tool_result(
-            result_id: str, offset: int = 0, limit: int = 200, max_chars: int = 6000, char_offset: int = 0,
+            result_id: str, offset: int = 0, limit: int = 2000, max_chars: int = 0, char_offset: int = 0,
             pattern: str = "",
         ) -> str:
             """Read a tool result that was too large for the conversation and was cut to a preview.
 
-            The notice on such a result says what the preview left out and gives the call that
-            continues where it stopped. Read the rest before searching again for the same
-            information. A result that is one long line (JSON, CSV) is paged by character with
-            char_offset; follow the "next" hint at the top of each reply. Use pattern to find
-            passages without reading everything.
+            Prefer pattern: it returns only the passages that match, which is usually what you
+            need from a long file or log. Reading in order returns as much as fits in one reply
+            (a result that spilled by a little comes back whole); follow the "next" hint at the
+            top of each reply for the rest. Do not call the original tool again for the same
+            information.
 
             Args:
                 result_id: The tool-use id named in the "[Tool result too large ...]" notice.
+                pattern: A regular expression (case-insensitive) to find instead of reading in order.
                 offset: First line to return, counting from 0.
                 limit: Number of lines to return, at most 2000.
-                max_chars: Character cap for one read (default 6000); long lines are paged.
+                max_chars: Character cap for one read; 0 (the default) is the most one reply may hold.
                 char_offset: Character position to continue from inside the selected lines.
-                pattern: A regular expression (case-insensitive) to find instead of reading in order.
             """
             return await asyncio.to_thread(
                 memory.read_evicted, result_id, offset, limit, max_chars=max_chars, char_offset=char_offset,

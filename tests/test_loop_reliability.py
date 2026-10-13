@@ -998,8 +998,8 @@ async def test_the_system_prompt_does_not_change_as_the_list_does():
     agent, provider = _planning_agent([
         ProviderResponse(tool_calls=[ToolCall("c1", "write_todos", {"todos": plan})], stop_reason="tool_use"),
         ProviderResponse(tool_calls=[ToolCall("c2", "write_todos", {"todos": ticked})], stop_reason="tool_use"),
-        ProviderResponse(text="done for now"),
-        ProviderResponse(text="b is left for later"),  # answers the unfinished-plan reminder
+        ProviderResponse(text=""),  # no answer with the list open: the one reminder goes out
+        ProviderResponse(text="b is left for later"),
     ])
     async with agent:
         await agent.run("plan it")

@@ -46,6 +46,99 @@ _LINK_KEYS = ("url", "link", "href", "uri", "source")
 _TEXT_KEYS = ("content", "text", "snippet", "summary", "description", "body", "message")
 
 
+_FITTED = "[Tool result trimmed to fit"
+_MENU_SPLIT = re.compile(r"\n+|#{1,6}\s+|(?<=[.!?])\s+(?=[A-Z0-9])")
+
+
+def _readable(text: str) -> str:
+    """``text`` without the headings and menu fragments that open many web pages.
+
+    A search hit's text often starts with site navigation ("What We Do ###
+    GLOBAL BANKING & MARKETS ###"), so its first 200 characters say nothing.
+    Short fragments without a sentence's shape are dropped; if that drops
+    everything, the text is returned as it was.
+    """
+    kept = [
+        part.strip(" |*-") for part in _MENU_SPLIT.split(text)
+        if len(part.split()) >= 6 and any(c.islower() for c in part)
+    ]
+    cleaned = " ".join(" ".join(kept).split())
+    return cleaned or " ".join(text.split())
+
+
+def _find_records(data: Any) -> tuple[list[dict[str, Any]] | None, str, dict[str, Any]]:
+    """The list of records in parsed JSON, where it sits, and the scalar fields beside it."""
+
+    def is_records(value: Any) -> bool:
+        return isinstance(value, list) and bool(value) and all(isinstance(item, dict) for item in value[:50])
+
+    if is_records(data):
+        return data, "the top-level list", {}
+    if not isinstance(data, dict):
+        return None, "", {}
+    best: tuple[str, list[dict[str, Any]], int] | None = None
+    for key, value in data.items():
+        if is_records(value):
+            size = len(json.dumps(value, default=str))
+            if best is None or size > best[2]:
+                best = (key, value, size)
+    others = {
+        k: v for k, v in data.items()
+        if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip()
+    }
+    if best is None:
+        return None, "", others
+    return best[1], f'"{best[0]}"', others
+
+
+def _fit_json_records(content: str, budget: int) -> tuple[str, int, int] | None:
+    """``content`` with every record's long text trimmed evenly to fit ``budget``, or None.
+
+    A search result 16% over the limit used to be replaced by a one-line-per-
+    record preview, 9% of it, and the model treated that as the whole answer
+    (2026-10-12, a 34,884-character result against a 30,000 limit). Trimming
+    each record's text to the same length keeps every record and most of what
+    it says. Returns the fitted JSON, the per-record text cap and the number of
+    records; None when the content is not a list of records or cannot fit even
+    at a few hundred characters a record.
+    """
+    stripped = content.lstrip()
+    if not stripped or stripped[0] not in "[{" or len(content) > 5_000_000:
+        return None
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return None
+    records, _, _ = _find_records(data)
+    if not records:
+        return None
+
+    def fitted(cap: int) -> str:
+        trimmed = []
+        for record in records:
+            copy = dict(record)
+            for key, value in record.items():
+                if isinstance(value, str) and len(value) > cap:
+                    copy[key] = value[:cap] + f" [... {len(value) - cap:,} more characters]"
+            trimmed.append(copy)
+        if records is data:
+            out: Any = trimmed
+        else:
+            out = {k: (trimmed if v is records else v) for k, v in data.items()}
+        return json.dumps(out, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    low, high = 300, max(len(json.dumps(r, default=str)) for r in records)
+    if len(fitted(low)) > budget:
+        return None
+    while low < high:  # the largest cap that still fits
+        mid = (low + high + 1) // 2
+        if len(fitted(mid)) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return fitted(low), low, len(records)
+
+
 def _json_records_preview(content: str, *, budget: int) -> tuple[str, int] | None:
     """A record-by-record preview of JSON holding a list of objects, or None.
 
@@ -62,26 +155,7 @@ def _json_records_preview(content: str, *, budget: int) -> tuple[str, int] | Non
     except ValueError:
         return None
 
-    def is_records(value: Any) -> bool:
-        return isinstance(value, list) and bool(value) and all(isinstance(item, dict) for item in value[:50])
-
-    records: list[dict[str, Any]] | None = None
-    where, others = "the top-level list", {}
-    if is_records(data):
-        records = data
-    elif isinstance(data, dict):
-        best: tuple[str, list[dict[str, Any]], int] | None = None
-        for key, value in data.items():
-            if is_records(value):
-                size = len(json.dumps(value, default=str))
-                if best is None or size > best[2]:
-                    best = (key, value, size)
-        if best is not None:
-            where, records = f'"{best[0]}"', best[1]
-        others = {
-            k: v for k, v in data.items()
-            if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip()
-        }
+    records, where, others = _find_records(data)
     if not records:
         return None
     lines = [f"JSON with {len(records)} records in {where}."]
@@ -95,7 +169,7 @@ def _json_records_preview(content: str, *, budget: int) -> tuple[str, int] | Non
         body = next((record[k] for k in _TEXT_KEYS if isinstance(record.get(k), str) and record[k].strip()), None)
         if body is None:
             body = json.dumps(record, default=str)
-        body = " ".join(body.split())
+        body = _readable(body)
         heading = " | ".join(part[:120] for part in (label, link) if part) or f"record {index}"
         entry = f"{index}. {heading}\n   {body[:per_record]}{'...' if len(body) > per_record else ''}"
         if len("\n".join(lines)) + len(entry) > budget:
@@ -237,8 +311,9 @@ class ConversationMemory:
                 # Errors too: a failing build can print megabytes of stderr, and
                 # an error result is no smaller in the context window.
                 if len(result_content) > self._max_result_chars:
-                    result_content = self._evict_large_result(
-                        call_id, result_content
+                    result_content = (
+                        self._fit_large_result(call_id, result_content)
+                        or self._evict_large_result(call_id, result_content)
                     )
                 block: dict[str, Any] = {
                     "type": "tool_result",
@@ -321,8 +396,18 @@ class ConversationMemory:
                 if (
                     isinstance(block, dict) and block.get("type") == "tool_result"
                     and isinstance(body, str) and len(body) > threshold_chars
-                    and body != CLEARED_TOOL_RESULT and not _SAVED_PATH.search(body[:600])
+                    and body != CLEARED_TOOL_RESULT
+                    and (body.startswith(_FITTED) or not _SAVED_PATH.search(body[:600]))
                 ):
+                    if body.startswith(_FITTED):
+                        # Trimmed to fit, and now too large for the window: spill
+                        # the whole result, which the trimmed copy points at.
+                        saved = _SAVED_PATH.search(body[:600])
+                        try:
+                            with open(saved.group(1)) as f:  # type: ignore[union-attr]
+                                body = f.read()
+                        except (OSError, AttributeError):
+                            pass
                     preview = self._evict_large_result(str(block.get("tool_use_id", "")), body)
                     if len(preview) < len(body):
                         freed += len(body) - len(preview)
@@ -339,6 +424,41 @@ class ConversationMemory:
         much that the read itself is spilled again (``max_result_chars``)."""
         return max(200, min(20_000, self._max_result_chars - 300))
 
+    def _save_result(self, tool_use_id: str, content: str) -> str:
+        """Write a tool result to the eviction directory; ``read_tool_result`` reads it back."""
+        safe_id = tool_use_id.replace("/", "_").replace("..", "_")
+        filepath = os.path.join(self._eviction_dir, f"{safe_id}-{uuid.uuid4().hex}.txt")
+        self._artifact_paths.add(filepath)
+        self._owned_artifact_paths.add(filepath)
+        with open(filepath, "w") as f:
+            f.write(content)
+        return filepath
+
+    def _fit_large_result(self, tool_use_id: str, content: str) -> str | None:
+        """A list of records over the limit, every record's text trimmed to fit, or None.
+
+        The whole result is still saved, so a record cut short can be read in
+        full. Anything else that is too large is evicted to a preview instead.
+        """
+        header_room = 600
+        found = _fit_json_records(content, self._max_result_chars - header_room)
+        if found is None:
+            return None
+        fitted, cap, count = found
+        filepath = self._save_result(tool_use_id, content)
+        logger.info(
+            "Trimmed tool result %s: %d chars -> %d (records cut to %d chars). Saved to %s",
+            tool_use_id, len(content), len(fitted), cap, filepath,
+        )
+        call = f'read_tool_result(result_id="{tool_use_id}"'
+        return (
+            f"{_FITTED} ({len(content):,} chars; every one of the {count} records is here, with any "
+            f"text longer than {cap:,} characters cut short). Full output saved to: {filepath}]\n"
+            f'[A record marked "more characters" continues in the saved copy: {call}, pattern="<words>") '
+            f"finds the passage you need. read_file cannot open this location.]\n\n"
+            f"{fitted}"
+        )
+
     def _evict_large_result(self, tool_use_id: str, content: str) -> str:
         """Save the full result to disk and return a notice the model can act on.
 
@@ -348,12 +468,7 @@ class ConversationMemory:
         by record, so the model sees every record's title and opening rather than
         the first few thousand characters of the first one.
         """
-        safe_id = tool_use_id.replace("/", "_").replace("..", "_")
-        filepath = os.path.join(self._eviction_dir, f"{safe_id}-{uuid.uuid4().hex}.txt")
-        self._artifact_paths.add(filepath)
-        self._owned_artifact_paths.add(filepath)
-        with open(filepath, "w") as f:
-            f.write(content)
+        filepath = self._save_result(tool_use_id, content)
 
         lines = content.splitlines()
         total_lines = len(lines)
@@ -378,10 +493,17 @@ class ConversationMemory:
             if shown < len(content):
                 preview += "\n... [preview truncated]"
                 hidden = f"Not shown: characters {shown + 1:,} to {len(content):,}."
-                follow = f"{call}, char_offset={shown}, max_chars={window})"
+                follow = (
+                    f'{call}, pattern="<regex>") finds passages; '
+                    f"{call}, char_offset={shown}, max_chars={window}) reads on from the preview"
+                )
             else:
                 hidden, follow = "", f"{call})"
         else:
+            # Lines (source, logs, listings): the preview is the head and tail.
+            # Searching is named first. A model paging a 30-file batch 200 lines
+            # at a time read for five turns and still missed what it needed,
+            # where one pattern= read, or grep, would have found it (2026-10-12).
             head = "\n".join(lines[:n])
             tail = "\n".join(lines[-n:])
             omitted = total_lines - (n * 2)
@@ -389,16 +511,24 @@ class ConversationMemory:
             if len(preview) > max_preview_chars:
                 preview = preview[:max_preview_chars] + "\n... [preview truncated]"
             hidden = f"Not shown: lines {n + 1:,} to {total_lines - n:,} of {total_lines:,}."
-            follow = f"{call}, offset={n}, limit=200)"
+            follow = (
+                f'{call}, pattern="<regex>") finds the lines you need; '
+                f"{call}, offset={n}) reads on from the preview, up to {window:,} characters a read"
+            )
 
         logger.info(
             "Evicted tool result %s: %d chars / %d lines -> preview (%d chars). Saved to %s",
             tool_use_id, len(content), total_lines, len(preview), filepath,
         )
         unit = "line" if total_lines == 1 else "lines"
+        # Said whether or not the model means to search again: a preview that
+        # looks complete was taken for the whole result and never read
+        # (2026-10-12, seven sources cited from their titles alone).
+        share = max(1, round(100 * len(preview) / max(1, len(content))))
         guide = (
-            f"[{hidden + ' ' if hidden else ''}Read the rest before searching again for the same "
-            f"information: {follow}. read_file cannot open this location.]"
+            f"[{hidden + ' ' if hidden else ''}The preview below is about {share}% of the result. "
+            f"Read the part you need before you rely on it or cite it: {follow}. "
+            f"read_file cannot open this location.]"
         )
         return (
             f"[Tool result too large ({total_lines:,} {unit}, {len(content):,} chars). "
@@ -425,22 +555,24 @@ class ConversationMemory:
         return path
 
     def read_evicted(
-        self, tool_use_id: str, offset: int = 0, limit: int = 200, *, max_chars: int = 6_000,
+        self, tool_use_id: str, offset: int = 0, limit: int = 2_000, *, max_chars: int = 0,
         char_offset: int = 0, pattern: str = "",
     ) -> str:
         """Return ``limit`` lines of an evicted tool result, starting at line ``offset``.
 
         A section is also capped at ``max_chars`` characters, so a single very
-        long line (minified JSON, a CSV row) is paged with ``char_offset``. With
-        ``pattern`` it returns the passages that match instead. Every reply stays
-        under ``max_result_chars``, so a read is never spilled itself. The
-        result is found by the tool-use id of the call that produced it, so it
-        survives session save and load, where the file moves.
+        long line (minified JSON, a CSV row) is paged with ``char_offset``. The
+        default (0) is the most one read may return: just under
+        ``max_result_chars``, so a result that spilled by a little comes back
+        whole in one read, and a read is never spilled itself. With ``pattern``
+        it returns the passages that match instead. The result is found by the
+        tool-use id of the call that produced it, so it survives session save
+        and load, where the file moves.
         """
         path = self._evicted_path(tool_use_id)
         offset = max(int(offset), 0)
         limit = max(min(int(limit), 2_000), 1)
-        max_chars = max(min(int(max_chars), 50_000, self._read_window()), 200)
+        max_chars = self._read_window() if int(max_chars) <= 0 else max(min(int(max_chars), 50_000, self._read_window()), 200)
         char_offset = max(int(char_offset), 0)
         with open(path, encoding="utf-8", errors="replace") as handle:
             full = handle.read()
