@@ -35,3 +35,5 @@ try:
 except ImportError:
     pass
 
+from .lens import LensExtension  # noqa: F401
+__all__.append("LensExtension")

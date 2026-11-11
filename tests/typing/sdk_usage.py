@@ -8,6 +8,17 @@ from harnessx.extensions.base import ExtensionContext
 from harnessx.hooks import HookContext, HookEvent, Registration
 from harnessx.types import AgentConfig, Limits, RetryPolicy, ToolPolicy
 from harnessx import AgentRuntime, ExportPolicy, IncidentRecorder, Playback, VerificationReport
+from harnessx import LensExtension
+
+
+async def use_lens() -> None:
+    tracing = LensExtension(run_name="Support", session_id="thread-1", auto_flush=False)
+    assert_type(tracing.configured, bool)
+    async with Agent(extensions=[tracing]) as agent:
+        await agent.run("hello")
+        tracing.set_output({"content": "cleaned"})
+        tracing.add_metadata(sources=["a.pdf"])
+        await tracing.flush()
 
 
 async def approve(call: ToolCall, definition: ToolDefinition) -> bool:

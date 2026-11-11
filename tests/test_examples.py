@@ -40,7 +40,10 @@ class TextProvider(LLMProvider):
 @pytest.fixture
 def example_environment(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    for name in ("ANTHROPIC_API_KEY", "LANGSMITH_API_KEY", "LANGCHAIN_API_KEY", "MCP_SERVERS", "TAVILY_API_KEY"):
+    for name in (
+        "ANTHROPIC_API_KEY", "LANGSMITH_API_KEY", "LANGCHAIN_API_KEY", "MCP_SERVERS", "TAVILY_API_KEY",
+        "DATAGOL_LENS_ENABLED", "DATAGOL_LENS_API_KEY", "DATAGOL_LENS_PROJECT_ID",
+    ):
         monkeypatch.setenv(name, "")
     for name in ("LANGSMITH_TRACING", "LANGSMITH_TRACING_V2"):
         monkeypatch.setenv(name, "false")
@@ -83,7 +86,7 @@ def typed(monkeypatch, *lines):
 
 def test_examples_live_in_topic_folders_and_nowhere_else():
     assert [path.name for path in EXAMPLES.glob("*.py")] == []
-    assert len(example_scripts()) == 27
+    assert len(example_scripts()) == 28
 
 
 @pytest.mark.parametrize("path", example_scripts(), ids=lambda p: p.relative_to(EXAMPLES).as_posix())
@@ -437,6 +440,31 @@ async def test_tracing_example_closes_its_agent(example_environment, monkeypatch
     monkeypatch.setattr(example, "LangSmithExtension", LocalTrace)
     await example.main()
     assert "Error:" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_lens_example_sends_one_trace(example_environment, monkeypatch, capsys):
+    import functools
+    import json
+
+    import httpx
+
+    example = load_example("07-quality/tracing_with_lens.py")
+    posted = []
+
+    def lens_server(request):
+        posted.append(json.loads(request.content))
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lens_server))
+    monkeypatch.setattr(example, "LensExtension", functools.partial(
+        example.LensExtension, enabled=True, api_key="key", project_id="proj", http_client=client,
+    ))
+    await example.main()
+    output = capsys.readouterr().out
+    assert "Error:" not in output and "Lens project 'proj'" in output
+    assert len(posted) == 1 and posted[0]["name"] == "Main Assistant"
+    assert posted[0]["session_id"].startswith("demo-")
 
 
 @pytest.mark.asyncio

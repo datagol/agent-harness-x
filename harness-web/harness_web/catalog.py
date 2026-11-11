@@ -283,6 +283,14 @@ EXAMPLES = [
         detail="Requires Anthropic and LangSmith credentials. This example sends run data to your configured LangSmith project.",
     ),
     Example(
+        "tracing_with_lens",
+        "07-quality/tracing_with_lens.py",
+        "Tracing with DataGOL Lens",
+        "Send each turn to DataGOL Lens as one trace with model and tool spans.",
+        "activity",
+        detail="Requires Anthropic and DataGOL Lens credentials. This example sends run data to your configured Lens project.",
+    ),
+    Example(
         "flight_recorder",
         "07-quality/flight_recorder.py",
         "Flight recorder",

@@ -106,6 +106,7 @@ python examples/07-quality/evaluating_with_datasets.py --offline   # needs the l
 | `flight_recorder.py` | A run recorded, exported as an `.hx` bundle, and played back with zero model or tool calls | Nothing; the `--output` file must not exist |
 | `evaluating_with_datasets.py` | A small dataset of tool-selection and arithmetic cases, scored | `harnessx[langsmith]`; live mode `ANTHROPIC_API_KEY` |
 | `tracing_with_langsmith.py` | One run tree per turn in LangSmith, with spans for model and tool calls | `harnessx[langsmith]`, `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY` |
+| `tracing_with_lens.py` | One DataGOL Lens trace per turn, with spans for model and tool calls | `ANTHROPIC_API_KEY`, `DATAGOL_LENS_ENABLED`, `DATAGOL_LENS_API_KEY`, `DATAGOL_LENS_PROJECT_ID` |
 
 ## 08-sandboxes
 
