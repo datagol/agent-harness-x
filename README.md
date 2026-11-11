@@ -1491,6 +1491,37 @@ failures are suppressed, and terminal extension observers are best effort.
 Result middleware can change what the model receives without erasing raw data
 already retained by durable execution or recording.
 
+### Tracing with DataGOL Lens
+
+`LensExtension` sends each turn to a DataGOL Lens project as one trace. The
+trace has an `llm` span for each model call, with the request, the reply,
+tokens and cost from `Limits` pricing, and a `tool` span for each tool call.
+Each span carries its own token breakdown (prompt, completion, cache read and
+write, reasoning), a status and an error. Retries and context condensation
+become `event` spans. A sub-agent that runs inside a tool adds its spans to the
+parent's trace, nested under that tool's span (`parent_id`). `tracing.trace_id`
+is the id Lens stores the trace under, for logging.
+
+```python
+from harnessx import Agent, LensExtension
+
+tracing = LensExtension(run_name="Support Agent", session_id=thread_id, user_id=email)
+async with Agent(extensions=[tracing]) as agent:
+    await agent.run("Where is my order?")
+```
+
+The extension reads `DATAGOL_LENS_ENABLED`, `DATAGOL_LENS_API_URL`,
+`DATAGOL_LENS_API_KEY`, `DATAGOL_LENS_PROJECT_ID` and
+`DATAGOL_LENS_MAX_FIELD_CHARS` (default 8000, 0 for no limit) when the
+matching arguments are not given. Tracing is off unless it is enabled and has a
+key and a project id. The trace is sent in the background when the turn ends,
+within `flush_timeout_seconds`; a failed send is logged as a warning and never
+reaches the run. Closing the agent waits for sends still in progress.
+
+To change the answer before it is sent, for example after cleaning up
+citations, pass `auto_flush=False`, then call `set_output(...)`,
+`add_metadata(...)` and `await tracing.flush()` after the run.
+
 ---
 
 ## 10. MCP servers
@@ -1780,6 +1811,7 @@ side-by-side prompt diffs, and the complete nested execution tree for every turn
 | `harnessx.durable` | module | Runtime, backends, recorder, and their errors in one namespace |
 | `IncidentRecorder` / `ExportPolicy` | `harnessx` | Offline incident playback, verification, and export disclosure |
 | `Extension` / `LangSmithExtension` | `harnessx` | Pluggable runtime extensions / LangSmith tracing |
+| `LensExtension` | `harnessx` | DataGOL Lens tracing: one trace per turn |
 | `evaluate_agent` / `evaluate_agent_async` | `harnessx.evals` | LangSmith evaluation runner, sync and from a running loop |
 | `AgentTarget` | `harnessx.evals` | Target adapter with telemetry & trace linking |
 | `default_evaluators` | `harnessx.evals` | Standard suite of evaluators |
@@ -1821,6 +1853,7 @@ Examples marked "no services" use scripted model responses and run without keys.
 | `07-quality/flight_recorder.py --output incident.hx` | A retried model call, middleware boundaries, and offline playback | No services; unused output path |
 | `07-quality/evaluating_with_datasets.py --offline` | Three scripted evaluations; drop `--offline` for a live model and uploads | `langsmith` extra |
 | `07-quality/tracing_with_langsmith.py` | LangSmith tracing of model and tool calls | `langsmith` extra, Anthropic and LangSmith keys |
+| `07-quality/tracing_with_lens.py` | DataGOL Lens tracing of model and tool calls | Anthropic and DataGOL Lens keys |
 | `08-sandboxes/sandbox_isolation_tiers.py` | Python run in a `Sandbox`; process, docker, or seatbelt tier | Anthropic key; POSIX host |
 | `08-sandboxes/openshell_backend.py` | Tools in an NVIDIA OpenShell sandbox while the agent stays here; changes synced back | `openshell` extra, an OpenShell gateway, Anthropic key |
 | `python harness-web/run.py` | The web workspace that runs every example above and lets you build your own agent in a chat | `server` extra, `npm --prefix harness-web run build`; keys per example |

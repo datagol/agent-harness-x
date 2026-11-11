@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`LensExtension` sends each turn to DataGOL Lens as one trace.** The
+  trace has an `llm` span for each model call (request, reply, tokens, cost
+  from the harness's cache-aware pricing) and a `tool` span for each tool
+  call, keyed by call id. Spans carry their own id, prompt, completion,
+  cache and reasoning tokens, a status and an error. Retries and context
+  condensation become `event` spans, and a sub-agent run from a tool adds
+  its spans to the parent's trace, nested under that tool's span.
+  The trace is sent once, in the background, with a time limit; a failed send
+  is logged and never reaches the run. Configuration falls back to the
+  `DATAGOL_LENS_*` variables that the other DataGOL Lens clients read. No new
+  extra: it uses `httpx`. See `examples/07-quality/tracing_with_lens.py`.
+
 ## [0.9.1] - 2026-10-12
 
 Fixes from the 2026-10-12 benchmark, where HarnessX 0.9.0, the raw Anthropic
