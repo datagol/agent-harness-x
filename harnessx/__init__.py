@@ -22,7 +22,7 @@ from .errors import (
     UnknownExecutionKey,
 )
 from .subagents import SubAgent
-from .extensions import Extension, ExtensionContext, LangSmithExtension, ResultSpillExtension
+from .extensions import Extension, ExtensionContext, LangSmithExtension, LensExtension, ResultSpillExtension
 from .mcp import MCPManager, MCPServerConfig, MCPToolInfo
 from .hooks import HookContext, HookEvent, HookManager, Middleware, MiddlewarePipeline, Registration
 from .memory import (
@@ -107,7 +107,7 @@ __all__ = [
     "PermissionManager", "CliPermissionManager", "GuardrailsEngine",
     # Hooks, middleware, extensions
     "HookManager", "HookEvent", "HookContext", "Registration", "Middleware", "MiddlewarePipeline",
-    "Extension", "ExtensionContext", "LangSmithExtension", "ResultSpillExtension",
+    "Extension", "ExtensionContext", "LangSmithExtension", "LensExtension", "ResultSpillExtension",
     # Skills
     "Skill", "SkillManager",
     # Knowledge (OKF bundles)
